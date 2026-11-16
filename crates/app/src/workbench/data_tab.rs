@@ -134,6 +134,33 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Quick Filter from a cell's context menu: add the condition as a
+    /// new row (replacing a lone, still-empty row) and apply every
+    /// checked row.
+    pub(super) fn quick_filter(
+        &mut self,
+        condition: FilterCondition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy {
+            self.status = "Masih ada operasi berjalan.".to_string();
+            cx.notify();
+            return;
+        }
+        let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
+            return;
+        };
+        let only_empty_row = data.rows.len() == 1 && !data.rows[0].condition(cx).is_complete();
+        if only_empty_row {
+            if let Some(data) = self.data_mut() {
+                data.rows.clear();
+            }
+        }
+        self.add_filter_row(None, Some(condition), window, cx);
+        self.apply_filters(None, cx);
+    }
+
     /// Remove a row; the bar always keeps one, so removing the last row
     /// swaps in a fresh empty one.
     fn remove_filter_row(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -226,7 +253,9 @@ impl Workbench {
         }
         self.push_message(log);
         self.status = format!("Memuat {owner}.{name}...");
-        self.pending_sql = Some(query.sql);
+        // Not recorded in query history: the statement has bind
+        // placeholders, so re-running it from History would fail.
+        self.pending_sql = None;
         self.spawn_db(
             Job::QueryTable {
                 owner,

@@ -8,14 +8,17 @@
 //! page boundaries stay consistent while paging.
 
 use std::cmp::Ordering;
+use std::rc::Rc;
 
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, App, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window,
+    div, px, App, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
+    SharedString, Styled as _, Window,
 };
-use ora_core::{QueryResult, Value};
+use ora_core::{FilterCondition, FilterOp, QueryResult, Value};
 
 use crate::theme::{FONT_GRID, LEADING_GRID};
 
@@ -34,6 +37,65 @@ pub struct ResultsDelegate {
     row_numbers: bool,
     page: usize,
     page_size: usize,
+    /// Table column of the last right mouse-down on a cell: the table's
+    /// context menu only reports the row.
+    right_col: Option<usize>,
+    /// Set on data tabs: called when a Quick Filter menu entry is picked.
+    on_quick_filter: Option<QuickFilterHandler>,
+}
+
+pub type QuickFilterHandler = Rc<dyn Fn(FilterCondition, &mut Window, &mut App)>;
+
+/// Longest cell value shown inside a Quick Filter menu label.
+const MENU_VALUE_CHARS: usize = 32;
+
+/// The Quick Filter entries for one cell, in menu order; `None` is a
+/// separator. A NULL cell only offers the NULL checks (comparing with
+/// NULL never matches).
+pub fn quick_filter_entries(column: &str, value: &Value) -> Vec<Option<(String, FilterCondition)>> {
+    let null_checks = [FilterOp::IsNull, FilterOp::IsNotNull].map(|op| {
+        Some((
+            format!("{column} {}", op.label()),
+            FilterCondition::new(column, op, ""),
+        ))
+    });
+    if value.is_null() {
+        return null_checks.into();
+    }
+    let text = value.display();
+    let mut shown: String = text.chars().take(MENU_VALUE_CHARS).collect();
+    if shown.len() < text.len() {
+        shown.push('…');
+    }
+    let groups: [&[FilterOp]; 4] = [
+        &[
+            FilterOp::Eq,
+            FilterOp::Ne,
+            FilterOp::Lt,
+            FilterOp::Gt,
+            FilterOp::Le,
+            FilterOp::Ge,
+        ],
+        &[FilterOp::Contains, FilterOp::NotContains],
+        &[FilterOp::StartsWith, FilterOp::EndsWith],
+        &[FilterOp::In, FilterOp::NotIn],
+    ];
+    let mut entries = Vec::new();
+    for group in groups {
+        for op in group {
+            let label = match op {
+                FilterOp::In | FilterOp::NotIn => format!("{column} {} ({shown})", op.label()),
+                _ => format!("{column} {} '{shown}'", op.label()),
+            };
+            entries.push(Some((
+                label,
+                FilterCondition::new(column, *op, text.clone()),
+            )));
+        }
+        entries.push(None);
+    }
+    entries.extend(null_checks);
+    entries
 }
 
 /// Whether a database type name is numeric, e.g. "NUMBER(8,2)".
@@ -79,6 +141,8 @@ impl ResultsDelegate {
             row_numbers: false,
             page: 0,
             page_size: PAGE_SIZE,
+            right_col: None,
+            on_quick_filter: None,
         }
     }
 
@@ -92,6 +156,12 @@ impl ResultsDelegate {
     /// Add the row-number gutter as a fixed first column.
     pub fn with_row_numbers(mut self) -> Self {
         self.row_numbers = true;
+        self
+    }
+
+    /// Offer Quick Filter in the cell context menu.
+    pub fn with_quick_filter(mut self, handler: QuickFilterHandler) -> Self {
+        self.on_quick_filter = Some(handler);
         self
     }
 
@@ -227,6 +297,12 @@ impl TableDelegate for ResultsDelegate {
         // digits and codes aligned down a column.
         let cell = div()
             .w_full()
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |table, _, _, _| {
+                    table.delegate_mut().right_col = Some(col_ix);
+                }),
+            )
             .font_family(crate::MONO_FONT_FAMILY)
             .font_features(gpui_kit::FontFeatures::disable_ligatures())
             .text_size(px(FONT_GRID))
@@ -253,6 +329,41 @@ impl TableDelegate for ResultsDelegate {
             c.text_right()
         })
         .child(self.cell_text(abs_row, data_col))
+    }
+
+    fn context_menu(
+        &mut self,
+        row_ix: usize,
+        mut menu: PopupMenu,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> PopupMenu {
+        let Some(handler) = self.on_quick_filter.clone() else {
+            return menu;
+        };
+        let Some(data_col) = self.right_col.and_then(|c| self.data_col(c)) else {
+            return menu;
+        };
+        let abs_row = self.absolute_row(row_ix);
+        let (Some(column), Some(value)) = (
+            self.result.columns.get(data_col),
+            self.result.get(abs_row, data_col),
+        ) else {
+            return menu;
+        };
+        menu = menu.min_w(px(260.)).label("Quick Filter");
+        for entry in quick_filter_entries(&column.name, value) {
+            menu = match entry {
+                None => menu.separator(),
+                Some((label, condition)) => {
+                    let handler = handler.clone();
+                    menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        handler(condition.clone(), window, cx);
+                    }))
+                }
+            };
+        }
+        menu
     }
 
     fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
@@ -400,6 +511,34 @@ mod tests {
         };
         // A by type, B by values, C mixed, D all NULL.
         assert_eq!(numeric_columns(&result), vec![true, true, false, false]);
+    }
+
+    #[test]
+    fn quick_filter_entries_cover_all_operators() {
+        let entries = quick_filter_entries("STATUS", &text("shipped"));
+        let labels: Vec<&str> = entries
+            .iter()
+            .flatten()
+            .map(|(label, _)| label.as_str())
+            .collect();
+        assert_eq!(labels.len(), FilterOp::ALL.len());
+        assert_eq!(labels[0], "STATUS = 'shipped'");
+        assert!(labels.contains(&"STATUS Has prefix 'shipped'"));
+        assert!(labels.contains(&"STATUS NOT IN (shipped)"));
+        assert_eq!(labels[13], "STATUS IS NOT NULL");
+        let (_, eq) = entries[0].as_ref().unwrap();
+        assert_eq!(*eq, FilterCondition::new("STATUS", FilterOp::Eq, "shipped"));
+
+        // NULL cells only get the NULL checks.
+        let nulls = quick_filter_entries("X", &Value::Null);
+        assert_eq!(nulls.len(), 2);
+
+        // Long values are shortened in the label, not in the condition.
+        let long = "a".repeat(100);
+        let entries = quick_filter_entries("C", &text(&long));
+        let (label, condition) = entries[0].as_ref().unwrap();
+        assert!(label.ends_with("…'") && label.len() < 60);
+        assert_eq!(condition.value, long);
     }
 
     #[test]

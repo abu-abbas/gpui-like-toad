@@ -1322,6 +1322,7 @@ impl Workbench {
             return;
         }
         self.add_tab(window, cx);
+        let view = cx.entity().downgrade();
         let tab = self.active_tab_mut();
         tab.title = format!("{owner}.{name}");
         tab.kind = TabKind::Data;
@@ -1329,7 +1330,10 @@ impl Workbench {
         tab.table_state.update(cx, |state, _| {
             *state.delegate_mut() = ResultsDelegate::empty()
                 .with_page_size(DATA_PAGE_SIZE)
-                .with_row_numbers();
+                .with_row_numbers()
+                .with_quick_filter(Rc::new(move |condition, window, cx| {
+                    let _ = view.update(cx, |this, cx| this.quick_filter(condition, window, cx));
+                }));
         });
         self.add_filter_row(None, None, window, cx);
         self.reload_data(cx);
