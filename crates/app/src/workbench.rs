@@ -1836,6 +1836,11 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut main = div().flex().flex_col().flex_1().bg(theme.background);
+        // The tab strip lives at the top of the main column only (right of
+        // the sidebar), above the toolbar — as in the design. No spacer
+        // above the rail/sidebar: the design shares the top row between
+        // the first rail item, the sidebar header, and the tab strip.
+        main = main.child(self.render_tab_bar(theme, cx));
         main = main.child(self.render_toolbar(theme, cx));
         if self.show_home {
             main = main.child(self.render_home(theme, cx));
@@ -2709,7 +2714,6 @@ impl Render for Workbench {
             .text_color(theme.foreground)
             .key_context("Workbench")
             .on_action(cx.listener(|this, _action: &RunQuery, _, cx| this.run(cx)))
-            .child(self.render_tab_bar(&theme, cx))
             .child(
                 div().flex_1().child(
                     h_resizable("main-split")
