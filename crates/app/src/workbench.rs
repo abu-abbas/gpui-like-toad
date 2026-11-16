@@ -7,14 +7,14 @@
 
 use std::sync::mpsc::{Receiver, RecvError};
 
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Editor, EditorState, Input, InputState};
+use gpui_kit::component::list::ListItem;
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::tree::{tree, TreeItem, TreeState};
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::{Button, ListItem};
-use gpui_kit::{
-    div, h_flex, px, v_flex, App, Context, Entity, IntoElement, Render, SharedString, Window,
-};
+use gpui_kit::prelude::*;
+use gpui_kit::{div, px, App, Context, Entity, IntoElement, Render, SharedString, Window};
 use ora_core::export::to_csv;
 use ora_core::sql::clean_statement;
 use ora_core::{ConnectionProfile, DbInfo, QueryResult, SchemaObject, DEFAULT_MAX_ROWS};
@@ -456,14 +456,16 @@ impl Workbench {
     // ----- rendering -----
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut sidebar = v_flex().w(px(280.)).p_2().gap_2();
+        let mut sidebar = div().flex().flex_col().w(px(280.)).p_2().gap_2();
         if let Some(session) = &self.session {
             let mode = if self.demo_mode { " (demo)" } else { "" };
             sidebar = sidebar
                 .child(format!("Connected: {}{mode}", session.user))
                 .child(format!("{} {}", session.database, session.version))
                 .child(
-                    h_flex()
+                    div()
+                        .flex()
+                        .flex_row()
                         .gap_2()
                         .child(
                             Button::new("disconnect")
@@ -487,7 +489,9 @@ impl Workbench {
                 .child("Password")
                 .child(Input::new(&self.password_input).mask_toggle().w_full())
                 .child(
-                    h_flex()
+                    div()
+                        .flex()
+                        .flex_row()
                         .gap_2()
                         .child(
                             Button::new("connect")
@@ -541,7 +545,9 @@ impl Workbench {
                         .child("Jalankan Explain untuk melihat execution plan.")
                         .into_any_element()
                 } else {
-                    v_flex()
+                    div()
+                        .flex()
+                        .flex_col()
                         .flex_1()
                         .p_2()
                         .font_family(crate::MONO_FONT_FAMILY)
@@ -551,7 +557,9 @@ impl Workbench {
             }
             ResultsTab::Messages => {
                 let start = self.messages.len().saturating_sub(MAX_MESSAGES_SHOWN);
-                v_flex()
+                div()
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .p_2()
                     .gap_1()
@@ -573,10 +581,14 @@ impl Render for Workbench {
             .as_ref()
             .map(|r| r.row_count())
             .unwrap_or(0);
-        v_flex()
+        div()
+            .flex()
+            .flex_col()
             .size_full()
             .child(
-                h_flex()
+                div()
+                    .flex()
+                    .flex_row()
                     .gap_2()
                     .p_2()
                     .child(
@@ -608,39 +620,48 @@ impl Render for Workbench {
                     .child(self.status.clone()),
             )
             .child(
-                h_flex().flex_1().child(self.render_sidebar(cx)).child(
-                    v_flex()
-                        .flex_1()
-                        .child(Editor::new(&self.editor).flex_1())
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .p_2()
-                                .child(
-                                    Button::new("tab-results")
-                                        .label(format!("Results ({rows})"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.tab = ResultsTab::Results;
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .child(self.render_sidebar(cx))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .child(Editor::new(&self.editor).flex_1())
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .p_2()
+                                    .child(
+                                        Button::new("tab-results")
+                                            .label(format!("Results ({rows})"))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.tab = ResultsTab::Results;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(Button::new("tab-plan").label("Explain Plan").on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.tab = ResultsTab::Plan;
                                             cx.notify();
-                                        })),
-                                )
-                                .child(Button::new("tab-plan").label("Explain Plan").on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.tab = ResultsTab::Plan;
-                                        cx.notify();
-                                    }),
-                                ))
-                                .child(
-                                    Button::new("tab-messages")
-                                        .label(format!("Messages ({})", self.messages.len()))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.tab = ResultsTab::Messages;
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .child(self.render_results(cx)),
-                ),
+                                        }),
+                                    ))
+                                    .child(
+                                        Button::new("tab-messages")
+                                            .label(format!("Messages ({})", self.messages.len()))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.tab = ResultsTab::Messages;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                            .child(self.render_results(cx)),
+                    ),
             )
     }
 }

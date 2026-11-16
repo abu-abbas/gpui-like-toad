@@ -5,6 +5,7 @@ mod worker;
 
 use std::borrow::Cow;
 
+use gpui_kit::prelude::*;
 use gpui_kit::{application, assets, init, App, WindowOptions};
 
 /// UI font family. Preferred when installed on the system (e.g. alongside a
