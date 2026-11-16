@@ -33,7 +33,8 @@ use ora_core::export::{to_csv, to_xlsx};
 use ora_core::sql::{clean_statement, format_sql};
 use ora_core::store::{self, HistoryEntry, SavedProfile, ThemePreference};
 use ora_core::{
-    ConnectionProfile, DbInfo, ObjectKind, PlanNode, QueryResult, SchemaObject, DEFAULT_MAX_ROWS,
+    compose_easy_connect, parse_easy_connect, ConnectionProfile, DbInfo, ObjectKind, PlanNode,
+    QueryResult, SchemaObject, DEFAULT_MAX_ROWS,
 };
 
 use crate::plan;
@@ -51,6 +52,11 @@ use crate::worker::{DbHandle, ExportFormat, Job, Response};
 actions!(db_explorer, [RunQuery]);
 
 const MAX_MESSAGES: usize = 200;
+
+/// Rows per page in a data tab, where the grid fills the work area.
+const DATA_PAGE_SIZE: usize = 100;
+
+const FORM_INCOMPLETE: &str = "Isi username dan host (atau TNS) dulu.";
 const MAX_MESSAGES_SHOWN: usize = 30;
 
 const WELCOME_SQL: &str = "-- Klik Demo di kiri untuk coba tanpa database,\n\
@@ -157,15 +163,21 @@ pub struct Workbench {
     name_input: Entity<InputState>,
     user_input: Entity<InputState>,
     host_input: Entity<InputState>,
+    port_input: Entity<InputState>,
+    service_input: Entity<InputState>,
+    tns_input: Entity<InputState>,
+    /// Connection dialog mode: separate host/port/service (Basic) or one
+    /// TNS alias / connect descriptor.
+    use_tns: bool,
+    /// Feedback shown inside the connection dialog: (is_error, text).
+    form_notice: Option<(bool, String)>,
     password_input: Entity<InputState>,
     search_input: Entity<InputState>,
     rail: RailPanel,
     profiles: Vec<SavedProfile>,
     editing_profile: Option<usize>,
-    /// Whether the new-connection form is shown while connected. The form
-    /// is always shown while disconnected; once connected it collapses
-    /// until "+" toggles it back. Collapsing never clears the inputs:
-    /// they live on `Workbench` as entities and survive re-render.
+    /// Whether the connection dialog (modal) is open. Closing it never
+    /// clears the inputs: they live on `Workbench` as entities.
     show_connection_form: bool,
     history: Vec<HistoryEntry>,
     theme_pref: ThemePreference,
@@ -204,7 +216,15 @@ impl Workbench {
         let user_input =
             cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Username, mis. HR"));
         let host_input =
-            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("host:1521/service"));
+            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("dbhost.example.com"));
+        let port_input = cx.new(|cx| {
+            InputState::new(&mut *window, cx)
+                .placeholder("1521")
+                .default_value("1521")
+        });
+        let service_input = cx.new(|cx| InputState::new(&mut *window, cx).placeholder("orclpdb"));
+        let tns_input = cx
+            .new(|cx| InputState::new(&mut *window, cx).placeholder("ORCL atau (DESCRIPTION=...)"));
         let password_input = cx.new(|cx| InputState::new(&mut *window, cx).masked(true));
         let search_input =
             cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Filter objects..."));
@@ -224,12 +244,17 @@ impl Workbench {
             name_input,
             user_input,
             host_input,
+            port_input,
+            service_input,
+            tns_input,
+            use_tns: false,
+            form_notice: None,
             password_input,
             search_input,
             rail: RailPanel::Connections,
             profiles: store::load_profiles(),
             editing_profile: None,
-            show_connection_form: true,
+            show_connection_form: false,
             history: store::load_history(),
             theme_pref: theme::preference(cx),
             tabs: vec![first_tab],
@@ -399,10 +424,9 @@ impl Workbench {
             )
         } else {
             let username = Self::input_text(&self.user_input, cx);
-            let connect_string = Self::input_text(&self.host_input, cx);
+            let connect_string = self.form_connect_string(cx);
             if username.is_empty() || connect_string.is_empty() {
-                self.push_message("Isi username dan connect string dulu.".to_string());
-                self.active_tab_mut().results_tab = ResultsTab::Messages;
+                self.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
                 cx.notify();
                 return;
             }
@@ -442,12 +466,13 @@ impl Workbench {
             return;
         }
         let username = Self::input_text(&self.user_input, cx);
-        let connect_string = Self::input_text(&self.host_input, cx);
+        let connect_string = self.form_connect_string(cx);
         if username.is_empty() || connect_string.is_empty() {
-            self.push_message("Isi username dan connect string dulu.".to_string());
+            self.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
             cx.notify();
             return;
         }
+        self.form_notice = None;
         if self.db.is_none() {
             self.db = Some(DbHandle::spawn());
         }
@@ -474,7 +499,7 @@ impl Workbench {
         }
         self.session = None;
         self.demo_mode = false;
-        self.show_connection_form = true;
+        self.show_connection_form = false;
         self.objects.clear();
         self.schemas.clear();
         self.current_schema = None;
@@ -733,6 +758,24 @@ impl Workbench {
 
     // ----- connection manager -----
 
+    /// The connect string the dialog describes: the TNS field as typed,
+    /// or `host:port/service` built from the Basic fields. Empty when the
+    /// required field (TNS text or host) is blank.
+    fn form_connect_string(&self, cx: &App) -> String {
+        if self.use_tns {
+            return Self::input_text(&self.tns_input, cx);
+        }
+        let host = Self::input_text(&self.host_input, cx);
+        if host.is_empty() {
+            return String::new();
+        }
+        compose_easy_connect(
+            &host,
+            &Self::input_text(&self.port_input, cx),
+            &Self::input_text(&self.service_input, cx),
+        )
+    }
+
     fn fill_form(&mut self, profile: &SavedProfile, window: &mut Window, cx: &mut Context<Self>) {
         Self::set_input(&self.name_input.clone(), profile.name.clone(), window, cx);
         Self::set_input(
@@ -741,52 +784,77 @@ impl Workbench {
             window,
             cx,
         );
-        Self::set_input(
-            &self.host_input.clone(),
-            profile.connect_string.clone(),
-            window,
-            cx,
-        );
+        // Easy Connect strings split into the Basic fields; descriptors and
+        // TNS aliases open in TNS mode unchanged.
+        match parse_easy_connect(&profile.connect_string) {
+            Some((host, port, service)) => {
+                self.use_tns = false;
+                Self::set_input(&self.host_input.clone(), host, window, cx);
+                Self::set_input(&self.port_input.clone(), port, window, cx);
+                Self::set_input(&self.service_input.clone(), service, window, cx);
+                Self::set_input(&self.tns_input.clone(), String::new(), window, cx);
+            }
+            None => {
+                self.use_tns = true;
+                Self::set_input(&self.host_input.clone(), String::new(), window, cx);
+                Self::set_input(&self.port_input.clone(), "1521".into(), window, cx);
+                Self::set_input(&self.service_input.clone(), String::new(), window, cx);
+                Self::set_input(
+                    &self.tns_input.clone(),
+                    profile.connect_string.clone(),
+                    window,
+                    cx,
+                );
+            }
+        }
         // Passwords are never stored: always start blank.
         Self::set_input(&self.password_input.clone(), String::new(), window, cx);
     }
 
+    /// Open the connection dialog for a saved profile.
     fn edit_profile(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(profile) = self.profiles.get(ix).cloned() {
             self.editing_profile = Some(ix);
             self.fill_form(&profile, window, cx);
+            self.form_notice = None;
+            self.connect_error = None;
+            self.show_connection_form = true;
             cx.notify();
         }
     }
 
     fn new_profile_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editing_profile = None;
+        self.use_tns = false;
+        self.form_notice = None;
+        self.connect_error = None;
         Self::set_input(&self.name_input.clone(), String::new(), window, cx);
         Self::set_input(&self.user_input.clone(), String::new(), window, cx);
         Self::set_input(&self.host_input.clone(), String::new(), window, cx);
+        Self::set_input(&self.port_input.clone(), "1521".into(), window, cx);
+        Self::set_input(&self.service_input.clone(), String::new(), window, cx);
+        Self::set_input(&self.tns_input.clone(), String::new(), window, cx);
         Self::set_input(&self.password_input.clone(), String::new(), window, cx);
         cx.notify();
     }
 
-    /// "+" in the Connections header: while connected it toggles the
-    /// new-connection form (hidden by default once connected); while
-    /// disconnected the form is always visible, so "+" clears it for a
-    /// fresh profile instead. Toggling never clears typed text.
-    fn toggle_connection_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.session.is_some() {
-            self.show_connection_form = !self.show_connection_form;
-            cx.notify();
-        } else {
-            self.show_connection_form = true;
-            self.new_profile_form(window, cx);
-        }
+    /// "+" / "New connection": open an empty connection dialog.
+    fn open_new_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_profile_form(window, cx);
+        self.show_connection_form = true;
+        cx.notify();
+    }
+
+    fn close_connection_dialog(&mut self, cx: &mut Context<Self>) {
+        self.show_connection_form = false;
+        cx.notify();
     }
 
     fn save_profile(&mut self, cx: &mut Context<Self>) {
         let username = Self::input_text(&self.user_input, cx);
-        let connect_string = Self::input_text(&self.host_input, cx);
+        let connect_string = self.form_connect_string(cx);
         if username.is_empty() || connect_string.is_empty() {
-            self.push_message("Isi username dan connect string dulu.".to_string());
+            self.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
             cx.notify();
             return;
         }
@@ -809,6 +877,7 @@ impl Workbench {
         }
         self.persist_profiles();
         self.push_message("Profil koneksi tersimpan.".to_string());
+        self.form_notice = Some((false, "Profil koneksi tersimpan.".to_string()));
         cx.notify();
     }
 
@@ -919,8 +988,11 @@ impl Workbench {
         let sql = schema::select_all_sql(owner, name);
         self.new_tab_with_sql(sql, window, cx);
         let tab = self.active_tab_mut();
-        tab.title = name.to_string();
+        tab.title = format!("{owner}.{name}");
         tab.kind = TabKind::Data;
+        tab.table_state.update(cx, |state, _| {
+            *state.delegate_mut() = ResultsDelegate::empty().with_page_size(DATA_PAGE_SIZE);
+        });
         self.run(cx);
     }
 
@@ -1105,14 +1177,17 @@ impl Workbench {
             }
             (Some(PendingOp::TestConnect), Response::Tested(outcome)) => match outcome {
                 Ok(info) => {
-                    self.push_message(format!(
+                    let text = format!(
                         "Test koneksi berhasil: {} @ {} ({})",
                         info.user, info.database, info.version
-                    ));
+                    );
+                    self.push_message(text.clone());
+                    self.form_notice = Some((false, text));
                     self.status = "Test koneksi berhasil.".to_string();
                 }
                 Err(message) => {
                     self.push_message(format!("Test koneksi gagal: {message}"));
+                    self.form_notice = Some((true, format!("Test koneksi gagal: {message}")));
                     self.status = "Test koneksi gagal.".to_string();
                 }
             },
@@ -1537,22 +1612,42 @@ impl Workbench {
                 .w(px(28.))
                 .rounded(px(RADIUS_MD))
                 .hover(|this| this.bg(theme.secondary))
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.toggle_connection_form(window, cx)),
-                )
+                .on_click(cx.listener(|this, _, window, cx| this.open_new_connection(window, cx)))
                 .child(icon(IconName::Plus, 16., theme.muted_foreground)),
         );
         panel = panel.child(header);
         panel = panel.child(self.render_session_card(theme, cx));
-        // Navicat-style: the saved connections stay listed while
-        // disconnected; once connected the panel belongs to the explorer
-        // and "+" brings the list and form back.
-        if self.session.is_none() || self.show_connection_form {
-            panel = panel.child(self.render_profile_list(theme, cx));
-            panel = panel.child(self.render_connection_form(theme, cx));
-        }
+        // Navicat-style: saved connections are listed while disconnected
+        // (click one to open its dialog); once connected the panel belongs
+        // to the explorer. New/edit connection happens in a modal.
         if self.session.is_some() {
             panel = panel.child(self.render_explorer(theme, cx));
+        } else {
+            panel = panel.child(self.render_profile_list(theme, cx));
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(SPACE_2))
+                    .px(px(SPACE_3))
+                    .pt(px(SPACE_3))
+                    .child(
+                        Button::new("side-new-connection")
+                            .label("New connection")
+                            .icon(IconName::Plus)
+                            .primary()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_new_connection(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("demo")
+                            .label("Demo")
+                            .icon(IconName::Play)
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
+                    ),
+            );
         }
         panel
     }
@@ -1567,7 +1662,7 @@ impl Workbench {
                 .px(px(SPACE_3))
                 .pt(px(SPACE_3))
                 .child(caption_text(
-                    "Not connected. Fill in the form or try Demo mode.".to_string(),
+                    "Not connected. Pick a connection or try Demo.".to_string(),
                     theme,
                 ))
                 .into_any_element();
@@ -1709,78 +1804,246 @@ impl Workbench {
         list.into_any_element()
     }
 
-    fn render_connection_form(
+    /// The New/Edit connection dialog, drawn as a modal over the whole
+    /// window (scrim + centered card).
+    fn render_connection_dialog(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut form = div()
+        let field = |label: &str, input: &Entity<InputState>| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_1))
+                .child(form_label(label, theme))
+                .child(Input::new(input).w_full())
+        };
+        let mode_button = |id: &'static str, label: &'static str, tns: bool| {
+            let active = self.use_tns == tns;
+            let mut b = div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_1()
+                .h(px(28.))
+                .rounded(px(RADIUS_SM))
+                .text_size(px(FONT_LABEL))
+                .font_weight(FontWeight::MEDIUM)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.use_tns = tns;
+                    cx.notify();
+                }))
+                .child(label);
+            if active {
+                b = b
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_color(theme.foreground);
+            } else {
+                b = b.text_color(theme.muted_foreground);
+            }
+            b
+        };
+        let title = if self.editing_profile.is_some() {
+            "Edit connection"
+        } else {
+            "New connection"
+        };
+        let mut body = div()
             .flex()
             .flex_col()
-            .gap(px(SPACE_2))
-            .p(px(SPACE_3))
-            .child(form_label(
-                if self.editing_profile.is_some() {
-                    "Edit connection"
-                } else {
-                    "New connection"
-                },
-                theme,
-            ))
-            .child(Input::new(&self.name_input).w_full())
-            .child(Input::new(&self.user_input).w_full())
-            .child(Input::new(&self.host_input).w_full())
-            .child(Input::new(&self.password_input).mask_toggle().w_full())
+            .gap(px(SPACE_3))
+            .p(px(SPACE_4))
+            .child(field("Connection name", &self.name_input))
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap(px(SPACE_2))
-                    .child(
-                        Button::new("connect")
-                            .label("Connect")
-                            .icon(IconName::Database)
-                            .primary()
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.connect(false, cx))),
-                    )
-                    .child(
-                        Button::new("test-connect")
-                            .label("Test")
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.test_connection(cx))),
-                    )
-                    .child(
-                        Button::new("demo")
-                            .label("Demo")
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
+                    .p(px(2.))
+                    .gap(px(2.))
+                    .rounded(px(RADIUS_MD))
+                    .bg(theme.secondary)
+                    .child(mode_button("conn-mode-basic", "Basic", false))
+                    .child(mode_button("conn-mode-tns", "TNS", true)),
+            );
+        if self.use_tns {
+            body = body.child(field("TNS alias / connect descriptor", &self.tns_input));
+        } else {
+            body = body
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(SPACE_2))
+                        .child(div().flex_1().child(field("Host", &self.host_input)))
+                        .child(div().w(px(96.)).child(field("Port", &self.port_input))),
+                )
+                .child(field("Service name", &self.service_input));
+        }
+        body = body.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(SPACE_2))
+                .child(div().flex_1().child(field("Username", &self.user_input)))
+                .child(
+                    div().flex_1().child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(SPACE_1))
+                            .child(form_label("Password", theme))
+                            .child(Input::new(&self.password_input).mask_toggle().w_full()),
                     ),
+                ),
+        );
+        let notice = self
+            .connect_error
+            .clone()
+            .map(|e| (true, e))
+            .or_else(|| self.form_notice.clone());
+        if let Some((is_error, text)) = notice {
+            body = body.child(
+                div()
+                    .p(px(SPACE_2))
+                    .rounded(px(RADIUS_SM))
+                    .text_size(px(FONT_CAPTION))
+                    .line_height(px(LEADING_CAPTION))
+                    .text_color(if is_error {
+                        theme.danger
+                    } else {
+                        theme.success
+                    })
+                    .border_1()
+                    .border_color(if is_error {
+                        theme.danger
+                    } else {
+                        theme.success
+                    })
+                    .child(text),
+            );
+        } else {
+            body = body.child(caption_text(
+                "Password tidak pernah disimpan; diisi setiap connect.".to_string(),
+                theme,
+            ));
+        }
+        let mut footer = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(SPACE_2))
+            .px(px(SPACE_4))
+            .py(px(SPACE_3))
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                Button::new("test-connect")
+                    .label("Test")
+                    .disabled(self.busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.test_connection(cx))),
             )
             .child(
-                div().flex().flex_row().gap(px(SPACE_2)).child(
-                    Button::new("save-profile")
-                        .label("Save profile")
-                        .icon(IconName::Save)
-                        .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
-                ),
+                Button::new("save-profile")
+                    .label("Save")
+                    .icon(IconName::Save)
+                    .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
             );
-        if self.editing_profile.is_some() {
-            let ix = self.editing_profile.unwrap();
-            form = form.child(
-                div().flex().flex_row().child(
-                    Button::new("remove-profile")
-                        .label("Remove profile")
-                        .icon(IconName::Trash)
-                        .danger()
-                        .on_click(cx.listener(move |this, _, _, cx| this.remove_profile(ix, cx))),
-                ),
+        if let Some(ix) = self.editing_profile {
+            footer = footer.child(
+                Button::new("remove-profile")
+                    .icon(IconName::Trash)
+                    .danger()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.remove_profile(ix, cx);
+                        this.close_connection_dialog(cx);
+                    })),
             );
         }
-        form.child(caption_text(
-            "Passwords are never saved; they are entered per connect.".to_string(),
-            theme,
-        ))
+        footer = footer
+            .child(div().flex_1())
+            .child(
+                Button::new("cancel-connect")
+                    .label("Cancel")
+                    .on_click(cx.listener(|this, _, _, cx| this.close_connection_dialog(cx))),
+            )
+            .child(
+                Button::new("connect")
+                    .label(
+                        if self.busy && matches!(self.pending_op, Some(PendingOp::Connect)) {
+                            "Connecting…"
+                        } else {
+                            "Connect"
+                        },
+                    )
+                    .icon(IconName::Database)
+                    .primary()
+                    .disabled(self.busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.connect(false, cx))),
+            );
+        let card = div()
+            .id("connection-dialog")
+            .flex()
+            .flex_col()
+            .w(px(480.))
+            .rounded(px(RADIUS_MD))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .shadow_lg()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .px(px(SPACE_4))
+                    .h(px(48.))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(icon(IconName::Database, 18., theme.primary))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(FONT_BODY))
+                            .line_height(px(LEADING_BODY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .id("connection-dialog-close")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(28.))
+                            .rounded(px(RADIUS_MD))
+                            .hover(|this| this.bg(theme.secondary))
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.close_connection_dialog(cx)),
+                            )
+                            .child(icon(IconName::X, 16., theme.muted_foreground)),
+                    ),
+            )
+            .child(body)
+            .child(footer);
+        div()
+            .id("connection-dialog-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui_kit::hsla(0., 0., 0., 0.45))
+            // Swallow clicks so nothing under the modal reacts.
+            .occlude()
+            .child(card)
     }
 
     /// Toad-style object browser: schema dropdown, category tabs, filter
@@ -1815,45 +2078,35 @@ impl Workbench {
                 menu
             });
 
-        let mut chips = div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap(px(SPACE_1))
-            .px(px(SPACE_3));
-        for category in ObjectCategory::ALL {
-            let active = self.category == category;
-            let count = schema::count_in(&self.objects, category);
-            let mut chip = div()
-                .id(format!("category-{}", category.label()))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(SPACE_1))
-                .h(px(24.))
-                .px(px(SPACE_2))
-                .rounded(px(RADIUS_SM))
-                .border_1()
-                .text_size(px(FONT_CAPTION))
-                .line_height(px(LEADING_CAPTION))
-                .font_weight(FontWeight::MEDIUM)
-                .on_click(cx.listener(move |this, _, _, cx| this.select_category(category, cx)));
-            if active {
-                chip = chip
-                    .bg(theme.primary)
-                    .border_color(theme.primary)
-                    .text_color(theme.primary_foreground);
-            } else {
-                chip = chip
-                    .border_color(theme.border)
-                    .text_color(theme.muted_foreground)
-                    .hover(|this| this.bg(theme.secondary));
-            }
-            chips = chips.child(
-                chip.child(category.label())
-                    .child(div().opacity(0.75).child(count.to_string())),
-            );
-        }
+        let view = cx.entity();
+        let counts: Vec<(ObjectCategory, usize)> = ObjectCategory::ALL
+            .iter()
+            .map(|c| (*c, schema::count_in(&self.objects, *c)))
+            .collect();
+        let current_category = self.category;
+        let category_button = Button::new("category-select")
+            .label(format!(
+                "{} ({})",
+                current_category.label(),
+                schema::count_in(&self.objects, current_category)
+            ))
+            .icon(IconName::ChevronsUpDown)
+            .w_full()
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu.min_w(px(220.));
+                for (category, count) in &counts {
+                    let category = *category;
+                    let view = view.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(format!("{} ({count})", category.label()))
+                            .checked(category == current_category)
+                            .on_click(move |_, _, cx: &mut App| {
+                                view.update(cx, |this, cx| this.select_category(category, cx));
+                            }),
+                    );
+                }
+                menu
+            });
 
         let visible: Vec<ObjectRef> =
             schema::objects_in(&self.objects, self.category, &self.tree_filter)
@@ -1922,10 +2175,19 @@ impl Workbench {
                     .items_center()
                     .gap(px(SPACE_2))
                     .px(px(SPACE_3))
-                    .child(form_label("Schema", theme))
+                    .child(div().w(px(52.)).child(form_label("Schema", theme)))
                     .child(div().flex_1().child(schema_button)),
             )
-            .child(chips)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .px(px(SPACE_3))
+                    .child(div().w(px(52.)).child(form_label("Objects", theme)))
+                    .child(div().flex_1().child(category_button)),
+            )
             .child(
                 div()
                     .px(px(SPACE_3))
@@ -2172,6 +2434,26 @@ impl Workbench {
         main = main.child(self.render_toolbar(theme, cx));
         if self.show_home {
             main = main.child(self.render_home(theme, cx));
+        } else if self.active_tab().kind != TabKind::Query {
+            // Toad-style object tabs: the data grid (or the script) fills
+            // the work area, with info and errors in a strip below.
+            let top = if self.active_tab().kind == TabKind::Data {
+                self.render_data_grid(theme, cx).into_any_element()
+            } else {
+                self.render_editor().into_any_element()
+            };
+            main = main.child(
+                div().flex_1().child(
+                    v_resizable("object-split")
+                        .child(resizable_panel().child(top))
+                        .child(
+                            resizable_panel()
+                                .size(px(150.))
+                                .size_range(px(80.)..px(400.))
+                                .child(self.render_info_panel(theme)),
+                        ),
+                ),
+            );
         } else {
             main = main.child(
                 div().flex_1().child(
@@ -2206,31 +2488,52 @@ impl Workbench {
             .bg(theme.background)
             .border_b_1()
             .border_color(theme.border);
+        let data_tab = !on_home && self.active_tab().kind == TabKind::Data;
         bar = bar
+            // Like Navicat's "New Query" / Toad's "Editor": always opens a
+            // fresh SQL editor tab, from any tab including Home.
+            .child(
+                Button::new("new-sql")
+                    .label("New SQL")
+                    .icon(IconName::SquarePen)
+                    .tooltip("Buka tab SQL editor baru")
+                    .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx))),
+            )
+            .child(div().w(px(1.)).h(px(20.)).bg(theme.border))
             .child(
                 Button::new("run")
-                    .label("Run")
-                    .icon(IconName::Play)
+                    .label(if data_tab { "Refresh" } else { "Run" })
+                    .icon(if data_tab {
+                        IconName::RefreshCw
+                    } else {
+                        IconName::Play
+                    })
                     .primary()
                     .loading(self.busy)
                     .disabled(on_home || no_session)
                     .tooltip("Run (Cmd/Ctrl+Enter atau F5)")
                     .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
             )
-            .child(
-                Button::new("explain")
-                    .label("Explain")
-                    .icon(IconName::ChartColumn)
-                    .disabled(on_home || no_session || self.busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.explain(cx))),
-            )
-            .child(
-                Button::new("format")
-                    .label("Format")
-                    .icon(IconName::WandSparkles)
-                    .disabled(on_home)
-                    .on_click(cx.listener(|this, _, window, cx| this.format_editor(window, cx))),
-            )
+            .when(!data_tab, |bar| {
+                bar.child(
+                    Button::new("explain")
+                        .label("Explain")
+                        .icon(IconName::ChartColumn)
+                        .disabled(on_home || no_session || self.busy)
+                        .on_click(cx.listener(|this, _, _, cx| this.explain(cx))),
+                )
+            })
+            .when(!data_tab, |bar| {
+                bar.child(
+                    Button::new("format")
+                        .label("Format")
+                        .icon(IconName::WandSparkles)
+                        .disabled(on_home)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.format_editor(window, cx)),
+                        ),
+                )
+            })
             .child(
                 Button::new("stop")
                     .label("Stop")
@@ -2289,6 +2592,120 @@ impl Workbench {
                 )
                 .child(icon(IconName::ChevronDown, 14., theme.muted_foreground)),
         )
+    }
+
+    /// Full-area grid of a data tab, with pagination under it.
+    fn render_data_grid(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tab = self.active_tab();
+        let grid = if tab.last_result.is_some() {
+            div()
+                .flex_1()
+                .child(
+                    DataTable::new(&tab.table_state)
+                        .stripe(true)
+                        .bordered(true)
+                        .small()
+                        .header_row_height(px(GRID_ROW_HEIGHT)),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(empty_state_text(
+                    if self.busy {
+                        "Memuat data...".to_string()
+                    } else {
+                        "Tidak ada data. Lihat Info di bawah untuk error.".to_string()
+                    },
+                    theme,
+                ))
+                .into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .child(div().flex().flex_col().flex_1().child(grid))
+            .child(self.render_pagination(theme, cx))
+    }
+
+    /// Info strip under a data/script tab: what the tab shows, then the
+    /// latest messages with errors highlighted.
+    fn render_info_panel(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
+        let tab = self.active_tab();
+        let mut summary = tab.title.clone();
+        if let Some(result) = &tab.last_result {
+            summary.push_str(&format!(
+                " · {} kolom · {} baris",
+                result.columns.len(),
+                result.row_count()
+            ));
+            if result.truncated {
+                summary.push_str(&format!(" (dibatasi {DEFAULT_MAX_ROWS})"));
+            }
+        }
+        if let Some(ms) = tab.elapsed_ms {
+            summary.push_str(&format!(" · {ms} ms"));
+        }
+        let start = self.messages.len().saturating_sub(MAX_MESSAGES_SHOWN);
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(theme.background)
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .h(px(SUB_TAB_HEIGHT))
+                    .px(px(SPACE_3))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(icon(IconName::Info, 14., theme.muted_foreground))
+                    .child(
+                        div()
+                            .text_size(px(FONT_LABEL))
+                            .line_height(px(LEADING_LABEL))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child("Info"),
+                    )
+                    .child(caption_text(summary, theme)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .id("info-messages")
+                    .overflow_y_scroll()
+                    .px(px(SPACE_3))
+                    .py(px(SPACE_2))
+                    .child(div().flex().flex_col().gap(px(SPACE_1)).children(
+                        self.messages[start..].iter().rev().map(|m| {
+                            div()
+                                .text_size(px(FONT_LABEL))
+                                .line_height(px(LEADING_LABEL))
+                                .text_color(if is_error_message(m) {
+                                    theme.danger
+                                } else {
+                                    theme.foreground
+                                })
+                                .child(m.clone())
+                        }),
+                    )),
+            )
     }
 
     fn render_editor(&self) -> impl IntoElement {
@@ -2558,11 +2975,18 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tab = self.active_tab();
-        let (first, last, total, current, total_pages) = {
+        let (first, last, total, current, total_pages, page_size) = {
             let state = tab.table_state.read(cx);
             let delegate = state.delegate();
             let (first, last, total) = delegate.page_range();
-            (first, last, total, delegate.page(), delegate.total_pages())
+            (
+                first,
+                last,
+                total,
+                delegate.page(),
+                delegate.total_pages(),
+                delegate.page_size(),
+            )
         };
         let mut row = div()
             .flex()
@@ -2659,7 +3083,7 @@ impl Workbench {
             .child(
                 div()
                     .pl(px(SPACE_4))
-                    .child(caption_text("10 / page".to_string(), theme)),
+                    .child(caption_text(format!("{page_size} / page"), theme)),
             )
     }
 
@@ -2925,12 +3349,8 @@ impl Workbench {
                             .icon(IconName::LogIn)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 // Passwords are never stored: open the
-                                // filled form so the user types it.
-                                this.rail = RailPanel::Connections;
-                                this.editing_profile = Some(ix);
-                                this.show_connection_form = true;
-                                this.fill_form(&profile, window, cx);
-                                cx.notify();
+                                // filled dialog so the user types it.
+                                this.edit_profile(ix, window, cx);
                             })),
                     ),
             );
@@ -2947,9 +3367,7 @@ impl Workbench {
                         .label("Create")
                         .icon(IconName::Plus)
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.rail = RailPanel::Connections;
-                            this.show_connection_form = true;
-                            this.new_profile_form(window, cx);
+                            this.open_new_connection(window, cx);
                         })),
                 ),
         );
@@ -3092,25 +3510,34 @@ impl Render for Workbench {
             .text_color(theme.foreground)
             .key_context("Workbench")
             .on_action(cx.listener(|this, _action: &RunQuery, _, cx| this.run(cx)))
+            .relative()
             .child(
-                div().flex_1().child(
-                    h_resizable("main-split")
-                        .child(
-                            resizable_panel()
-                                .fixed()
-                                .size(px(RAIL_WIDTH))
-                                .child(self.render_rail(&theme, cx)),
-                        )
-                        .child(
-                            resizable_panel()
-                                .size(px(SIDE_PANEL_WIDTH))
-                                .size_range(px(220.)..px(440.))
-                                .child(self.render_side_panel(&theme, cx)),
-                        )
-                        .child(resizable_panel().child(self.render_main(&theme, cx))),
-                ),
+                // The rail sits outside the resizable group: as a fixed
+                // panel it was padded up to the group's minimum panel
+                // width, leaving an empty strip next to it.
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_row()
+                    .min_h(px(0.))
+                    .child(self.render_rail(&theme, cx))
+                    .child(
+                        div().flex_1().min_w(px(0.)).child(
+                            h_resizable("main-split")
+                                .child(
+                                    resizable_panel()
+                                        .size(px(SIDE_PANEL_WIDTH))
+                                        .size_range(px(220.)..px(440.))
+                                        .child(self.render_side_panel(&theme, cx)),
+                                )
+                                .child(resizable_panel().child(self.render_main(&theme, cx))),
+                        ),
+                    ),
             )
             .child(self.render_status_bar(&theme))
+            .when(self.show_connection_form, |this| {
+                this.child(self.render_connection_dialog(&theme, cx))
+            })
     }
 }
 
@@ -3263,6 +3690,17 @@ fn empty_state_text(text: String, theme: &gpui_kit::component::Theme) -> gpui_ki
         .line_height(px(LEADING_LABEL))
         .text_color(theme.muted_foreground)
         .child(text)
+}
+
+/// Messages are plain strings; ORA-/driver errors and Indonesian failure
+/// texts ("gagal") are shown in the danger color in the Info strip.
+fn is_error_message(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    message.contains("ORA-")
+        || message.contains("DPY-")
+        || lower.contains("error")
+        || lower.contains("gagal")
+        || lower.starts_with("demo:")
 }
 
 fn unix_stamp() -> u64 {

@@ -222,6 +222,54 @@ impl PlanNode {
     }
 }
 
+/// Default Oracle listener port.
+pub const DEFAULT_PORT: u16 = 1521;
+
+/// Build an Easy Connect string `host:port/service` from separate fields.
+/// The port defaults to 1521 when blank; the service part is omitted when
+/// blank (the listener's default service).
+pub fn compose_easy_connect(host: &str, port: &str, service: &str) -> String {
+    let host = host.trim();
+    let port = port.trim();
+    let service = service.trim();
+    let port = if port.is_empty() {
+        DEFAULT_PORT.to_string()
+    } else {
+        port.to_string()
+    };
+    if service.is_empty() {
+        format!("{host}:{port}")
+    } else {
+        format!("{host}:{port}/{service}")
+    }
+}
+
+/// Split an Easy Connect string back into `(host, port, service)`, for
+/// editing a saved profile. Returns `None` for anything else (connect
+/// descriptors, TNS aliases), which the form keeps as a raw TNS string.
+pub fn parse_easy_connect(s: &str) -> Option<(String, String, String)> {
+    let s = s.trim().trim_start_matches("//");
+    if s.is_empty() || s.contains('(') || s.contains(' ') {
+        return None;
+    }
+    let (addr, service) = match s.split_once('/') {
+        Some((addr, service)) => (addr, service),
+        None => (s, ""),
+    };
+    let (host, port) = match addr.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+            (host, port.to_string())
+        }
+        // A bare word without port or service is a TNS alias.
+        None if !service.is_empty() => (addr, DEFAULT_PORT.to_string()),
+        _ => return None,
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((host.to_string(), port, service.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +289,30 @@ mod tests {
         let shown = Value::Bytes(vec![0xab; 64]).display();
         assert!(shown.starts_with("0xABAB"));
         assert!(shown.ends_with("(64 bytes)"));
+    }
+
+    #[test]
+    fn easy_connect_compose_and_parse_round_trip() {
+        assert_eq!(
+            compose_easy_connect(" dbdev ", "", "orclpdb"),
+            "dbdev:1521/orclpdb"
+        );
+        assert_eq!(compose_easy_connect("h", "1522", ""), "h:1522");
+        assert_eq!(
+            parse_easy_connect("dbdev:1521/orclpdb"),
+            Some(("dbdev".into(), "1521".into(), "orclpdb".into()))
+        );
+        assert_eq!(
+            parse_easy_connect("dbdev/orclpdb"),
+            Some(("dbdev".into(), "1521".into(), "orclpdb".into()))
+        );
+        assert_eq!(
+            parse_easy_connect("h:1522"),
+            Some(("h".into(), "1522".into(), String::new()))
+        );
+        assert_eq!(parse_easy_connect("ORCL_ALIAS"), None);
+        assert_eq!(parse_easy_connect("(DESCRIPTION=(ADDRESS=(HOST=h)))"), None);
+        assert_eq!(parse_easy_connect(""), None);
     }
 
     #[test]

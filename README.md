@@ -9,19 +9,21 @@ Semacam Toad for Oracle, tapi ditulis ulang di Rust dengan [gpui-kit](https://gp
 ![Explorer ala Toad dengan klik kanan](docs/screenshots/context-menu.png)
 
 - **Layar awal ala Navicat** — tab Home berisi tile koneksi (Demo, profil tersimpan, New connection) dan riwayat query terakhir.
-- **Connection manager** — form koneksi (nama, username, connect string, password), profil tersimpan, Test, dan mode **Demo** yang jalan tanpa database sama sekali.
-- **Explorer ala Toad** — dropdown schema (`ALL_USERS`), tab kategori objek (Tables, Views, Indexes, Sequences, Procs, Triggers, Synonyms) dengan jumlahnya, kotak filter, dan daftar objek datar yang divirtualisasi.
-  - **Double klik** table/view → buka tab data baru (`SELECT *` dibatasi 1.000 baris). Double klik objek lain → View Script.
+- **Connection manager** — dialog modal New/Edit connection dengan Host, Port, dan Service name terpisah (atau mode TNS untuk alias/descriptor), Test, Save, dan mode **Demo** yang jalan tanpa database sama sekali.
+- **Explorer ala Toad** — dropdown schema (`ALL_USERS`), dropdown jenis objek (default Tables; Views, Indexes, Sequences, Procs, Triggers, Synonyms), kotak filter, dan daftar objek datar yang divirtualisasi.
+  - **Double klik** table/view → tab data baru: grid penuh (100 baris per halaman, maks 1.000), panel Info di bawah untuk ringkasan dan error, tanpa editor SQL. Double klik objek lain → View Script.
   - **Klik kanan** → Open Data, Describe, **View Script** (DDL lewat `DBMS_METADATA.GET_DDL`, terbuka di tab baru), **Export Data** (CSV/XLSX seluruh tabel, maks 100.000 baris, lewat dialog Save), **Import Data** (CSV, header dicocokkan ke nama kolom, tidak auto-commit).
-- **SQL editor** — syntax highlighting SQL, nomor baris, folding, multi tab, Format. Run (Ctrl/Cmd+Enter, F5) untuk SELECT maupun DML/DDL/PL/SQL.
+- **SQL editor** — tombol **New SQL** di toolbar membuka tab editor baru. Syntax highlighting SQL, nomor baris, folding, multi tab, Format. Run (Ctrl/Cmd+Enter, F5) untuk SELECT maupun DML/DDL/PL/SQL.
 - **Result grid** — virtual scrolling, pagination, kolom bisa di-resize, klik header untuk sort. Hasil dibatasi 1.000 baris dan UI-nya bilang kalau terpotong.
 - **Export hasil query** — CSV/XLSX dari grid ke working directory.
 - **Explain plan** — tree plan + teks `DBMS_XPLAN.DISPLAY`.
 - **Commit / Rollback** — eksplisit, tidak ada auto-commit.
 
-| Home | Tab data | View Script |
+| Home | New connection | Tab data |
 |---|---|---|
-| ![Home](docs/screenshots/home.png) | ![Data](docs/screenshots/data-tab.png) | ![DDL](docs/screenshots/view-script.png) |
+| ![Home](docs/screenshots/home.png) | ![Dialog koneksi](docs/screenshots/connection-dialog.png) | ![Data](docs/screenshots/data-tab.png) |
+| **Jenis objek** | **View Script** | |
+| ![Dropdown objek](docs/screenshots/object-dropdown.png) | ![DDL](docs/screenshots/view-script.png) | |
 
 Screenshot diambil dari mode Demo di Xvfb (Linux, render Vulkan software).
 
@@ -108,7 +110,7 @@ Revisi di-pin ke commit yang diverifikasi tanggal tersebut (`26.0.0-beta.7`, pre
 
 Yang sudah dibuktikan mesin (bukan klaim):
 
-- `cargo test --workspace` hijau (ora-core 43, app 11, ora-driver 4 test), termasuk round-trip export → import CSV lewat worker dengan backend demo.
+- `cargo test --workspace` hijau (ora-core 44, app 11, ora-driver 4 test), termasuk round-trip export → import CSV lewat worker dengan backend demo.
 - `cargo clippy -p ora-core -p ora-driver --all-targets -- -D warnings` hijau.
 - GUI terkompilasi dan dijalankan di Linux (Xvfb + Vulkan software); screenshot di `docs/screenshots/` diambil dari build itu dalam mode Demo.
 - Belum diuji ke Oracle sungguhan: `list_schemas` (`ALL_USERS`) dan `object_ddl` (`DBMS_METADATA.GET_DDL`) di `ora-driver` baru terbukti kompil. Import memakai INSERT literal per baris, jadi kolom DATE bergantung pada `NLS_DATE_FORMAT` session.
