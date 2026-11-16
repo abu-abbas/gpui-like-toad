@@ -2277,37 +2277,53 @@ impl Workbench {
             theme,
             cx,
         ));
-        for page in page_window(current, total_pages) {
-            let active = page == current;
-            let mut button = div()
-                .id(format!("page-{page}"))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .h(px(24.))
-                .w(px(24.))
-                .rounded(px(RADIUS_SM))
-                .on_click(cx.listener(move |this, _, _, cx| this.goto_page(page, cx)));
-            if active {
-                button = button.bg(theme.primary);
-            } else {
-                button = button.hover(|this| this.bg(theme.secondary));
+        for item in page_items(current, total_pages) {
+            match item {
+                PageItem::Gap => {
+                    row = row.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_center()
+                            .h(px(24.))
+                            .w(px(24.))
+                            .child(caption_text("…".to_string(), theme)),
+                    );
+                }
+                PageItem::Page(page) => {
+                    let active = page == current;
+                    let mut button = div()
+                        .id(format!("page-{page}"))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
+                        .h(px(24.))
+                        .w(px(24.))
+                        .rounded(px(RADIUS_SM))
+                        .on_click(cx.listener(move |this, _, _, cx| this.goto_page(page, cx)));
+                    if active {
+                        button = button.bg(theme.primary);
+                    } else {
+                        button = button.hover(|this| this.bg(theme.secondary));
+                    }
+                    row = row.child(
+                        button.child(
+                            div()
+                                .text_size(px(FONT_LABEL))
+                                .line_height(px(LEADING_LABEL))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(if active {
+                                    theme.primary_foreground
+                                } else {
+                                    theme.foreground
+                                })
+                                .child(format!("{}", page + 1)),
+                        ),
+                    );
+                }
             }
-            row = row.child(
-                button.child(
-                    div()
-                        .text_size(px(FONT_LABEL))
-                        .line_height(px(LEADING_LABEL))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(if active {
-                            theme.primary_foreground
-                        } else {
-                            theme.foreground
-                        })
-                        .child(format!("{}", page + 1)),
-                ),
-            );
         }
         row = row.child(self.render_page_nav(
             "next",
@@ -2796,19 +2812,44 @@ fn export_xlsx_filename(stamp: u64) -> String {
     format!("gpui-like-toad-export-{stamp}.xlsx")
 }
 
-/// Page-number window for the pagination row: at most 5 pages, centered on
-/// the current page when possible. Pages are 0-based.
-fn page_window(current: usize, total: usize) -> Vec<usize> {
+/// One slot in the numbered pagination row: a clickable page or an
+/// ellipsis gap between the pinned first/last pages and the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageItem {
+    Page(usize),
+    Gap,
+}
+
+/// Numbered pagination with pinned first/last pages and ellipsis gaps:
+/// at most 5 window pages, centered on the current page when possible.
+/// Pages are 0-based.
+fn page_items(current: usize, total: usize) -> Vec<PageItem> {
     const WINDOW: usize = 5;
     if total == 0 {
         return Vec::new();
     }
-    let start = if total <= WINDOW {
-        0
-    } else {
-        current.saturating_sub(2).min(total - WINDOW)
-    };
-    (start..(start + WINDOW).min(total)).collect()
+    if total <= WINDOW + 2 {
+        return (0..total).map(PageItem::Page).collect();
+    }
+    let start = current.saturating_sub(2).min(total - WINDOW);
+    let end = start + WINDOW;
+    let mut items = Vec::new();
+    if start > 0 {
+        items.push(PageItem::Page(0));
+        if start > 1 {
+            items.push(PageItem::Gap);
+        }
+    }
+    for page in start..end {
+        items.push(PageItem::Page(page));
+    }
+    if end < total {
+        if end < total - 1 {
+            items.push(PageItem::Gap);
+        }
+        items.push(PageItem::Page(total - 1));
+    }
+    items
 }
 
 #[cfg(test)]
@@ -2829,13 +2870,50 @@ mod tests {
     }
 
     #[test]
-    fn page_window_centers_and_clamps() {
-        assert!(page_window(0, 0).is_empty());
-        assert_eq!(page_window(0, 1), vec![0]);
-        assert_eq!(page_window(0, 3), vec![0, 1, 2]);
-        assert_eq!(page_window(0, 9), vec![0, 1, 2, 3, 4]);
-        assert_eq!(page_window(4, 9), vec![2, 3, 4, 5, 6]);
-        assert_eq!(page_window(8, 9), vec![4, 5, 6, 7, 8]);
-        assert_eq!(page_window(99, 9), vec![4, 5, 6, 7, 8]);
+    fn page_items_pin_first_last_with_ellipsis() {
+        use PageItem::{Gap, Page};
+        assert!(page_items(0, 0).is_empty());
+        assert_eq!(page_items(0, 1), vec![Page(0)]);
+        assert_eq!(page_items(0, 3), vec![Page(0), Page(1), Page(2)]);
+        assert_eq!(
+            page_items(0, 7),
+            vec![Page(0), Page(1), Page(2), Page(3), Page(4), Page(5), Page(6)]
+        );
+        assert_eq!(
+            page_items(0, 9),
+            vec![Page(0), Page(1), Page(2), Page(3), Page(4), Gap, Page(8)]
+        );
+        assert_eq!(
+            page_items(4, 9),
+            vec![
+                Page(0),
+                Gap,
+                Page(2),
+                Page(3),
+                Page(4),
+                Page(5),
+                Page(6),
+                Gap,
+                Page(8)
+            ]
+        );
+        assert_eq!(
+            page_items(8, 9),
+            vec![Page(0), Gap, Page(4), Page(5), Page(6), Page(7), Page(8)]
+        );
+        assert_eq!(page_items(99, 9), page_items(8, 9));
+        assert_eq!(
+            page_items(3, 8),
+            vec![
+                Page(0),
+                Page(1),
+                Page(2),
+                Page(3),
+                Page(4),
+                Page(5),
+                Gap,
+                Page(7)
+            ]
+        );
     }
 }
