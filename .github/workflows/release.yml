@@ -1,0 +1,151 @@
+# Build biner rilis dari main lalu terbitkan ke repo publik
+# `gpui-like-toad-releases` (pola yang sama dengan rilis APK Sistem Akademis).
+# Versi: 0.1.<run_number>. Rilis lama di repo rilis dipangkas (sisakan 5 terakhir).
+# Biner belum ditandatangani (code signing menyusul); Windows SmartScreen
+# akan menampilkan peringatan saat pertama kali menjalankan .exe-nya.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: ['crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/release.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASES_REPO: abu-abbas/gpui-like-toad-releases
+  KEEP_RELEASES: 5
+  VERSION: 0.1.${{ github.run_number }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suffix: linux-x86_64
+            ext: ""
+          - os: windows-latest
+            suffix: windows-x86_64
+            ext: ".exe"
+          - os: macos-latest
+            suffix: macos-arm64
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+    steps:
+      - name: Cek secret
+        id: gate
+        shell: bash
+        run: |
+          if [ -z "$RELEASES_TOKEN" ]; then
+            echo "::warning::Secret RELEASES_TOKEN belum diisi; rilis dilewati."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.gate.outputs.ready == 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - if: steps.gate.outputs.ready == 'true' && runner.os == 'Linux'
+        name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ clang libfontconfig-dev libwayland-dev \
+            libwebkit2gtk-4.1-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libssl-dev libzstd-dev libasound2-dev vulkan-validationlayers libvulkan1 pkg-config
+      - if: steps.gate.outputs.ready == 'true'
+        name: Toolchain Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - if: steps.gate.outputs.ready == 'true'
+        name: Pulihkan cache Cargo
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - if: steps.gate.outputs.ready == 'true'
+        name: Sematkan nomor versi
+        shell: python
+        run: |
+          import pathlib
+          p = pathlib.Path("crates/app/Cargo.toml")
+          s = p.read_text()
+          updated = s.replace('version = "0.1.0"', 'version = "${{ env.VERSION }}"', 1)
+          assert updated != s, "version line not found"
+          p.write_text(updated)
+          print([line for line in updated.splitlines() if line.startswith("version")])
+      - if: steps.gate.outputs.ready == 'true'
+        name: Build biner rilis
+        run: cargo build --locked --release -p gpui-like-toad
+      - if: steps.gate.outputs.ready == 'true'
+        name: Smoke test --version dan siapkan artifact
+        shell: bash
+        run: |
+          bin="target/release/gpui-like-toad${{ matrix.ext }}"
+          out="gpui-like-toad-$VERSION-${{ matrix.suffix }}${{ matrix.ext }}"
+          "$bin" --version
+          test "$("$bin" --version)" = "gpui-like-toad $VERSION"
+          mkdir -p out
+          cp "$bin" "out/$out"
+          ls -la out/
+      - if: steps.gate.outputs.ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: binary-${{ matrix.suffix }}
+          path: out/
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+    steps:
+      - name: Cek secret
+        id: gate
+        run: |
+          if [ -z "$RELEASES_TOKEN" ]; then
+            echo "::warning::Secret RELEASES_TOKEN belum diisi; rilis dilewati."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.gate.outputs.ready == 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - if: steps.gate.outputs.ready == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: binary-*
+          path: out
+          merge-multiple: true
+      - if: steps.gate.outputs.ready == 'true'
+        name: Terbitkan ke repo rilis dan pangkas rilis lama
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          ls -la out/
+          test "$(ls out/* | wc -l)" -eq 3
+          notes=$(git log -n 15 --no-merges --pretty='- %s' -- crates | head -15)
+          gh release create "v$VERSION" out/* \
+            --repo "$RELEASES_REPO" --title "gpui-like-toad $VERSION" \
+            --notes "Dibangun dari ${{ github.sha }}"$'\n\n'"$notes" --latest
+          # Pangkas: sisakan KEEP_RELEASES terbaru, hapus sisanya beserta tag.
+          gh release list --repo "$RELEASES_REPO" --limit 100 --json tagName --jq '.[].tagName' \
+            | tail -n +$((KEEP_RELEASES + 1)) \
+            | while read -r tag; do gh release delete "$tag" --repo "$RELEASES_REPO" --cleanup-tag --yes; done

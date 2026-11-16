@@ -1,0 +1,14 @@
+[package]
+name = "ora-driver"
+version = "0.1.0"
+description = "Thin Oracle driver implementation of ora-core's DbClient (official rust-oracledb, no Oracle Client install)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ora-core = { path = "../ora-core" }
+# Pinned git revision: every `oracledb` version on crates.io is yanked as of
+# 2026-11-16 (the independent crate is being handed over to Oracle), so the
+# official repo is currently the only source. Revision verified 2026-11-16.
+oracledb = { git = "https://github.com/oracle/rust-oracledb", rev = "b1adfff18b7240bfbe82b5148c0f114c6471feb6" }

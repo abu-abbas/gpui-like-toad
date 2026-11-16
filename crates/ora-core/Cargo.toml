@@ -1,0 +1,11 @@
+[package]
+name = "ora-core"
+version = "0.1.0"
+description = "Headless Oracle workbench core: client trait, result model, demo backend, CSV export, SQL helpers"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Intentionally dependency-free: this crate must stay fast to check and test
+# on any machine, including CI and low-memory VMs.

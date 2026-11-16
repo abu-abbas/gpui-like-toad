@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/ora-core", "crates/ora-driver", "crates/app"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+rust-version = "1.92"
+
+# From the gpui-kit installation guide: optimize the framework crates in dev
+# builds so the app stays responsive while application code keeps debug info.
+[profile.dev.package]
+gpui-pre = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+gpui-kit = { opt-level = 3 }
+gpui-kit-assets = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }

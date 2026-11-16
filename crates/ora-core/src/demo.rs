@@ -1,0 +1,445 @@
+use std::time::Instant;
+
+use crate::client::{DbClient, DbError, DbInfo};
+use crate::model::{
+    ColumnDef, ColumnInfo, ConnectionProfile, ObjectKind, QueryResult, SchemaObject, Value,
+};
+
+/// In-memory fake Oracle used by Demo mode and by tests.
+///
+/// It answers a small fixed catalog (HR-style `EMPLOYEES` / `DEPARTMENTS`)
+/// so the whole GUI — connect, schema tree, run, grid, explain, export — can
+/// be exercised with no database at all. Unknown tables are an error that
+/// names the demo catalog, so demo behavior never looks like a real result.
+pub struct DemoClient {
+    connected_user: Option<String>,
+}
+
+impl DemoClient {
+    pub fn new() -> Self {
+        DemoClient {
+            connected_user: None,
+        }
+    }
+
+    fn require_connected(&self) -> Result<(), DbError> {
+        if self.connected_user.is_some() {
+            Ok(())
+        } else {
+            Err(DbError::new("demo: not connected"))
+        }
+    }
+}
+
+impl Default for DemoClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn employees_result(max_rows: usize) -> QueryResult {
+    let columns = vec![
+        ColumnInfo {
+            name: "EMPLOYEE_ID".into(),
+            data_type: "NUMBER".into(),
+        },
+        ColumnInfo {
+            name: "FIRST_NAME".into(),
+            data_type: "VARCHAR2(20)".into(),
+        },
+        ColumnInfo {
+            name: "LAST_NAME".into(),
+            data_type: "VARCHAR2(25)".into(),
+        },
+        ColumnInfo {
+            name: "EMAIL".into(),
+            data_type: "VARCHAR2(25)".into(),
+        },
+        ColumnInfo {
+            name: "HIRE_DATE".into(),
+            data_type: "DATE".into(),
+        },
+        ColumnInfo {
+            name: "SALARY".into(),
+            data_type: "NUMBER(8,2)".into(),
+        },
+        ColumnInfo {
+            name: "COMMISSION_PCT".into(),
+            data_type: "NUMBER(2,2)".into(),
+        },
+    ];
+    let rows = vec![
+        vec![
+            Value::Integer(100),
+            Value::Text("Steven".into()),
+            Value::Text("King".into()),
+            Value::Text("SKING".into()),
+            Value::Text("17-JUN-2003".into()),
+            Value::Integer(24000),
+            Value::Null,
+        ],
+        vec![
+            Value::Integer(101),
+            Value::Text("Neena".into()),
+            Value::Text("Kochhar".into()),
+            Value::Text("NKOCHHAR".into()),
+            Value::Text("21-SEP-2005".into()),
+            Value::Integer(17000),
+            Value::Null,
+        ],
+        vec![
+            Value::Integer(102),
+            Value::Text("Lex".into()),
+            Value::Text("De Haan".into()),
+            Value::Text("LDEHAAN".into()),
+            Value::Text("13-JAN-2001".into()),
+            Value::Integer(17000),
+            Value::Null,
+        ],
+        vec![
+            Value::Integer(145),
+            Value::Text("John".into()),
+            Value::Text("Russell".into()),
+            Value::Text("JRUSSEL".into()),
+            Value::Text("01-OCT-2004".into()),
+            Value::Integer(14000),
+            Value::Float(0.4),
+        ],
+        vec![
+            Value::Integer(146),
+            Value::Text("Karen".into()),
+            Value::Text("Partners".into()),
+            Value::Text("KPARTNER".into()),
+            Value::Text("05-JAN-2005".into()),
+            Value::Integer(13500),
+            Value::Float(0.3),
+        ],
+        vec![
+            Value::Integer(147),
+            Value::Text("Alberto".into()),
+            Value::Text("Errazuriz".into()),
+            Value::Text("AERRAZUR".into()),
+            Value::Text("10-MAR-2005".into()),
+            Value::Integer(12000),
+            Value::Float(0.3),
+        ],
+    ];
+    finish(columns, rows, max_rows)
+}
+
+fn departments_result(max_rows: usize) -> QueryResult {
+    let columns = vec![
+        ColumnInfo {
+            name: "DEPARTMENT_ID".into(),
+            data_type: "NUMBER(4)".into(),
+        },
+        ColumnInfo {
+            name: "DEPARTMENT_NAME".into(),
+            data_type: "VARCHAR2(30)".into(),
+        },
+        ColumnInfo {
+            name: "LOCATION_ID".into(),
+            data_type: "NUMBER(4)".into(),
+        },
+    ];
+    let rows = vec![
+        vec![
+            Value::Integer(10),
+            Value::Text("Administration".into()),
+            Value::Integer(1700),
+        ],
+        vec![
+            Value::Integer(20),
+            Value::Text("Marketing".into()),
+            Value::Integer(1800),
+        ],
+        vec![
+            Value::Integer(30),
+            Value::Text("Purchasing".into()),
+            Value::Integer(1700),
+        ],
+        vec![
+            Value::Integer(40),
+            Value::Text("Human Resources".into()),
+            Value::Integer(2400),
+        ],
+    ];
+    finish(columns, rows, max_rows)
+}
+
+fn dual_result(max_rows: usize) -> QueryResult {
+    let columns = vec![ColumnInfo {
+        name: "USER".into(),
+        data_type: "VARCHAR2(128)".into(),
+    }];
+    let rows = vec![vec![Value::Text("DEMO".into())]];
+    finish(columns, rows, max_rows)
+}
+
+fn finish(columns: Vec<ColumnInfo>, rows: Vec<Vec<Value>>, max_rows: usize) -> QueryResult {
+    let truncated = rows.len() > max_rows;
+    let rows = rows.into_iter().take(max_rows).collect();
+    QueryResult {
+        columns,
+        rows,
+        truncated,
+        elapsed: Default::default(),
+    }
+}
+
+impl DbClient for DemoClient {
+    fn connect(&mut self, profile: &ConnectionProfile, _password: &str) -> Result<DbInfo, DbError> {
+        if profile.username.trim().is_empty() {
+            return Err(DbError::new("demo: username is required"));
+        }
+        let user = profile.username.trim().to_ascii_uppercase();
+        self.connected_user = Some(user.clone());
+        Ok(DbInfo {
+            user,
+            database: "DEMO".into(),
+            version: "Demo database (no Oracle connection)".into(),
+        })
+    }
+
+    fn disconnect(&mut self) {
+        self.connected_user = None;
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected_user.is_some()
+    }
+
+    fn query(&mut self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError> {
+        self.require_connected()?;
+        let started = Instant::now();
+        let lowered = sql.to_ascii_lowercase();
+        let mut result = if lowered.contains("from employees") {
+            employees_result(max_rows)
+        } else if lowered.contains("from departments") {
+            departments_result(max_rows)
+        } else if lowered.contains("dual") {
+            dual_result(max_rows)
+        } else {
+            return Err(DbError::new(
+                "demo: unknown table in query (demo catalog: EMPLOYEES, DEPARTMENTS, DUAL)",
+            ));
+        };
+        result.elapsed = started.elapsed();
+        Ok(result)
+    }
+
+    fn execute(&mut self, sql: &str) -> Result<u64, DbError> {
+        self.require_connected()?;
+        let kind = crate::sql::statement_kind(sql);
+        match kind {
+            crate::sql::StatementKind::Select => {
+                Err(DbError::new("demo: use query() for SELECT statements"))
+            }
+            crate::sql::StatementKind::Empty => Err(DbError::new("demo: empty statement")),
+            _ => Ok(1),
+        }
+    }
+
+    fn commit(&mut self) -> Result<(), DbError> {
+        self.require_connected()
+    }
+
+    fn rollback(&mut self) -> Result<(), DbError> {
+        self.require_connected()
+    }
+
+    fn list_objects(&mut self, owner: &str) -> Result<Vec<SchemaObject>, DbError> {
+        self.require_connected()?;
+        let owner = owner.trim().to_ascii_uppercase();
+        let catalog = [
+            ("EMPLOYEES", ObjectKind::Table),
+            ("DEPARTMENTS", ObjectKind::Table),
+            ("EMP_DETAILS_VIEW", ObjectKind::View),
+            ("EMP_SEQ", ObjectKind::Sequence),
+            ("GIVE_RAISE", ObjectKind::Procedure),
+        ];
+        Ok(catalog
+            .into_iter()
+            .map(|(name, kind)| SchemaObject {
+                owner: owner.clone(),
+                name: name.to_string(),
+                kind,
+            })
+            .collect())
+    }
+
+    fn describe_table(&mut self, _owner: &str, name: &str) -> Result<Vec<ColumnDef>, DbError> {
+        self.require_connected()?;
+        let name = name.trim().to_ascii_uppercase();
+        let cols: &[(&str, &str, bool)] = match name.as_str() {
+            "EMPLOYEES" => &[
+                ("EMPLOYEE_ID", "NUMBER(6)", false),
+                ("FIRST_NAME", "VARCHAR2(20)", true),
+                ("LAST_NAME", "VARCHAR2(25)", false),
+                ("EMAIL", "VARCHAR2(25)", false),
+                ("HIRE_DATE", "DATE", false),
+                ("SALARY", "NUMBER(8,2)", true),
+                ("COMMISSION_PCT", "NUMBER(2,2)", true),
+            ],
+            "DEPARTMENTS" => &[
+                ("DEPARTMENT_ID", "NUMBER(4)", false),
+                ("DEPARTMENT_NAME", "VARCHAR2(30)", false),
+                ("LOCATION_ID", "NUMBER(4)", true),
+            ],
+            "EMP_DETAILS_VIEW" => &[
+                ("EMPLOYEE_ID", "NUMBER(6)", false),
+                ("FIRST_NAME", "VARCHAR2(20)", true),
+                ("LAST_NAME", "VARCHAR2(25)", false),
+                ("DEPARTMENT_NAME", "VARCHAR2(30)", true),
+            ],
+            _ => return Err(DbError::new(format!("demo: no such table or view: {name}"))),
+        };
+        Ok(cols
+            .iter()
+            .map(|(name, data_type, nullable)| ColumnDef {
+                name: name.to_string(),
+                data_type: data_type.to_string(),
+                nullable: *nullable,
+                default: None,
+            })
+            .collect())
+    }
+
+    fn explain_plan(&mut self, sql: &str) -> Result<Vec<String>, DbError> {
+        self.require_connected()?;
+        let _ = sql;
+        Ok(vec![
+            "Plan hash value: 1234567890 (demo plan)".to_string(),
+            String::new(),
+            "--------------------------------------------------------------------------------"
+                .to_string(),
+            "| Id  | Operation         | Name      | Rows  | Bytes | Cost (%CPU)| Time     |"
+                .to_string(),
+            "--------------------------------------------------------------------------------"
+                .to_string(),
+            "|   0 | SELECT STATEMENT  |           |     6 |   402 |     3   (0)| 00:00:01 |"
+                .to_string(),
+            "|   1 |  TABLE ACCESS FULL| EMPLOYEES |     6 |   402 |     3   (0)| 00:00:01 |"
+                .to_string(),
+            "--------------------------------------------------------------------------------"
+                .to_string(),
+        ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connected() -> DemoClient {
+        let mut client = DemoClient::new();
+        client
+            .connect(
+                &ConnectionProfile {
+                    name: "demo".into(),
+                    username: "demo".into(),
+                    connect_string: "demo".into(),
+                },
+                "",
+            )
+            .unwrap();
+        client
+    }
+
+    #[test]
+    fn demo_query_returns_employees_and_honors_cap() {
+        let mut client = connected();
+        let full = client.query("SELECT * FROM employees", 100).unwrap();
+        assert_eq!(full.row_count(), 6);
+        assert!(!full.truncated);
+        assert_eq!(full.columns[0].name, "EMPLOYEE_ID");
+        assert_eq!(full.get(0, 0), Some(&Value::Integer(100)));
+        assert_eq!(full.get(0, 6), Some(&Value::Null));
+
+        let capped = client.query("SELECT * FROM employees", 2).unwrap();
+        assert_eq!(capped.row_count(), 2);
+        assert!(capped.truncated);
+    }
+
+    #[test]
+    fn demo_query_rejects_unknown_tables() {
+        let mut client = connected();
+        let err = client.query("SELECT * FROM nope", 10).unwrap_err();
+        assert!(err.0.contains("EMPLOYEES"), "{err}");
+    }
+
+    #[test]
+    fn demo_requires_connection() {
+        let mut client = DemoClient::new();
+        assert!(client.query("SELECT * FROM dual", 10).is_err());
+        assert!(!client.is_connected());
+    }
+
+    #[test]
+    fn demo_execute_commit_rollback_cycle() {
+        let mut client = connected();
+        assert_eq!(
+            client.execute("UPDATE employees SET salary = 1").unwrap(),
+            1
+        );
+        assert!(client.execute("SELECT * FROM employees").is_err());
+        assert!(client.execute("").is_err());
+        assert!(client.commit().is_ok());
+        assert!(client.rollback().is_ok());
+        client.disconnect();
+        assert!(!client.is_connected());
+        assert!(client.commit().is_err());
+        assert!(client.execute("UPDATE employees SET salary = 1").is_err());
+    }
+
+    #[test]
+    fn demo_list_objects_and_describe() {
+        let mut client = connected();
+        let objects = client.list_objects("hr").unwrap();
+        assert_eq!(objects.len(), 5);
+        assert!(objects.iter().all(|o| o.owner == "HR"));
+        let cols = client.describe_table("HR", "employees").unwrap();
+        assert_eq!(cols.len(), 7);
+        assert_eq!(cols[0].name, "EMPLOYEE_ID");
+        assert!(!cols[0].nullable);
+        assert!(cols[1].nullable);
+        let err = client.describe_table("HR", "nope").unwrap_err();
+        assert!(err.0.contains("NOPE"), "{err}");
+    }
+
+    #[test]
+    fn demo_connect_requires_username_and_uppercases() {
+        let mut client = DemoClient::new();
+        let err = client
+            .connect(
+                &ConnectionProfile {
+                    name: "demo".into(),
+                    username: "  ".into(),
+                    connect_string: "demo".into(),
+                },
+                "",
+            )
+            .unwrap_err();
+        assert!(err.0.contains("username"), "{err}");
+        let info = client
+            .connect(
+                &ConnectionProfile {
+                    name: "demo".into(),
+                    username: "demo".into(),
+                    connect_string: "demo".into(),
+                },
+                "",
+            )
+            .unwrap();
+        assert_eq!(info.user, "DEMO");
+        assert_eq!(info.database, "DEMO");
+    }
+
+    #[test]
+    fn demo_explain_returns_plan_lines() {
+        let mut client = connected();
+        let plan = client.explain_plan("SELECT * FROM employees").unwrap();
+        assert!(!plan.is_empty());
+        assert!(plan[0].contains("Plan hash"), "{}", plan[0]);
+    }
+}
