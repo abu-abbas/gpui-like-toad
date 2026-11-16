@@ -11,33 +11,35 @@
 //! [`Workbench::stop`]).
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvError};
 
 use gpui_kit::actions;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
-use gpui_kit::component::list::ListItem;
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::table::{DataTable, TableState};
-use gpui_kit::component::tree::{tree, TreeItem, TreeState};
 use gpui_kit::component::{
     h_resizable, resizable_panel, v_resizable, ActiveTheme as _, Disableable as _, Icon,
     Sizable as _,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, relative, App, ClickEvent, Context, Entity, FontWeight, Hsla, IntoElement, Render,
-    SharedString, Subscription, Window,
+    div, px, relative, uniform_list, AnyWindowHandle, App, ClickEvent, Context, Entity, FontWeight,
+    Hsla, IntoElement, PathPromptOptions, Render, Subscription, UniformListScrollHandle, Window,
 };
 use ora_core::export::{to_csv, to_xlsx};
 use ora_core::sql::{clean_statement, format_sql};
 use ora_core::store::{self, HistoryEntry, SavedProfile, ThemePreference};
-use ora_core::{ConnectionProfile, DbInfo, PlanNode, QueryResult, SchemaObject, DEFAULT_MAX_ROWS};
+use ora_core::{
+    compose_easy_connect, parse_easy_connect, ConnectionProfile, DbInfo, ObjectKind, PlanNode,
+    QueryResult, SchemaObject, DEFAULT_MAX_ROWS,
+};
 
 use crate::plan;
 use crate::results::ResultsDelegate;
-use crate::schema;
+use crate::schema::{self, ObjectCategory};
 use crate::theme::{
     self, FONT_BODY, FONT_CAPTION, FONT_HEADING_MD, FONT_HEADING_XL, FONT_LABEL, FONT_RAIL,
     GRID_ROW_HEIGHT, LEADING_BODY, LEADING_CAPTION, LEADING_HEADING_MD, LEADING_HEADING_XL,
@@ -45,11 +47,16 @@ use crate::theme::{
     RAIL_BUTTON_HEIGHT, RAIL_WIDTH, SIDE_PANEL_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6,
     STATUS_BAR_HEIGHT, SUB_TAB_HEIGHT, TAB_BAR_HEIGHT, TOOLBAR_HEIGHT, TREE_ROW_HEIGHT,
 };
-use crate::worker::{DbHandle, Job, Response};
+use crate::worker::{DbHandle, ExportFormat, Job, Response};
 
 actions!(db_explorer, [RunQuery]);
 
 const MAX_MESSAGES: usize = 200;
+
+/// Rows per page in a data tab, where the grid fills the work area.
+const DATA_PAGE_SIZE: usize = 100;
+
+const FORM_INCOMPLETE: &str = "Isi username dan host (atau TNS) dulu.";
 const MAX_MESSAGES_SHOWN: usize = 30;
 
 const WELCOME_SQL: &str = "-- Klik Demo di kiri untuk coba tanpa database,\n\
@@ -77,16 +84,49 @@ enum PendingOp {
     TestConnect,
     Run,
     Explain,
+    ListSchemas,
     ListObjects,
     Describe { owner: String, name: String },
+    Ddl { owner: String, name: String },
+    ExportTable { owner: String, name: String },
+    ImportCsv { owner: String, name: String },
     Commit,
     Rollback,
+}
+
+/// What a work-area tab holds; only changes its icon and default title.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TabKind {
+    Query,
+    /// Opened by double-clicking a table/view in the explorer.
+    Data,
+    /// DDL from the explorer's "View Script".
+    Script,
+}
+
+/// The connection last opened from this window, kept after disconnect so
+/// the sidebar can still show it (red) and offer Connect / Edit.
+#[derive(Clone)]
+struct LastConnection {
+    profile: ConnectionProfile,
+    demo: bool,
+    /// Index into the saved profiles, when it was opened from one.
+    profile_ix: Option<usize>,
+}
+
+/// The explorer object a context-menu action applies to.
+#[derive(Clone)]
+struct ObjectRef {
+    owner: String,
+    name: String,
+    kind: ObjectKind,
 }
 
 /// One query tab: its own editor, grid, last result, and plan.
 struct QueryTab {
     id: u64,
     title: String,
+    kind: TabKind,
     editor: Entity<EditorState>,
     table_state: Entity<TableState<ResultsDelegate>>,
     last_result: Option<QueryResult>,
@@ -116,6 +156,7 @@ impl QueryTab {
         QueryTab {
             id,
             title,
+            kind: TabKind::Query,
             editor,
             table_state,
             last_result: None,
@@ -132,15 +173,21 @@ pub struct Workbench {
     name_input: Entity<InputState>,
     user_input: Entity<InputState>,
     host_input: Entity<InputState>,
+    port_input: Entity<InputState>,
+    service_input: Entity<InputState>,
+    tns_input: Entity<InputState>,
+    /// Connection dialog mode: separate host/port/service (Basic) or one
+    /// TNS alias / connect descriptor.
+    use_tns: bool,
+    /// Feedback shown inside the connection dialog: (is_error, text).
+    form_notice: Option<(bool, String)>,
     password_input: Entity<InputState>,
     search_input: Entity<InputState>,
     rail: RailPanel,
     profiles: Vec<SavedProfile>,
     editing_profile: Option<usize>,
-    /// Whether the new-connection form is shown while connected. The form
-    /// is always shown while disconnected; once connected it collapses
-    /// until "+" toggles it back. Collapsing never clears the inputs:
-    /// they live on `Workbench` as entities and survive re-render.
+    /// Whether the connection dialog (modal) is open. Closing it never
+    /// clears the inputs: they live on `Workbench` as entities.
     show_connection_form: bool,
     history: Vec<HistoryEntry>,
     theme_pref: ThemePreference,
@@ -156,7 +203,16 @@ pub struct Workbench {
     pending_sql: Option<String>,
     op_generation: u64,
     connect_error: Option<String>,
-    tree_state: Entity<TreeState>,
+    last_connection: Option<LastConnection>,
+    /// Tab (by id) that the in-flight operation writes its result into, so
+    /// switching tabs mid-query never lands the result in the wrong tab.
+    pending_tab: Option<u64>,
+    window_handle: AnyWindowHandle,
+    schemas: Vec<String>,
+    current_schema: Option<String>,
+    category: ObjectCategory,
+    selected_object: Option<String>,
+    object_scroll: UniformListScrollHandle,
     objects: Vec<SchemaObject>,
     tree_filter: String,
     messages: Vec<String>,
@@ -171,11 +227,18 @@ impl Workbench {
         let user_input =
             cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Username, mis. HR"));
         let host_input =
-            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("host:1521/service"));
+            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("dbhost.example.com"));
+        let port_input = cx.new(|cx| {
+            InputState::new(&mut *window, cx)
+                .placeholder("1521")
+                .default_value("1521")
+        });
+        let service_input = cx.new(|cx| InputState::new(&mut *window, cx).placeholder("orclpdb"));
+        let tns_input = cx
+            .new(|cx| InputState::new(&mut *window, cx).placeholder("ORCL atau (DESCRIPTION=...)"));
         let password_input = cx.new(|cx| InputState::new(&mut *window, cx).masked(true));
         let search_input =
-            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Search schemas..."));
-        let tree_state = cx.new(|cx| TreeState::new(cx).items(Vec::<TreeItem>::new()));
+            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Filter objects..."));
         let first_tab = QueryTab::new(1, "Query 1".to_string(), WELCOME_SQL, window, cx);
 
         // Rebuild the tree on every keystroke in the search box.
@@ -192,17 +255,23 @@ impl Workbench {
             name_input,
             user_input,
             host_input,
+            port_input,
+            service_input,
+            tns_input,
+            use_tns: false,
+            form_notice: None,
             password_input,
             search_input,
             rail: RailPanel::Connections,
             profiles: store::load_profiles(),
             editing_profile: None,
-            show_connection_form: true,
+            show_connection_form: false,
             history: store::load_history(),
             theme_pref: theme::preference(cx),
             tabs: vec![first_tab],
             active_tab: 0,
-            show_home: false,
+            // Start on the Navicat-style Home page.
+            show_home: true,
             next_tab_id: 1,
             db: None,
             session: None,
@@ -212,7 +281,14 @@ impl Workbench {
             pending_sql: None,
             op_generation: 0,
             connect_error: None,
-            tree_state,
+            last_connection: None,
+            pending_tab: None,
+            window_handle: window.window_handle(),
+            schemas: Vec::new(),
+            current_schema: None,
+            category: ObjectCategory::Tables,
+            selected_object: None,
+            object_scroll: UniformListScrollHandle::new(),
             objects: Vec::new(),
             tree_filter: String::new(),
             messages: Vec::new(),
@@ -256,8 +332,21 @@ impl Workbench {
         self.active_tab().editor.read(cx).value().to_string()
     }
 
+    /// Index of the tab the finished operation belongs to: the tab it was
+    /// started from if it still exists, else the active tab.
+    fn target_ix(&self) -> usize {
+        self.pending_tab
+            .and_then(|id| self.tabs.iter().position(|t| t.id == id))
+            .unwrap_or(self.active_tab)
+    }
+
+    fn target_tab_mut(&mut self) -> &mut QueryTab {
+        let ix = self.target_ix();
+        &mut self.tabs[ix]
+    }
+
     fn set_grid_result(&mut self, result: QueryResult, cx: &mut Context<Self>) {
-        let tab = self.active_tab_mut();
+        let tab = self.target_tab_mut();
         tab.last_result = Some(result.clone());
         tab.table_state.update(cx, |state, cx| {
             state.delegate_mut().set_result(result);
@@ -291,14 +380,22 @@ impl Workbench {
         self.op_generation += 1;
         let generation = self.op_generation;
         self.pending_op = Some(op);
+        self.pending_tab = self.tabs.get(self.active_tab).map(|t| t.id);
         self.busy = true;
         cx.notify();
+        let handle = self.window_handle;
         cx.spawn(async move |view, cx| {
             let resp = cx
                 .background_executor()
                 .spawn(async move { rx.recv() })
                 .await;
-            let _ = view.update(cx, |this, cx| this.on_db_response(generation, resp, cx));
+            // The window is needed to create tabs (View Script) and set
+            // editor text from a response.
+            let _ = cx.update_window(handle, |_, window, cx| {
+                view.update(cx, |this, cx| {
+                    this.on_db_response(generation, resp, window, cx)
+                })
+            });
         })
         .detach();
     }
@@ -331,7 +428,7 @@ impl Workbench {
         let (profile, password) = if demo {
             (
                 ConnectionProfile {
-                    name: "Demo".to_string(),
+                    name: "Demo database".to_string(),
                     username: "DEMO".to_string(),
                     connect_string: "demo".to_string(),
                 },
@@ -339,10 +436,9 @@ impl Workbench {
             )
         } else {
             let username = Self::input_text(&self.user_input, cx);
-            let connect_string = Self::input_text(&self.host_input, cx);
+            let connect_string = self.form_connect_string(cx);
             if username.is_empty() || connect_string.is_empty() {
-                self.push_message("Isi username dan connect string dulu.".to_string());
-                self.active_tab_mut().results_tab = ResultsTab::Messages;
+                self.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
                 cx.notify();
                 return;
             }
@@ -365,6 +461,11 @@ impl Workbench {
         }
         self.demo_mode = demo;
         self.connect_error = None;
+        self.last_connection = Some(LastConnection {
+            profile: profile.clone(),
+            demo,
+            profile_ix: if demo { None } else { self.editing_profile },
+        });
         self.status = "Menghubungkan...".to_string();
         self.spawn_db(
             Job::Connect {
@@ -382,12 +483,13 @@ impl Workbench {
             return;
         }
         let username = Self::input_text(&self.user_input, cx);
-        let connect_string = Self::input_text(&self.host_input, cx);
+        let connect_string = self.form_connect_string(cx);
         if username.is_empty() || connect_string.is_empty() {
-            self.push_message("Isi username dan connect string dulu.".to_string());
+            self.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
             cx.notify();
             return;
         }
+        self.form_notice = None;
         if self.db.is_none() {
             self.db = Some(DbHandle::spawn());
         }
@@ -414,33 +516,53 @@ impl Workbench {
         }
         self.session = None;
         self.demo_mode = false;
-        self.show_connection_form = true;
+        self.show_connection_form = false;
         self.objects.clear();
-        self.tree_state.update(cx, |state, cx| {
-            state.set_items(Vec::<TreeItem>::new(), cx);
-        });
+        self.schemas.clear();
+        self.current_schema = None;
+        self.selected_object = None;
         self.clear_all_grids(cx);
         self.status = "Belum terhubung.".to_string();
         self.push_message("Disconnected.".to_string());
         cx.notify();
     }
 
+    /// Reload the schema list, then the objects of the current schema
+    /// (the session user's own schema on first load).
     fn refresh_schema(&mut self, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
-        let Some(session) = self.session.clone() else {
+        if self.session.is_none() {
             self.push_message("Belum terhubung.".to_string());
             return;
+        }
+        self.status = "Memuat daftar schema...".to_string();
+        self.spawn_db(Job::ListSchemas, PendingOp::ListSchemas, cx);
+    }
+
+    fn load_objects(&mut self, cx: &mut Context<Self>) {
+        let Some(owner) = self.current_schema.clone() else {
+            return;
         };
-        self.status = "Memuat schema...".to_string();
-        self.spawn_db(
-            Job::ListObjects {
-                owner: session.user,
-            },
-            PendingOp::ListObjects,
-            cx,
-        );
+        self.status = format!("Memuat objek {owner}...");
+        self.spawn_db(Job::ListObjects { owner }, PendingOp::ListObjects, cx);
+    }
+
+    fn select_schema(&mut self, schema: String, cx: &mut Context<Self>) {
+        if self.busy || self.current_schema.as_deref() == Some(schema.as_str()) {
+            return;
+        }
+        self.current_schema = Some(schema);
+        self.selected_object = None;
+        self.objects.clear();
+        self.load_objects(cx);
+    }
+
+    fn select_category(&mut self, category: ObjectCategory, cx: &mut Context<Self>) {
+        self.category = category;
+        self.selected_object = None;
+        cx.notify();
     }
 
     fn run(&mut self, cx: &mut Context<Self>) {
@@ -653,6 +775,24 @@ impl Workbench {
 
     // ----- connection manager -----
 
+    /// The connect string the dialog describes: the TNS field as typed,
+    /// or `host:port/service` built from the Basic fields. Empty when the
+    /// required field (TNS text or host) is blank.
+    fn form_connect_string(&self, cx: &App) -> String {
+        if self.use_tns {
+            return Self::input_text(&self.tns_input, cx);
+        }
+        let host = Self::input_text(&self.host_input, cx);
+        if host.is_empty() {
+            return String::new();
+        }
+        compose_easy_connect(
+            &host,
+            &Self::input_text(&self.port_input, cx),
+            &Self::input_text(&self.service_input, cx),
+        )
+    }
+
     fn fill_form(&mut self, profile: &SavedProfile, window: &mut Window, cx: &mut Context<Self>) {
         Self::set_input(&self.name_input.clone(), profile.name.clone(), window, cx);
         Self::set_input(
@@ -661,52 +801,77 @@ impl Workbench {
             window,
             cx,
         );
-        Self::set_input(
-            &self.host_input.clone(),
-            profile.connect_string.clone(),
-            window,
-            cx,
-        );
+        // Easy Connect strings split into the Basic fields; descriptors and
+        // TNS aliases open in TNS mode unchanged.
+        match parse_easy_connect(&profile.connect_string) {
+            Some((host, port, service)) => {
+                self.use_tns = false;
+                Self::set_input(&self.host_input.clone(), host, window, cx);
+                Self::set_input(&self.port_input.clone(), port, window, cx);
+                Self::set_input(&self.service_input.clone(), service, window, cx);
+                Self::set_input(&self.tns_input.clone(), String::new(), window, cx);
+            }
+            None => {
+                self.use_tns = true;
+                Self::set_input(&self.host_input.clone(), String::new(), window, cx);
+                Self::set_input(&self.port_input.clone(), "1521".into(), window, cx);
+                Self::set_input(&self.service_input.clone(), String::new(), window, cx);
+                Self::set_input(
+                    &self.tns_input.clone(),
+                    profile.connect_string.clone(),
+                    window,
+                    cx,
+                );
+            }
+        }
         // Passwords are never stored: always start blank.
         Self::set_input(&self.password_input.clone(), String::new(), window, cx);
     }
 
+    /// Open the connection dialog for a saved profile.
     fn edit_profile(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(profile) = self.profiles.get(ix).cloned() {
             self.editing_profile = Some(ix);
             self.fill_form(&profile, window, cx);
+            self.form_notice = None;
+            self.connect_error = None;
+            self.show_connection_form = true;
             cx.notify();
         }
     }
 
     fn new_profile_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editing_profile = None;
+        self.use_tns = false;
+        self.form_notice = None;
+        self.connect_error = None;
         Self::set_input(&self.name_input.clone(), String::new(), window, cx);
         Self::set_input(&self.user_input.clone(), String::new(), window, cx);
         Self::set_input(&self.host_input.clone(), String::new(), window, cx);
+        Self::set_input(&self.port_input.clone(), "1521".into(), window, cx);
+        Self::set_input(&self.service_input.clone(), String::new(), window, cx);
+        Self::set_input(&self.tns_input.clone(), String::new(), window, cx);
         Self::set_input(&self.password_input.clone(), String::new(), window, cx);
         cx.notify();
     }
 
-    /// "+" in the Connections header: while connected it toggles the
-    /// new-connection form (hidden by default once connected); while
-    /// disconnected the form is always visible, so "+" clears it for a
-    /// fresh profile instead. Toggling never clears typed text.
-    fn toggle_connection_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.session.is_some() {
-            self.show_connection_form = !self.show_connection_form;
-            cx.notify();
-        } else {
-            self.show_connection_form = true;
-            self.new_profile_form(window, cx);
-        }
+    /// "+" / "New connection": open an empty connection dialog.
+    fn open_new_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_profile_form(window, cx);
+        self.show_connection_form = true;
+        cx.notify();
+    }
+
+    fn close_connection_dialog(&mut self, cx: &mut Context<Self>) {
+        self.show_connection_form = false;
+        cx.notify();
     }
 
     fn save_profile(&mut self, cx: &mut Context<Self>) {
         let username = Self::input_text(&self.user_input, cx);
-        let connect_string = Self::input_text(&self.host_input, cx);
+        let connect_string = self.form_connect_string(cx);
         if username.is_empty() || connect_string.is_empty() {
-            self.push_message("Isi username dan connect string dulu.".to_string());
+            self.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
             cx.notify();
             return;
         }
@@ -729,6 +894,7 @@ impl Workbench {
         }
         self.persist_profiles();
         self.push_message("Profil koneksi tersimpan.".to_string());
+        self.form_notice = Some((false, "Profil koneksi tersimpan.".to_string()));
         cx.notify();
     }
 
@@ -737,6 +903,13 @@ impl Workbench {
             return;
         }
         let removed = self.profiles.remove(ix);
+        if let Some(last) = &mut self.last_connection {
+            last.profile_ix = match last.profile_ix {
+                Some(i) if i == ix => None,
+                Some(i) if i > ix => Some(i - 1),
+                other => other,
+            };
+        }
         if self.editing_profile == Some(ix) {
             self.editing_profile = None;
         } else if let Some(editing) = self.editing_profile {
@@ -790,67 +963,37 @@ impl Workbench {
         cx.notify();
     }
 
-    // ----- schema tree -----
+    // ----- explorer (Toad-style object browser) -----
 
     fn apply_tree_filter(&mut self, cx: &mut Context<Self>) {
         self.tree_filter = Self::input_text(&self.search_input, cx);
-        let filtered = schema::filter_objects(&self.objects, &self.tree_filter);
-        let items = schema::build_tree_items(filtered);
-        self.tree_state.update(cx, |state, cx| {
-            state.set_items(items, cx);
-        });
+        cx.notify();
     }
 
-    fn on_tree_click(
+    /// Single click selects; double click on a table/view opens its data
+    /// in a new tab, like Toad. The platform reports the tap count on the
+    /// mouse-down event, so a double click arrives with `click_count >= 2`.
+    fn on_object_click(
         &mut self,
-        id: SharedString,
+        object: ObjectRef,
         event: &ClickEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((owner, name, group)) = schema::parse_object_id(&id) else {
-            return; // group header: expand/collapse is handled by the tree
-        };
-        // No dedicated double-click API: the platform reports the tap count
-        // on the mouse-down event, so a double-click arrives as a second
-        // click with `click_count >= 2`. The first click still runs the
-        // single-click describe below; the data query supersedes it.
+        self.selected_object = Some(object.name.clone());
         let double_click = matches!(event, ClickEvent::Mouse(m) if m.down.click_count >= 2);
-        if double_click && schema::is_describable_group(group) {
-            self.open_table_data(owner, name, window, cx);
-            return;
+        if double_click {
+            if schema::has_data(&object.kind) {
+                self.open_table_data(&object.owner, &object.name, window, cx);
+            } else {
+                self.view_script(object, cx);
+            }
         }
-        if !schema::is_describable_group(group) {
-            self.push_message(format!(
-                "Describe untuk {group} belum didukung di MVP ({owner}.{name})."
-            ));
-            self.active_tab_mut().results_tab = ResultsTab::Messages;
-            cx.notify();
-            return;
-        }
-        if self.busy || self.session.is_none() {
-            return;
-        }
-        self.show_home = false;
-        self.status = format!("Describe {owner}.{name}...");
-        self.spawn_db(
-            Job::Describe {
-                owner: owner.to_string(),
-                name: name.to_string(),
-            },
-            PendingOp::Describe {
-                owner: owner.to_string(),
-                name: name.to_string(),
-            },
-            cx,
-        );
+        cx.notify();
     }
 
-    /// Double-click on a table/view row: fill the editor with a capped
-    /// `SELECT *` and run it, like Toad/Navicat. A describe fired by the
-    /// first click of the double-click is superseded with the same
-    /// soft-cancel as Stop (its late response is dropped by the generation
-    /// check); a real in-flight query is never cancelled.
+    /// Open `owner.name` in a new data tab titled after the table and run a
+    /// capped `SELECT *` there.
     fn open_table_data(
         &mut self,
         owner: &str,
@@ -861,20 +1004,149 @@ impl Workbench {
         if self.session.is_none() {
             return;
         }
-        if self.busy && matches!(self.pending_op, Some(PendingOp::Describe { .. })) {
-            self.op_generation += 1;
-            self.pending_op = None;
-            self.pending_sql = None;
-            self.busy = false;
-        }
         if self.busy {
+            self.status = "Masih ada operasi berjalan.".to_string();
+            cx.notify();
             return;
         }
-        self.show_home = false;
         let sql = schema::select_all_sql(owner, name);
-        let editor = self.active_tab().editor.clone();
-        editor.update(cx, |state, cx| state.set_value(sql, window, cx));
+        self.new_tab_with_sql(sql, window, cx);
+        let tab = self.active_tab_mut();
+        tab.title = format!("{owner}.{name}");
+        tab.kind = TabKind::Data;
+        tab.table_state.update(cx, |state, _| {
+            *state.delegate_mut() = ResultsDelegate::empty().with_page_size(DATA_PAGE_SIZE);
+        });
         self.run(cx);
+    }
+
+    fn describe_object(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
+        if self.busy || self.session.is_none() || self.show_home {
+            return;
+        }
+        self.status = format!("Describe {}.{}...", object.owner, object.name);
+        self.spawn_db(
+            Job::Describe {
+                owner: object.owner.clone(),
+                name: object.name.clone(),
+            },
+            PendingOp::Describe {
+                owner: object.owner,
+                name: object.name,
+            },
+            cx,
+        );
+    }
+
+    /// "View Script": fetch the DDL; the response opens it in a new tab.
+    fn view_script(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
+        if self.busy || self.session.is_none() {
+            return;
+        }
+        self.status = format!("Mengambil DDL {}.{}...", object.owner, object.name);
+        self.spawn_db(
+            Job::Ddl {
+                owner: object.owner.clone(),
+                name: object.name.clone(),
+                kind: object.kind,
+            },
+            PendingOp::Ddl {
+                owner: object.owner,
+                name: object.name,
+            },
+            cx,
+        );
+    }
+
+    /// "Export Data": ask where to save (native save dialog), then let the
+    /// worker fetch and write the whole table. If the platform has no file
+    /// dialog, fall back to a timestamped file in the working directory.
+    fn export_table(&mut self, object: ObjectRef, format: ExportFormat, cx: &mut Context<Self>) {
+        if self.busy || self.session.is_none() {
+            return;
+        }
+        let suggested = format!("{}.{}", object.name, format.extension());
+        let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let prompt = cx.prompt_for_new_path(&dir, Some(&suggested));
+        cx.spawn(async move |view, cx| {
+            let path = match prompt.await {
+                Ok(Ok(Some(path))) => Some(path),
+                Ok(Ok(None)) => None, // cancelled
+                _ => Some(dir.join(format!(
+                    "{}-{}.{}",
+                    object.name,
+                    unix_stamp(),
+                    format.extension()
+                ))),
+            };
+            let Some(path) = path else {
+                return;
+            };
+            let _ = view.update(cx, |this, cx| {
+                this.status = format!("Export {}.{}...", object.owner, object.name);
+                this.spawn_db(
+                    Job::ExportTable {
+                        owner: object.owner.clone(),
+                        name: object.name.clone(),
+                        path,
+                        format,
+                    },
+                    PendingOp::ExportTable {
+                        owner: object.owner,
+                        name: object.name,
+                    },
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    /// "Import Data": pick a CSV file whose header names match the table's
+    /// columns; rows are inserted without commit.
+    fn import_table(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
+        if self.busy || self.session.is_none() {
+            return;
+        }
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import CSV".into()),
+        });
+        cx.spawn(async move |view, cx| {
+            let picked = prompt.await;
+            let _ = view.update(cx, |this, cx| {
+                let path = match picked {
+                    Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                    Ok(Ok(None)) => None,
+                    _ => {
+                        this.push_message(
+                            "Dialog pilih file tidak tersedia di sistem ini.".to_string(),
+                        );
+                        cx.notify();
+                        None
+                    }
+                };
+                let Some(path) = path else {
+                    return;
+                };
+                this.status = format!("Import ke {}.{}...", object.owner, object.name);
+                this.spawn_db(
+                    Job::ImportCsv {
+                        owner: object.owner.clone(),
+                        name: object.name.clone(),
+                        path,
+                    },
+                    PendingOp::ImportCsv {
+                        owner: object.owner,
+                        name: object.name,
+                    },
+                    cx,
+                );
+            });
+        })
+        .detach();
     }
 
     // ----- response handling -----
@@ -883,6 +1155,7 @@ impl Workbench {
         &mut self,
         generation: u64,
         resp: Result<Response, RecvError>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // A superseded operation (after Stop, or a newer op) drops its
@@ -908,13 +1181,14 @@ impl Workbench {
             }
             self.push_message(message.clone());
             self.status = "Error (lihat Messages).".to_string();
-            self.active_tab_mut().results_tab = ResultsTab::Messages;
+            self.target_tab_mut().results_tab = ResultsTab::Messages;
             cx.notify();
             return;
         }
         match (pending, resp) {
             (Some(PendingOp::Connect), Response::Connected(info)) => {
                 self.session = Some(info.clone());
+                self.current_schema = None;
                 self.connect_error = None;
                 self.show_connection_form = false;
                 self.status = format!("Connected sebagai {}.", info.user);
@@ -927,14 +1201,17 @@ impl Workbench {
             }
             (Some(PendingOp::TestConnect), Response::Tested(outcome)) => match outcome {
                 Ok(info) => {
-                    self.push_message(format!(
+                    let text = format!(
                         "Test koneksi berhasil: {} @ {} ({})",
                         info.user, info.database, info.version
-                    ));
+                    );
+                    self.push_message(text.clone());
+                    self.form_notice = Some((false, text));
                     self.status = "Test koneksi berhasil.".to_string();
                 }
                 Err(message) => {
                     self.push_message(format!("Test koneksi gagal: {message}"));
+                    self.form_notice = Some((true, format!("Test koneksi gagal: {message}")));
                     self.status = "Test koneksi gagal.".to_string();
                 }
             },
@@ -945,9 +1222,9 @@ impl Workbench {
                 if let Some(sql) = pending_sql {
                     self.record_run(&sql);
                 }
-                self.active_tab_mut().elapsed_ms = Some(elapsed);
+                self.target_tab_mut().elapsed_ms = Some(elapsed);
                 self.set_grid_result(result, cx);
-                self.active_tab_mut().results_tab = ResultsTab::Results;
+                self.target_tab_mut().results_tab = ResultsTab::Results;
                 self.status = if truncated {
                     format!("{rows} baris dalam {elapsed}ms (dibatasi {DEFAULT_MAX_ROWS} baris)")
                 } else {
@@ -960,10 +1237,10 @@ impl Workbench {
                 }
                 self.push_message(format!("{affected} baris terpengaruh."));
                 self.status = format!("{affected} baris terpengaruh (belum commit).");
-                self.active_tab_mut().results_tab = ResultsTab::Messages;
+                self.target_tab_mut().results_tab = ResultsTab::Messages;
             }
             (Some(PendingOp::Explain), Response::PlanTree(nodes, lines)) => {
-                let tab = self.active_tab_mut();
+                let tab = self.target_tab_mut();
                 tab.plan_expanded = plan::all_plan_ids(&nodes);
                 tab.plan_nodes = Some(nodes);
                 tab.plan_lines = lines;
@@ -971,23 +1248,68 @@ impl Workbench {
                 self.status = "Explain plan selesai.".to_string();
             }
             (Some(PendingOp::Explain), Response::Plan(lines)) => {
-                let tab = self.active_tab_mut();
+                let tab = self.target_tab_mut();
                 tab.plan_nodes = None;
                 tab.plan_lines = lines;
                 tab.results_tab = ResultsTab::Plan;
                 self.status = "Explain plan selesai.".to_string();
             }
+            (Some(PendingOp::ListSchemas), Response::Schemas(schemas)) => {
+                let user = self.session.as_ref().map(|s| s.user.clone());
+                // Keep the current pick on refresh; otherwise start in the
+                // session user's own schema, as Toad does.
+                let keep = self.current_schema.clone().filter(|c| schemas.contains(c));
+                self.current_schema = keep
+                    .or_else(|| user.filter(|u| schemas.contains(u)))
+                    .or_else(|| schemas.first().cloned());
+                self.schemas = schemas;
+                self.load_objects(cx);
+            }
             (Some(PendingOp::ListObjects), Response::Objects(objects)) => {
                 let count = objects.len();
                 self.objects = objects;
-                self.apply_tree_filter(cx);
-                self.status = format!("{count} objek dimuat.");
+                self.selected_object = None;
+                let schema = self.current_schema.clone().unwrap_or_default();
+                self.status = format!("{schema}: {count} objek dimuat.");
+            }
+            (Some(PendingOp::Ddl { owner, name }), Response::Ddl(ddl)) => {
+                self.new_tab_with_sql(ddl, window, cx);
+                let tab = self.active_tab_mut();
+                tab.title = format!("{name}.sql");
+                tab.kind = TabKind::Script;
+                self.status = format!("Script {owner}.{name}.");
+            }
+            (
+                Some(PendingOp::ExportTable { owner, name }),
+                Response::Exported {
+                    path,
+                    rows,
+                    truncated,
+                },
+            ) => {
+                let cap = if truncated {
+                    format!(" (dibatasi {} baris)", ora_core::EXPORT_MAX_ROWS)
+                } else {
+                    String::new()
+                };
+                self.push_message(format!(
+                    "Export {owner}.{name}: {rows} baris ke {}{cap}",
+                    path.display()
+                ));
+                self.status = format!("Export {name} selesai: {rows} baris.");
+            }
+            (Some(PendingOp::ImportCsv { owner, name }), Response::Imported(rows)) => {
+                self.push_message(format!(
+                    "Import {owner}.{name}: {rows} baris dimasukkan (belum commit)."
+                ));
+                self.status = format!("{rows} baris diimpor ke {name} (belum commit).");
+                self.target_tab_mut().results_tab = ResultsTab::Messages;
             }
             (Some(PendingOp::Describe { owner, name }), Response::Described(defs)) => {
                 let result = schema::describe_to_result(&defs);
                 let count = result.row_count();
                 self.set_grid_result(result, cx);
-                self.active_tab_mut().results_tab = ResultsTab::Results;
+                self.target_tab_mut().results_tab = ResultsTab::Results;
                 self.status = format!("{owner}.{name}: {count} kolom.");
             }
             (Some(PendingOp::Commit), Response::Committed) => {
@@ -1154,7 +1476,11 @@ impl Workbench {
                     .pr(px(SPACE_1))
                     .on_click(cx.listener(move |this, _, _, cx| this.activate_tab(ix, cx)))
                     .child(icon(
-                        IconName::Database,
+                        match tab.kind {
+                            TabKind::Query => IconName::Database,
+                            TabKind::Data => IconName::Table,
+                            TabKind::Script => IconName::FileCode,
+                        },
                         14.,
                         if active {
                             theme.primary
@@ -1310,105 +1636,183 @@ impl Workbench {
                 .w(px(28.))
                 .rounded(px(RADIUS_MD))
                 .hover(|this| this.bg(theme.secondary))
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.toggle_connection_form(window, cx)),
-                )
+                .on_click(cx.listener(|this, _, window, cx| this.open_new_connection(window, cx)))
                 .child(icon(IconName::Plus, 16., theme.muted_foreground)),
         );
         panel = panel.child(header);
         panel = panel.child(self.render_session_card(theme, cx));
-        panel = panel.child(self.render_profile_list(theme, cx));
-        if self.session.is_none() || self.show_connection_form {
-            panel = panel.child(self.render_connection_form(theme, cx));
+        // Navicat-style: saved connections are listed while disconnected
+        // (click one to open its dialog); once connected the panel belongs
+        // to the explorer. New/edit connection happens in a modal.
+        if self.session.is_some() {
+            panel = panel.child(self.render_explorer(theme, cx));
+        } else {
+            panel = panel.child(self.render_profile_list(theme, cx));
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(SPACE_2))
+                    .px(px(SPACE_3))
+                    .pt(px(SPACE_3))
+                    .child(
+                        Button::new("side-new-connection")
+                            .label("New connection")
+                            .icon(IconName::Plus)
+                            .primary()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_new_connection(window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("demo")
+                            .label("Demo")
+                            .icon(IconName::Play)
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
+                    ),
+            );
         }
-        panel = panel.child(
-            div()
-                .px(px(SPACE_3))
-                .pb(px(SPACE_2))
-                .child(Input::new(&self.search_input).w_full()),
-        );
-        panel = panel.child(
-            div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .px(px(SPACE_2))
-                .child(self.render_tree_area(theme, cx)),
-        );
         panel
     }
 
+    /// Connect again to the last connection: demo reconnects directly;
+    /// a real database opens its dialog, since passwords are never kept.
+    fn reconnect_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(last) = self.last_connection.clone() else {
+            return;
+        };
+        if last.demo {
+            self.connect(true, cx);
+        } else {
+            self.edit_last_connection(window, cx);
+        }
+    }
+
+    fn edit_last_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(last) = self.last_connection.clone() else {
+            return;
+        };
+        if last.demo {
+            return;
+        }
+        match last.profile_ix.filter(|ix| *ix < self.profiles.len()) {
+            Some(ix) => self.edit_profile(ix, window, cx),
+            None => {
+                let profile = SavedProfile {
+                    name: last.profile.name.clone(),
+                    username: last.profile.username.clone(),
+                    connect_string: last.profile.connect_string.clone(),
+                };
+                self.editing_profile = None;
+                self.fill_form(&profile, window, cx);
+                self.form_notice = None;
+                self.show_connection_form = true;
+                cx.notify();
+            }
+        }
+    }
+
+    /// Minimal connection row: status dot (green connected, red not),
+    /// connection name, and a ⋮ menu with Refresh, Connect/Disconnect,
+    /// and Edit connection.
     fn render_session_card(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let Some(session) = &self.session else {
+        let Some(last) = self.last_connection.clone() else {
             return div()
                 .px(px(SPACE_3))
                 .pt(px(SPACE_3))
                 .child(caption_text(
-                    "Not connected. Fill in the form or try Demo mode.".to_string(),
+                    "Not connected. Pick a connection or try Demo.".to_string(),
                     theme,
                 ))
                 .into_any_element();
         };
-        let mode = if self.demo_mode { "Demo" } else { "Oracle" };
+        let connected = self.session.is_some();
+        let connecting = self.busy && matches!(self.pending_op, Some(PendingOp::Connect));
+        let dot = if connecting {
+            theme.warning
+        } else if connected {
+            theme.success
+        } else {
+            theme.danger
+        };
+        let view = cx.entity();
+        let busy = self.busy;
+        let demo = last.demo;
+        let menu_button = Button::new("connection-actions")
+            .icon(IconName::EllipsisVertical)
+            .ghost()
+            .small()
+            .dropdown_menu(move |menu, _, _| {
+                let refresh_view = view.clone();
+                let toggle_view = view.clone();
+                let edit_view = view.clone();
+                menu.min_w(px(200.))
+                    .item(
+                        PopupMenuItem::new("Refresh")
+                            .icon(Icon::new(IconName::RefreshCw))
+                            .disabled(!connected || busy)
+                            .on_click(move |_, _, cx: &mut App| {
+                                refresh_view.update(cx, |this, cx| this.refresh_schema(cx));
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(if connected { "Disconnect" } else { "Connect" })
+                            .icon(Icon::new(if connected {
+                                IconName::LogOut
+                            } else {
+                                IconName::LogIn
+                            }))
+                            .disabled(busy)
+                            .on_click(move |_, window, cx: &mut App| {
+                                toggle_view.update(cx, |this, cx| {
+                                    if this.session.is_some() {
+                                        this.disconnect(cx);
+                                    } else {
+                                        this.reconnect_last(window, cx);
+                                    }
+                                });
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Edit connection")
+                            .icon(Icon::new(IconName::SquarePen))
+                            .disabled(demo)
+                            .on_click(move |_, window, cx: &mut App| {
+                                edit_view
+                                    .update(cx, |this, cx| this.edit_last_connection(window, cx));
+                            }),
+                    )
+            });
         div()
-            .px(px(SPACE_3))
-            .pt(px(SPACE_3))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(SPACE_2))
+            .mx(px(SPACE_3))
+            .mt(px(SPACE_2))
+            .pl(px(SPACE_2))
+            .h(px(TOOLBAR_HEIGHT))
+            .rounded(px(RADIUS_MD))
+            .border_1()
+            .border_color(theme.border)
+            .child(status_dot(dot))
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(SPACE_1))
-                    .p(px(SPACE_3))
-                    .rounded(px(RADIUS_MD))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.popover)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(SPACE_2))
-                            .child(status_dot(theme.success))
-                            .child(
-                                div()
-                                    .text_size(px(FONT_LABEL))
-                                    .line_height(px(LEADING_LABEL))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.foreground)
-                                    .child(format!("{} · {}", session.user, mode)),
-                            ),
-                    )
-                    .child(caption_text(
-                        format!("{} {}", session.database, session.version),
-                        theme,
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(SPACE_2))
-                            .pt(px(SPACE_1))
-                            .child(
-                                Button::new("disconnect")
-                                    .label("Disconnect")
-                                    .icon(IconName::LogOut)
-                                    .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx))),
-                            )
-                            .child(
-                                Button::new("refresh-schema")
-                                    .label("Refresh")
-                                    .icon(IconName::RefreshCw)
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.refresh_schema(cx)),
-                                    ),
-                            ),
-                    ),
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_size(px(FONT_LABEL))
+                    .line_height(px(LEADING_LABEL))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.foreground)
+                    .child(last.profile.name.clone()),
             )
+            .child(menu_button)
             .into_any_element()
     }
 
@@ -1490,94 +1894,332 @@ impl Workbench {
         list.into_any_element()
     }
 
-    fn render_connection_form(
+    /// The New/Edit connection dialog, drawn as a modal over the whole
+    /// window (scrim + centered card).
+    fn render_connection_dialog(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut form = div()
+        let field = |label: &str, input: &Entity<InputState>| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_1))
+                .child(form_label(label, theme))
+                .child(Input::new(input).w_full())
+        };
+        let mode_button = |id: &'static str, label: &'static str, tns: bool| {
+            let active = self.use_tns == tns;
+            let mut b = div()
+                .id(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_1()
+                .h(px(28.))
+                .rounded(px(RADIUS_SM))
+                .text_size(px(FONT_LABEL))
+                .font_weight(FontWeight::MEDIUM)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.use_tns = tns;
+                    cx.notify();
+                }))
+                .child(label);
+            if active {
+                b = b
+                    .bg(theme.background)
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_color(theme.foreground);
+            } else {
+                b = b.text_color(theme.muted_foreground);
+            }
+            b
+        };
+        let title = if self.editing_profile.is_some() {
+            "Edit connection"
+        } else {
+            "New connection"
+        };
+        let mut body = div()
             .flex()
             .flex_col()
-            .gap(px(SPACE_2))
-            .p(px(SPACE_3))
-            .child(form_label(
-                if self.editing_profile.is_some() {
-                    "Edit connection"
-                } else {
-                    "New connection"
-                },
-                theme,
-            ))
-            .child(Input::new(&self.name_input).w_full())
-            .child(Input::new(&self.user_input).w_full())
-            .child(Input::new(&self.host_input).w_full())
-            .child(Input::new(&self.password_input).mask_toggle().w_full())
+            .gap(px(SPACE_3))
+            .p(px(SPACE_4))
+            .child(field("Connection name", &self.name_input))
             .child(
                 div()
                     .flex()
                     .flex_row()
-                    .gap(px(SPACE_2))
-                    .child(
-                        Button::new("connect")
-                            .label("Connect")
-                            .icon(IconName::Database)
-                            .primary()
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.connect(false, cx))),
-                    )
-                    .child(
-                        Button::new("test-connect")
-                            .label("Test")
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.test_connection(cx))),
-                    )
-                    .child(
-                        Button::new("demo")
-                            .label("Demo")
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
+                    .p(px(2.))
+                    .gap(px(2.))
+                    .rounded(px(RADIUS_MD))
+                    .bg(theme.secondary)
+                    .child(mode_button("conn-mode-basic", "Basic", false))
+                    .child(mode_button("conn-mode-tns", "TNS", true)),
+            );
+        if self.use_tns {
+            body = body.child(field("TNS alias / connect descriptor", &self.tns_input));
+        } else {
+            body = body
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(SPACE_2))
+                        .child(div().flex_1().child(field("Host", &self.host_input)))
+                        .child(div().w(px(96.)).child(field("Port", &self.port_input))),
+                )
+                .child(field("Service name", &self.service_input));
+        }
+        body = body.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(SPACE_2))
+                .child(div().flex_1().child(field("Username", &self.user_input)))
+                .child(
+                    div().flex_1().child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(SPACE_1))
+                            .child(form_label("Password", theme))
+                            .child(Input::new(&self.password_input).mask_toggle().w_full()),
                     ),
+                ),
+        );
+        let notice = self
+            .connect_error
+            .clone()
+            .map(|e| (true, e))
+            .or_else(|| self.form_notice.clone());
+        if let Some((is_error, text)) = notice {
+            body = body.child(
+                div()
+                    .p(px(SPACE_2))
+                    .rounded(px(RADIUS_SM))
+                    .text_size(px(FONT_CAPTION))
+                    .line_height(px(LEADING_CAPTION))
+                    .text_color(if is_error {
+                        theme.danger
+                    } else {
+                        theme.success
+                    })
+                    .border_1()
+                    .border_color(if is_error {
+                        theme.danger
+                    } else {
+                        theme.success
+                    })
+                    .child(text),
+            );
+        } else {
+            body = body.child(caption_text(
+                "Password tidak pernah disimpan; diisi setiap connect.".to_string(),
+                theme,
+            ));
+        }
+        let mut footer = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(SPACE_2))
+            .px(px(SPACE_4))
+            .py(px(SPACE_3))
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                Button::new("test-connect")
+                    .label("Test")
+                    .disabled(self.busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.test_connection(cx))),
             )
             .child(
-                div().flex().flex_row().gap(px(SPACE_2)).child(
-                    Button::new("save-profile")
-                        .label("Save profile")
-                        .icon(IconName::Save)
-                        .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
-                ),
+                Button::new("save-profile")
+                    .label("Save")
+                    .icon(IconName::Save)
+                    .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
             );
-        if self.editing_profile.is_some() {
-            let ix = self.editing_profile.unwrap();
-            form = form.child(
-                div().flex().flex_row().child(
-                    Button::new("remove-profile")
-                        .label("Remove profile")
-                        .icon(IconName::Trash)
-                        .danger()
-                        .on_click(cx.listener(move |this, _, _, cx| this.remove_profile(ix, cx))),
-                ),
+        if let Some(ix) = self.editing_profile {
+            footer = footer.child(
+                Button::new("remove-profile")
+                    .icon(IconName::Trash)
+                    .danger()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.remove_profile(ix, cx);
+                        this.close_connection_dialog(cx);
+                    })),
             );
         }
-        form.child(caption_text(
-            "Passwords are never saved; they are entered per connect.".to_string(),
-            theme,
-        ))
+        footer = footer
+            .child(div().flex_1())
+            .child(
+                Button::new("cancel-connect")
+                    .label("Cancel")
+                    .on_click(cx.listener(|this, _, _, cx| this.close_connection_dialog(cx))),
+            )
+            .child(
+                Button::new("connect")
+                    .label(
+                        if self.busy && matches!(self.pending_op, Some(PendingOp::Connect)) {
+                            "Connecting…"
+                        } else {
+                            "Connect"
+                        },
+                    )
+                    .icon(IconName::Database)
+                    .primary()
+                    .disabled(self.busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.connect(false, cx))),
+            );
+        let card = div()
+            .id("connection-dialog")
+            .flex()
+            .flex_col()
+            .w(px(480.))
+            .rounded(px(RADIUS_MD))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .shadow_lg()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .px(px(SPACE_4))
+                    .h(px(48.))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(icon(IconName::Database, 18., theme.primary))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(FONT_BODY))
+                            .line_height(px(LEADING_BODY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .id("connection-dialog-close")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(28.))
+                            .rounded(px(RADIUS_MD))
+                            .hover(|this| this.bg(theme.secondary))
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.close_connection_dialog(cx)),
+                            )
+                            .child(icon(IconName::X, 16., theme.muted_foreground)),
+                    ),
+            )
+            .child(body)
+            .child(footer);
+        div()
+            .id("connection-dialog-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui_kit::hsla(0., 0., 0., 0.45))
+            // Swallow clicks so nothing under the modal reacts.
+            .occlude()
+            .child(card)
     }
 
-    fn render_tree_area(
+    /// Toad-style object browser: schema dropdown, category tabs, filter
+    /// box, and a flat virtualized list of objects with a context menu.
+    fn render_explorer(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        if self.objects.is_empty() {
-            let message = if self.session.is_none() {
-                "Connect to load schema objects."
+        let view = cx.entity();
+        let schemas = self.schemas.clone();
+        let current = self.current_schema.clone();
+        let schema_button = Button::new("schema-select")
+            .child(select_trigger(
+                current.clone().unwrap_or_else(|| "(schema)".to_string()),
+                theme,
+            ))
+            .w_full()
+            .disabled(self.schemas.is_empty())
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu.scrollable(true).max_h(px(360.)).min_w(px(220.));
+                for schema in &schemas {
+                    let pick = schema.clone();
+                    let view = view.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(schema.clone())
+                            .checked(current.as_deref() == Some(schema.as_str()))
+                            .on_click(move |_, _, cx: &mut App| {
+                                let pick = pick.clone();
+                                view.update(cx, |this, cx| this.select_schema(pick, cx));
+                            }),
+                    );
+                }
+                menu
+            });
+
+        let view = cx.entity();
+        let counts: Vec<(ObjectCategory, usize)> = ObjectCategory::ALL
+            .iter()
+            .map(|c| (*c, schema::count_in(&self.objects, *c)))
+            .collect();
+        let current_category = self.category;
+        let category_button = Button::new("category-select")
+            .child(select_trigger(
+                format!(
+                    "{} ({})",
+                    current_category.label(),
+                    schema::count_in(&self.objects, current_category)
+                ),
+                theme,
+            ))
+            .w_full()
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu.min_w(px(220.));
+                for (category, count) in &counts {
+                    let category = *category;
+                    let view = view.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(format!("{} ({count})", category.label()))
+                            .checked(category == current_category)
+                            .on_click(move |_, _, cx: &mut App| {
+                                view.update(cx, |this, cx| this.select_category(category, cx));
+                            }),
+                    );
+                }
+                menu
+            });
+
+        let visible: Vec<ObjectRef> =
+            schema::objects_in(&self.objects, self.category, &self.tree_filter)
+                .into_iter()
+                .map(|o| ObjectRef {
+                    owner: o.owner.clone(),
+                    name: o.name.clone(),
+                    kind: o.kind.clone(),
+                })
+                .collect();
+        let list = if visible.is_empty() {
+            let message = if self.busy && self.objects.is_empty() {
+                "Memuat objek..."
             } else if self.tree_filter.is_empty() {
-                "No objects found in this schema."
+                "Tidak ada objek di kategori ini."
             } else {
-                "No objects match the filter."
+                "Tidak ada objek yang cocok dengan filter."
             };
-            return div()
+            div()
                 .flex_1()
                 .flex()
                 .flex_col()
@@ -1585,33 +2227,67 @@ impl Workbench {
                 .justify_center()
                 .p(px(SPACE_4))
                 .child(empty_state_text(message.to_string(), theme))
-                .into_any_element();
-        }
+                .into_any_element()
+        } else {
+            let count = visible.len();
+            let selected = self.selected_object.clone();
+            let theme = theme.clone();
+            div()
+                .flex_1()
+                .px(px(SPACE_2))
+                .child(
+                    uniform_list(
+                        "explorer-objects",
+                        count,
+                        cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
+                            range
+                                .map(|ix| {
+                                    let object = visible[ix].clone();
+                                    let is_selected =
+                                        selected.as_deref() == Some(object.name.as_str());
+                                    render_object_row(ix, object, is_selected, &theme, cx)
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .track_scroll(&self.object_scroll)
+                    .size_full(),
+                )
+                .into_any_element()
+        };
+
         div()
             .flex_1()
-            .child(self.render_tree(cx))
-            .into_any_element()
-    }
-
-    fn render_tree(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        tree(&self.tree_state, {
-            let view = cx.entity();
-            move |ix, entry, selected, _window, cx| {
-                view.update(cx, |_, cx| {
-                    let item = entry.item();
-                    let item_id = item.id.clone();
-                    ListItem::new(ix)
-                        .selected(selected)
-                        .h(px(TREE_ROW_HEIGHT))
-                        .text_size(px(FONT_LABEL))
-                        .pl(px(12. + 16. * entry.depth() as f32))
-                        .child(item.label.clone())
-                        .on_click(cx.listener(move |this, event, window, cx| {
-                            this.on_tree_click(item_id.clone(), event, window, cx);
-                        }))
-                })
-            }
-        })
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_2))
+            .pt(px(SPACE_3))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .px(px(SPACE_3))
+                    .child(div().w(px(52.)).child(form_label("Schema", theme)))
+                    .child(div().flex_1().child(schema_button)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .px(px(SPACE_3))
+                    .child(div().w(px(52.)).child(form_label("Objects", theme)))
+                    .child(div().flex_1().child(category_button)),
+            )
+            .child(
+                div()
+                    .px(px(SPACE_3))
+                    .child(Input::new(&self.search_input).w_full()),
+            )
+            .child(list)
     }
 
     fn render_history_panel(
@@ -1833,7 +2509,17 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut main = div().flex().flex_col().flex_1().bg(theme.background);
+        // `min_w(0)` + clip: without them a wide result grid's min-content
+        // width pushes the column past the window edge, hiding the
+        // toolbar's right side and the plan panel.
+        let mut main = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .size_full()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .bg(theme.background);
         // The tab strip lives at the top of the main column only (right of
         // the sidebar), above the toolbar — as in the design. No spacer
         // above the rail/sidebar: the design shares the top row between
@@ -1842,6 +2528,26 @@ impl Workbench {
         main = main.child(self.render_toolbar(theme, cx));
         if self.show_home {
             main = main.child(self.render_home(theme, cx));
+        } else if self.active_tab().kind != TabKind::Query {
+            // Toad-style object tabs: the data grid (or the script) fills
+            // the work area, with info and errors in a strip below.
+            let top = if self.active_tab().kind == TabKind::Data {
+                self.render_data_grid(theme, cx).into_any_element()
+            } else {
+                self.render_editor().into_any_element()
+            };
+            main = main.child(
+                div().flex_1().child(
+                    v_resizable("object-split")
+                        .child(resizable_panel().child(top))
+                        .child(
+                            resizable_panel()
+                                .size(px(150.))
+                                .size_range(px(80.)..px(400.))
+                                .child(self.render_info_panel(theme)),
+                        ),
+                ),
+            );
         } else {
             main = main.child(
                 div().flex_1().child(
@@ -1876,31 +2582,52 @@ impl Workbench {
             .bg(theme.background)
             .border_b_1()
             .border_color(theme.border);
+        let data_tab = !on_home && self.active_tab().kind == TabKind::Data;
         bar = bar
+            // Like Navicat's "New Query" / Toad's "Editor": always opens a
+            // fresh SQL editor tab, from any tab including Home.
+            .child(
+                Button::new("new-sql")
+                    .label("New SQL")
+                    .icon(IconName::SquarePen)
+                    .tooltip("Buka tab SQL editor baru")
+                    .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx))),
+            )
+            .child(div().w(px(1.)).h(px(20.)).bg(theme.border))
             .child(
                 Button::new("run")
-                    .label("Run")
-                    .icon(IconName::Play)
+                    .label(if data_tab { "Refresh" } else { "Run" })
+                    .icon(if data_tab {
+                        IconName::RefreshCw
+                    } else {
+                        IconName::Play
+                    })
                     .primary()
                     .loading(self.busy)
                     .disabled(on_home || no_session)
                     .tooltip("Run (Cmd/Ctrl+Enter atau F5)")
                     .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
             )
-            .child(
-                Button::new("explain")
-                    .label("Explain")
-                    .icon(IconName::ChartColumn)
-                    .disabled(on_home || no_session || self.busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.explain(cx))),
-            )
-            .child(
-                Button::new("format")
-                    .label("Format")
-                    .icon(IconName::WandSparkles)
-                    .disabled(on_home)
-                    .on_click(cx.listener(|this, _, window, cx| this.format_editor(window, cx))),
-            )
+            .when(!data_tab, |bar| {
+                bar.child(
+                    Button::new("explain")
+                        .label("Explain")
+                        .icon(IconName::ChartColumn)
+                        .disabled(on_home || no_session || self.busy)
+                        .on_click(cx.listener(|this, _, _, cx| this.explain(cx))),
+                )
+            })
+            .when(!data_tab, |bar| {
+                bar.child(
+                    Button::new("format")
+                        .label("Format")
+                        .icon(IconName::WandSparkles)
+                        .disabled(on_home)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.format_editor(window, cx)),
+                        ),
+                )
+            })
             .child(
                 Button::new("stop")
                     .label("Stop")
@@ -1961,6 +2688,120 @@ impl Workbench {
         )
     }
 
+    /// Full-area grid of a data tab, with pagination under it.
+    fn render_data_grid(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tab = self.active_tab();
+        let grid = if tab.last_result.is_some() {
+            div()
+                .flex_1()
+                .child(
+                    DataTable::new(&tab.table_state)
+                        .stripe(true)
+                        .bordered(true)
+                        .small()
+                        .header_row_height(px(GRID_ROW_HEIGHT)),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(empty_state_text(
+                    if self.busy {
+                        "Memuat data...".to_string()
+                    } else {
+                        "Tidak ada data. Lihat Info di bawah untuk error.".to_string()
+                    },
+                    theme,
+                ))
+                .into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .child(div().flex().flex_col().flex_1().child(grid))
+            .child(self.render_pagination(theme, cx))
+    }
+
+    /// Info strip under a data/script tab: what the tab shows, then the
+    /// latest messages with errors highlighted.
+    fn render_info_panel(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
+        let tab = self.active_tab();
+        let mut summary = tab.title.clone();
+        if let Some(result) = &tab.last_result {
+            summary.push_str(&format!(
+                " · {} kolom · {} baris",
+                result.columns.len(),
+                result.row_count()
+            ));
+            if result.truncated {
+                summary.push_str(&format!(" (dibatasi {DEFAULT_MAX_ROWS})"));
+            }
+        }
+        if let Some(ms) = tab.elapsed_ms {
+            summary.push_str(&format!(" · {ms} ms"));
+        }
+        let start = self.messages.len().saturating_sub(MAX_MESSAGES_SHOWN);
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(theme.background)
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .h(px(SUB_TAB_HEIGHT))
+                    .px(px(SPACE_3))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(icon(IconName::Info, 14., theme.muted_foreground))
+                    .child(
+                        div()
+                            .text_size(px(FONT_LABEL))
+                            .line_height(px(LEADING_LABEL))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child("Info"),
+                    )
+                    .child(caption_text(summary, theme)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .id("info-messages")
+                    .overflow_y_scroll()
+                    .px(px(SPACE_3))
+                    .py(px(SPACE_2))
+                    .child(div().flex().flex_col().gap(px(SPACE_1)).children(
+                        self.messages[start..].iter().rev().map(|m| {
+                            div()
+                                .text_size(px(FONT_LABEL))
+                                .line_height(px(LEADING_LABEL))
+                                .text_color(if is_error_message(m) {
+                                    theme.danger
+                                } else {
+                                    theme.foreground
+                                })
+                                .child(m.clone())
+                        }),
+                    )),
+            )
+    }
+
     fn render_editor(&self) -> impl IntoElement {
         div()
             .flex()
@@ -1989,7 +2830,13 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut col = div().flex().flex_col().size_full().bg(theme.background);
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .bg(theme.background);
         col = col.child(self.render_sub_tab_bar(theme, cx));
         // The content wrapper must be a flex container: the results content
         // is a `flex_1` div, and as a plain block child its flex sizing is
@@ -2222,11 +3069,18 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tab = self.active_tab();
-        let (first, last, total, current, total_pages) = {
+        let (first, last, total, current, total_pages, page_size) = {
             let state = tab.table_state.read(cx);
             let delegate = state.delegate();
             let (first, last, total) = delegate.page_range();
-            (first, last, total, delegate.page(), delegate.total_pages())
+            (
+                first,
+                last,
+                total,
+                delegate.page(),
+                delegate.total_pages(),
+                delegate.page_size(),
+            )
         };
         let mut row = div()
             .flex()
@@ -2323,7 +3177,7 @@ impl Workbench {
             .child(
                 div()
                     .pl(px(SPACE_4))
-                    .child(caption_text("10 / page".to_string(), theme)),
+                    .child(caption_text(format!("{page_size} / page"), theme)),
             )
     }
 
@@ -2482,103 +3336,136 @@ impl Workbench {
             .child(content)
     }
 
+    /// Navicat-style start page: one tile per connection, plus the demo
+    /// database and a "New connection" tile.
     fn render_home_connections(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut section = div().flex().flex_col().gap(px(SPACE_2)).child(
+        let section = div().flex().flex_col().gap(px(SPACE_2)).child(
             div()
                 .text_size(px(FONT_HEADING_MD))
                 .line_height(px(LEADING_HEADING_MD))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.foreground)
-                .child("Saved connections"),
+                .child("Connections"),
         );
-        section = section.child(
+        let tile = |id: String| {
             div()
+                .id(id)
                 .flex()
                 .flex_col()
-                .gap(px(SPACE_1))
+                .gap(px(SPACE_2))
+                .w(px(232.))
                 .p(px(SPACE_3))
                 .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.popover)
+                .hover(|this| this.border_color(theme.primary))
+        };
+        let tile_title = |icon_name: IconName, title: String, subtitle: String| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(SPACE_2))
                 .child(
                     div()
-                        .text_size(px(FONT_BODY))
-                        .line_height(px(LEADING_BODY))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.foreground)
-                        .child("Demo mode"),
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(32.))
+                        .rounded(px(RADIUS_MD))
+                        .bg(theme.accent)
+                        .child(icon(icon_name, 18., theme.primary)),
                 )
-                .child(caption_text(
-                    "Try the full UI with a built-in fake database. No Oracle needed.".to_string(),
-                    theme,
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .text_size(px(FONT_BODY))
+                                .line_height(px(LEADING_BODY))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.foreground)
+                                .truncate()
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(FONT_CAPTION))
+                                .line_height(px(LEADING_CAPTION))
+                                .text_color(theme.muted_foreground)
+                                .truncate()
+                                .child(subtitle),
+                        ),
+                )
+        };
+        let mut grid = div().flex().flex_row().flex_wrap().gap(px(SPACE_3));
+        let demo_connected = self.demo_mode && self.session.is_some();
+        grid = grid.child(
+            tile("home-demo-tile".to_string())
+                .child(tile_title(
+                    IconName::Database,
+                    "Demo database".to_string(),
+                    "Built-in, no Oracle needed".to_string(),
                 ))
                 .child(
-                    div().pt(px(SPACE_1)).child(
-                        Button::new("home-demo")
-                            .label("Connect to demo")
-                            .icon(IconName::Play)
-                            .primary()
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
-                    ),
+                    Button::new("home-demo")
+                        .label(if demo_connected {
+                            "Connected"
+                        } else {
+                            "Connect"
+                        })
+                        .icon(IconName::Play)
+                        .primary()
+                        .disabled(self.busy || demo_connected)
+                        .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
                 ),
         );
         for (ix, profile) in self.profiles.iter().enumerate() {
             let profile = profile.clone();
-            section = section.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(SPACE_2))
-                    .p(px(SPACE_3))
-                    .rounded(px(RADIUS_MD))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.popover)
-                    .child(icon(IconName::Database, 18., theme.primary))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .child(
-                                div()
-                                    .text_size(px(FONT_BODY))
-                                    .line_height(px(LEADING_BODY))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.foreground)
-                                    .child(profile.name.clone()),
-                            )
-                            .child(caption_text(
-                                format!("{}@{}", profile.username, profile.connect_string),
-                                theme,
-                            )),
-                    )
+            grid = grid.child(
+                tile(format!("home-profile-{ix}"))
+                    .child(tile_title(
+                        IconName::Database,
+                        profile.name.clone(),
+                        format!("{}@{}", profile.username, profile.connect_string),
+                    ))
                     .child(
                         Button::new(format!("home-use-{ix}"))
-                            .label("Use connection")
+                            .label("Open")
+                            .icon(IconName::LogIn)
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.rail = RailPanel::Connections;
-                                this.editing_profile = Some(ix);
-                                this.fill_form(&profile, window, cx);
-                                cx.notify();
+                                // Passwords are never stored: open the
+                                // filled dialog so the user types it.
+                                this.edit_profile(ix, window, cx);
                             })),
                     ),
             );
         }
-        if self.profiles.is_empty() {
-            section = section.child(caption_text(
-                "No saved connections yet. Add one from the Connections panel.".to_string(),
-                theme,
-            ));
-        }
-        section
+        grid = grid.child(
+            tile("home-new-tile".to_string())
+                .child(tile_title(
+                    IconName::Plus,
+                    "New connection".to_string(),
+                    "Oracle (Easy Connect / TNS)".to_string(),
+                ))
+                .child(
+                    Button::new("home-new")
+                        .label("Create")
+                        .icon(IconName::Plus)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_new_connection(window, cx);
+                        })),
+                ),
+        );
+        section.child(grid)
     }
 
     fn render_home_recent(
@@ -2717,26 +3604,143 @@ impl Render for Workbench {
             .text_color(theme.foreground)
             .key_context("Workbench")
             .on_action(cx.listener(|this, _action: &RunQuery, _, cx| this.run(cx)))
+            .relative()
             .child(
-                div().flex_1().child(
-                    h_resizable("main-split")
-                        .child(
-                            resizable_panel()
-                                .fixed()
-                                .size(px(RAIL_WIDTH))
-                                .child(self.render_rail(&theme, cx)),
-                        )
-                        .child(
-                            resizable_panel()
-                                .size(px(SIDE_PANEL_WIDTH))
-                                .size_range(px(220.)..px(440.))
-                                .child(self.render_side_panel(&theme, cx)),
-                        )
-                        .child(resizable_panel().child(self.render_main(&theme, cx))),
-                ),
+                // The rail sits outside the resizable group: as a fixed
+                // panel it was padded up to the group's minimum panel
+                // width, leaving an empty strip next to it.
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_row()
+                    .min_h(px(0.))
+                    .child(self.render_rail(&theme, cx))
+                    .child(
+                        div().flex_1().min_w(px(0.)).child(
+                            h_resizable("main-split")
+                                .child(
+                                    resizable_panel()
+                                        .size(px(SIDE_PANEL_WIDTH))
+                                        .size_range(px(220.)..px(440.))
+                                        .child(self.render_side_panel(&theme, cx)),
+                                )
+                                .child(resizable_panel().child(self.render_main(&theme, cx))),
+                        ),
+                    ),
             )
             .child(self.render_status_bar(&theme))
+            .when(self.show_connection_form, |this| {
+                this.child(self.render_connection_dialog(&theme, cx))
+            })
     }
+}
+
+/// One explorer row: icon + name. Double click opens data (tables/views)
+/// or the script (everything else); right click opens the Toad-style
+/// object menu.
+fn render_object_row(
+    ix: usize,
+    object: ObjectRef,
+    selected: bool,
+    theme: &gpui_kit::component::Theme,
+    cx: &mut Context<Workbench>,
+) -> impl IntoElement {
+    let icon_name = match object.kind {
+        ObjectKind::Table => IconName::Table,
+        ObjectKind::View => IconName::Eye,
+        ObjectKind::Index => IconName::ListOrdered,
+        ObjectKind::Sequence => IconName::Hash,
+        ObjectKind::Procedure | ObjectKind::Function => IconName::SquareFunction,
+        ObjectKind::Package => IconName::Braces,
+        ObjectKind::Trigger => IconName::Zap,
+        ObjectKind::Synonym => IconName::Link,
+        ObjectKind::Other(_) => IconName::FileText,
+    };
+    let click_object = object.clone();
+    let mut row = div()
+        .id(("explorer-row", ix))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(SPACE_2))
+        .h(px(TREE_ROW_HEIGHT))
+        .px(px(SPACE_2))
+        .rounded(px(RADIUS_SM))
+        .text_size(px(FONT_LABEL))
+        .line_height(px(LEADING_LABEL))
+        .on_click(cx.listener(move |this, event, window, cx| {
+            this.on_object_click(click_object.clone(), event, window, cx);
+        }));
+    if selected {
+        row = row.bg(theme.accent).text_color(theme.accent_foreground);
+    } else {
+        row = row
+            .text_color(theme.foreground)
+            .hover(|this| this.bg(theme.secondary));
+    }
+    let view = cx.entity();
+    row.child(icon(icon_name, 14., theme.muted_foreground))
+        .child(div().flex_1().truncate().child(object.name.clone()))
+        .context_menu(move |menu, _, _| object_menu(menu, &view, &object))
+}
+
+/// The right-click menu for an explorer object.
+fn object_menu(menu: PopupMenu, view: &Entity<Workbench>, object: &ObjectRef) -> PopupMenu {
+    let has_data = schema::has_data(&object.kind);
+    let is_table = object.kind == ObjectKind::Table;
+    let item =
+        |label: &str,
+         icon_name: IconName,
+         enabled: bool,
+         f: fn(&mut Workbench, ObjectRef, &mut Window, &mut Context<Workbench>)| {
+            let view = view.clone();
+            let object = object.clone();
+            PopupMenuItem::new(label.to_string())
+                .icon(Icon::new(icon_name))
+                .disabled(!enabled)
+                .on_click(move |_, window, cx: &mut App| {
+                    let object = object.clone();
+                    view.update(cx, |this, cx| f(this, object, window, cx));
+                })
+        };
+    menu.min_w(px(220.))
+        .item(item(
+            "Open Data",
+            IconName::Table,
+            has_data,
+            |this, o, window, cx| this.open_table_data(&o.owner, &o.name, window, cx),
+        ))
+        .item(item(
+            "Describe",
+            IconName::Columns3,
+            has_data,
+            |this, o, _, cx| this.describe_object(o, cx),
+        ))
+        .item(item(
+            "View Script",
+            IconName::FileCode,
+            true,
+            |this, o, _, cx| this.view_script(o, cx),
+        ))
+        .separator()
+        .item(item(
+            "Export Data (CSV)",
+            IconName::Download,
+            has_data,
+            |this, o, _, cx| this.export_table(o, ExportFormat::Csv, cx),
+        ))
+        .item(item(
+            "Export Data (XLSX)",
+            IconName::FileSpreadsheet,
+            has_data,
+            |this, o, _, cx| this.export_table(o, ExportFormat::Xlsx, cx),
+        ))
+        .item(item(
+            "Import Data (CSV)",
+            IconName::Upload,
+            is_table,
+            |this, o, _, cx| this.import_table(o, cx),
+        ))
 }
 
 // ----- small shared pieces -----
@@ -2780,6 +3784,31 @@ fn empty_state_text(text: String, theme: &gpui_kit::component::Theme) -> gpui_ki
         .line_height(px(LEADING_LABEL))
         .text_color(theme.muted_foreground)
         .child(text)
+}
+
+/// Content of a select-style dropdown button: the value left aligned and a
+/// chevron on the right, like a native select (Button centers its label).
+fn select_trigger(text: String, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .min_w(px(0.))
+        .gap(px(SPACE_2))
+        .child(div().flex_1().min_w(px(0.)).truncate().child(text))
+        .child(icon(IconName::ChevronDown, 14., theme.muted_foreground))
+}
+
+/// Messages are plain strings; ORA-/driver errors and Indonesian failure
+/// texts ("gagal") are shown in the danger color in the Info strip.
+fn is_error_message(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    message.contains("ORA-")
+        || message.contains("DPY-")
+        || lower.contains("error")
+        || lower.contains("gagal")
+        || lower.starts_with("demo:")
 }
 
 fn unix_stamp() -> u64 {
