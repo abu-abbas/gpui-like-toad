@@ -27,7 +27,11 @@ fn main() {
         return;
     }
     application()
-        .with_assets(assets::Assets)
+        // AllAssets, NOT Assets: the default bundle embeds only the 106
+        // icons in default-icons.txt, so every other Lucide icon used by
+        // this app (Database, Clock, Table, House, ChartColumn, ...) silently
+        // rendered blank. AllAssets embeds the full catalog.
+        .with_assets(assets::AllAssets)
         .run(|cx: &mut App| {
             init(cx);
             load_bundled_fonts(cx);

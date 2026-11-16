@@ -18,6 +18,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::tree::{tree, TreeItem, TreeState};
 use gpui_kit::component::{
@@ -26,8 +27,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, relative, App, Context, Entity, FontWeight, Hsla, IntoElement, Render, SharedString,
-    Subscription, Window,
+    div, px, relative, App, ClickEvent, Context, Entity, FontWeight, Hsla, IntoElement, Render,
+    SharedString, Subscription, Window,
 };
 use ora_core::export::{to_csv, to_xlsx};
 use ora_core::sql::{clean_statement, format_sql};
@@ -38,11 +39,11 @@ use crate::plan;
 use crate::results::ResultsDelegate;
 use crate::schema;
 use crate::theme::{
-    self, FONT_BODY, FONT_CAPTION, FONT_HEADING_MD, FONT_HEADING_XL, FONT_LABEL, GRID_ROW_HEIGHT,
-    LEADING_BODY, LEADING_CAPTION, LEADING_HEADING_MD, LEADING_HEADING_XL, LEADING_LABEL,
-    PAGINATION_HEIGHT, PLAN_PANEL_WIDTH, RADIUS_MD, RADIUS_SM, RAIL_BUTTON_HEIGHT, RAIL_WIDTH,
-    SIDE_PANEL_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6, STATUS_BAR_HEIGHT,
-    SUB_TAB_HEIGHT, TAB_BAR_HEIGHT, TOOLBAR_HEIGHT, TREE_ROW_HEIGHT,
+    self, FONT_BODY, FONT_CAPTION, FONT_HEADING_MD, FONT_HEADING_XL, FONT_LABEL, FONT_RAIL,
+    GRID_ROW_HEIGHT, LEADING_BODY, LEADING_CAPTION, LEADING_HEADING_MD, LEADING_HEADING_XL,
+    LEADING_LABEL, LEADING_RAIL, PAGINATION_HEIGHT, PLAN_PANEL_WIDTH, RADIUS_MD, RADIUS_SM,
+    RAIL_BUTTON_HEIGHT, RAIL_WIDTH, SIDE_PANEL_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6,
+    STATUS_BAR_HEIGHT, SUB_TAB_HEIGHT, TAB_BAR_HEIGHT, TOOLBAR_HEIGHT, TREE_ROW_HEIGHT,
 };
 use crate::worker::{DbHandle, Job, Response};
 
@@ -136,6 +137,11 @@ pub struct Workbench {
     rail: RailPanel,
     profiles: Vec<SavedProfile>,
     editing_profile: Option<usize>,
+    /// Whether the new-connection form is shown while connected. The form
+    /// is always shown while disconnected; once connected it collapses
+    /// until "+" toggles it back. Collapsing never clears the inputs:
+    /// they live on `Workbench` as entities and survive re-render.
+    show_connection_form: bool,
     history: Vec<HistoryEntry>,
     theme_pref: ThemePreference,
     tabs: Vec<QueryTab>,
@@ -191,6 +197,7 @@ impl Workbench {
             rail: RailPanel::Connections,
             profiles: store::load_profiles(),
             editing_profile: None,
+            show_connection_form: true,
             history: store::load_history(),
             theme_pref: theme::preference(cx),
             tabs: vec![first_tab],
@@ -407,6 +414,7 @@ impl Workbench {
         }
         self.session = None;
         self.demo_mode = false;
+        self.show_connection_form = true;
         self.objects.clear();
         self.tree_state.update(cx, |state, cx| {
             state.set_items(Vec::<TreeItem>::new(), cx);
@@ -680,6 +688,20 @@ impl Workbench {
         cx.notify();
     }
 
+    /// "+" in the Connections header: while connected it toggles the
+    /// new-connection form (hidden by default once connected); while
+    /// disconnected the form is always visible, so "+" clears it for a
+    /// fresh profile instead. Toggling never clears typed text.
+    fn toggle_connection_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_some() {
+            self.show_connection_form = !self.show_connection_form;
+            cx.notify();
+        } else {
+            self.show_connection_form = true;
+            self.new_profile_form(window, cx);
+        }
+    }
+
     fn save_profile(&mut self, cx: &mut Context<Self>) {
         let username = Self::input_text(&self.user_input, cx);
         let connect_string = Self::input_text(&self.host_input, cx);
@@ -779,10 +801,25 @@ impl Workbench {
         });
     }
 
-    fn on_tree_click(&mut self, id: SharedString, cx: &mut Context<Self>) {
+    fn on_tree_click(
+        &mut self,
+        id: SharedString,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some((owner, name, group)) = schema::parse_object_id(&id) else {
             return; // group header: expand/collapse is handled by the tree
         };
+        // No dedicated double-click API: the platform reports the tap count
+        // on the mouse-down event, so a double-click arrives as a second
+        // click with `click_count >= 2`. The first click still runs the
+        // single-click describe below; the data query supersedes it.
+        let double_click = matches!(event, ClickEvent::Mouse(m) if m.down.click_count >= 2);
+        if double_click && schema::is_describable_group(group) {
+            self.open_table_data(owner, name, window, cx);
+            return;
+        }
         if !schema::is_describable_group(group) {
             self.push_message(format!(
                 "Describe untuk {group} belum didukung di MVP ({owner}.{name})."
@@ -807,6 +844,37 @@ impl Workbench {
             },
             cx,
         );
+    }
+
+    /// Double-click on a table/view row: fill the editor with a capped
+    /// `SELECT *` and run it, like Toad/Navicat. A describe fired by the
+    /// first click of the double-click is superseded with the same
+    /// soft-cancel as Stop (its late response is dropped by the generation
+    /// check); a real in-flight query is never cancelled.
+    fn open_table_data(
+        &mut self,
+        owner: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() {
+            return;
+        }
+        if self.busy && matches!(self.pending_op, Some(PendingOp::Describe { .. })) {
+            self.op_generation += 1;
+            self.pending_op = None;
+            self.pending_sql = None;
+            self.busy = false;
+        }
+        if self.busy {
+            return;
+        }
+        self.show_home = false;
+        let sql = schema::select_all_sql(owner, name);
+        let editor = self.active_tab().editor.clone();
+        editor.update(cx, |state, cx| state.set_value(sql, window, cx));
+        self.run(cx);
     }
 
     // ----- response handling -----
@@ -848,6 +916,7 @@ impl Workbench {
             (Some(PendingOp::Connect), Response::Connected(info)) => {
                 self.session = Some(info.clone());
                 self.connect_error = None;
+                self.show_connection_form = false;
                 self.status = format!("Connected sebagai {}.", info.user);
                 self.push_message(format!(
                     "Connected: {} @ {} ({})",
@@ -936,7 +1005,7 @@ impl Workbench {
 
     fn conn_status(&self, theme: &gpui_kit::component::Theme) -> (Hsla, &'static str, String) {
         if self.busy && matches!(self.pending_op, Some(PendingOp::Connect)) {
-            return (theme.warning, "Connecting…", "Menghubungkan...".to_string());
+            return (theme.warning, "Connecting…", String::new());
         }
         if let Some(session) = &self.session {
             let mode = if self.demo_mode { "Demo" } else { "Connected" };
@@ -950,14 +1019,10 @@ impl Workbench {
             return (
                 theme.danger,
                 "Connection failed",
-                "Koneksi gagal (lihat Messages).".to_string(),
+                "lihat Messages".to_string(),
             );
         }
-        (
-            theme.muted_foreground,
-            "Disconnected",
-            "Belum terhubung.".to_string(),
-        )
+        (theme.muted_foreground, "Disconnected", String::new())
     }
 
     // ----- rendering: chrome -----
@@ -1089,7 +1154,7 @@ impl Workbench {
                     .pr(px(SPACE_1))
                     .on_click(cx.listener(move |this, _, _, cx| this.activate_tab(ix, cx)))
                     .child(icon(
-                        IconName::FileCode,
+                        IconName::Database,
                         14.,
                         if active {
                             theme.primary
@@ -1152,7 +1217,7 @@ impl Workbench {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .w(px(RAIL_WIDTH - 8.))
+                .w(px(RAIL_WIDTH - 6.))
                 .h(px(RAIL_BUTTON_HEIGHT))
                 .gap(px(SPACE_1))
                 .rounded(px(RADIUS_MD))
@@ -1173,8 +1238,8 @@ impl Workbench {
             rail = rail.child(
                 button.child(icon(icon_name, 20., color)).child(
                     div()
-                        .text_size(px(FONT_CAPTION))
-                        .line_height(px(LEADING_CAPTION))
+                        .text_size(px(FONT_RAIL))
+                        .line_height(px(LEADING_RAIL))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(color)
                         .child(label),
@@ -1245,13 +1310,17 @@ impl Workbench {
                 .w(px(28.))
                 .rounded(px(RADIUS_MD))
                 .hover(|this| this.bg(theme.secondary))
-                .on_click(cx.listener(|this, _, window, cx| this.new_profile_form(window, cx)))
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.toggle_connection_form(window, cx)),
+                )
                 .child(icon(IconName::Plus, 16., theme.muted_foreground)),
         );
         panel = panel.child(header);
         panel = panel.child(self.render_session_card(theme, cx));
         panel = panel.child(self.render_profile_list(theme, cx));
-        panel = panel.child(self.render_connection_form(theme, cx));
+        if self.session.is_none() || self.show_connection_form {
+            panel = panel.child(self.render_connection_form(theme, cx));
+        }
         panel = panel.child(
             div()
                 .px(px(SPACE_3))
@@ -1537,8 +1606,8 @@ impl Workbench {
                         .text_size(px(FONT_LABEL))
                         .pl(px(12. + 16. * entry.depth() as f32))
                         .child(item.label.clone())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.on_tree_click(item_id.clone(), cx);
+                        .on_click(cx.listener(move |this, event, window, cx| {
+                            this.on_tree_click(item_id.clone(), event, window, cx);
                         }))
                 })
             }
@@ -1765,6 +1834,11 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut main = div().flex().flex_col().flex_1().bg(theme.background);
+        // The tab strip lives at the top of the main column only (right of
+        // the sidebar), above the toolbar — as in the design. No spacer
+        // above the rail/sidebar: the design shares the top row between
+        // the first rail item, the sidebar header, and the tab strip.
+        main = main.child(self.render_tab_bar(theme, cx));
         main = main.child(self.render_toolbar(theme, cx));
         if self.show_home {
             main = main.child(self.render_home(theme, cx));
@@ -1814,13 +1888,6 @@ impl Workbench {
                     .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
             )
             .child(
-                Button::new("stop")
-                    .label("Stop")
-                    .icon(IconName::Square)
-                    .disabled(!self.busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
-            )
-            .child(
                 Button::new("explain")
                     .label("Explain")
                     .icon(IconName::ChartColumn)
@@ -1833,6 +1900,13 @@ impl Workbench {
                     .icon(IconName::WandSparkles)
                     .disabled(on_home)
                     .on_click(cx.listener(|this, _, window, cx| this.format_editor(window, cx))),
+            )
+            .child(
+                Button::new("stop")
+                    .label("Stop")
+                    .icon(IconName::Square)
+                    .disabled(!self.busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
             )
             .child(
                 Button::new("commit")
@@ -1917,7 +1991,21 @@ impl Workbench {
     ) -> impl IntoElement {
         let mut col = div().flex().flex_col().size_full().bg(theme.background);
         col = col.child(self.render_sub_tab_bar(theme, cx));
-        col = col.child(div().flex_1().child(self.render_results_content(theme, cx)));
+        // The content wrapper must be a flex container: the results content
+        // is a `flex_1` div, and as a plain block child its flex sizing is
+        // ignored, leaving it content-height. `DataTable` sizes itself with
+        // `size_full`, which resolves against that indefinite height as
+        // auto, so the virtualized row list collapses to 0px and no rows
+        // paint even though the delegate holds data (only the header, with
+        // its explicit height, showed). As a flex item the content gets a
+        // definite flex-computed height and the rows render.
+        col = col.child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .child(self.render_results_content(theme, cx)),
+        );
         if self.active_tab().results_tab == ResultsTab::Results {
             col = col.child(self.render_pagination(theme, cx));
         }
@@ -1989,59 +2077,38 @@ impl Workbench {
                 .flex_row()
                 .items_center()
                 .gap(px(SPACE_2))
-                .child(self.render_export_button("CSV", theme, cx, true))
-                .child(self.render_export_button("XLSX", theme, cx, false)),
+                .child(self.render_export_dropdown(cx)),
         )
     }
 
-    fn render_export_button(
-        &self,
-        label: &str,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-        is_csv: bool,
-    ) -> impl IntoElement {
+    /// One Export dropdown (CSV/XLSX) via the component `DropdownMenu`
+    /// API. The trigger shows no chevron glyph: `Button` renders none
+    /// automatically and a unicode chevron is not allowed in this UI.
+    fn render_export_dropdown(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let has_result = self.active_tab().last_result.is_some();
-        div()
-            .id(format!("export-{label}"))
-            .flex()
-            .flex_row()
-            .items_center()
-            .h(px(28.))
-            .gap(px(SPACE_1))
-            .px(px(SPACE_2))
-            .rounded(px(RADIUS_MD))
-            .border_1()
-            .border_color(theme.border)
-            .hover(|this| this.bg(theme.secondary))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if is_csv {
-                    this.export_csv(cx);
-                } else {
-                    this.export_xlsx(cx);
-                }
-            }))
-            .child(icon(
-                IconName::Download,
-                14.,
-                if has_result {
-                    theme.foreground
-                } else {
-                    theme.muted_foreground
-                },
-            ))
-            .child(
-                div()
-                    .text_size(px(FONT_LABEL))
-                    .line_height(px(LEADING_LABEL))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(if has_result {
-                        theme.foreground
-                    } else {
-                        theme.muted_foreground
-                    })
-                    .child(label.to_string()),
-            )
+        let view = cx.entity();
+        Button::new("export")
+            .label("Export")
+            .icon(IconName::Download)
+            .disabled(!has_result)
+            .dropdown_menu(move |menu, _, _| {
+                let csv_view = view.clone();
+                let xlsx_view = view.clone();
+                menu.item(
+                    PopupMenuItem::new("Export CSV")
+                        .disabled(!has_result)
+                        .on_click(move |_, _, cx: &mut App| {
+                            csv_view.update(cx, |this, cx| this.export_csv(cx));
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Export XLSX")
+                        .disabled(!has_result)
+                        .on_click(move |_, _, cx: &mut App| {
+                            xlsx_view.update(cx, |this, cx| this.export_xlsx(cx));
+                        }),
+                )
+            })
     }
 
     fn render_results_content(
@@ -2187,37 +2254,53 @@ impl Workbench {
             theme,
             cx,
         ));
-        for page in page_window(current, total_pages) {
-            let active = page == current;
-            let mut button = div()
-                .id(format!("page-{page}"))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .h(px(24.))
-                .w(px(24.))
-                .rounded(px(RADIUS_SM))
-                .on_click(cx.listener(move |this, _, _, cx| this.goto_page(page, cx)));
-            if active {
-                button = button.bg(theme.primary);
-            } else {
-                button = button.hover(|this| this.bg(theme.secondary));
+        for item in page_items(current, total_pages) {
+            match item {
+                PageItem::Gap => {
+                    row = row.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_center()
+                            .h(px(24.))
+                            .w(px(24.))
+                            .child(caption_text("…".to_string(), theme)),
+                    );
+                }
+                PageItem::Page(page) => {
+                    let active = page == current;
+                    let mut button = div()
+                        .id(format!("page-{page}"))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
+                        .h(px(24.))
+                        .w(px(24.))
+                        .rounded(px(RADIUS_SM))
+                        .on_click(cx.listener(move |this, _, _, cx| this.goto_page(page, cx)));
+                    if active {
+                        button = button.bg(theme.primary);
+                    } else {
+                        button = button.hover(|this| this.bg(theme.secondary));
+                    }
+                    row = row.child(
+                        button.child(
+                            div()
+                                .text_size(px(FONT_LABEL))
+                                .line_height(px(LEADING_LABEL))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(if active {
+                                    theme.primary_foreground
+                                } else {
+                                    theme.foreground
+                                })
+                                .child(format!("{}", page + 1)),
+                        ),
+                    );
+                }
             }
-            row = row.child(
-                button.child(
-                    div()
-                        .text_size(px(FONT_LABEL))
-                        .line_height(px(LEADING_LABEL))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(if active {
-                            theme.primary_foreground
-                        } else {
-                            theme.foreground
-                        })
-                        .child(format!("{}", page + 1)),
-                ),
-            );
         }
         row = row.child(self.render_page_nav(
             "next",
@@ -2554,6 +2637,11 @@ impl Workbench {
 
     fn render_status_bar(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
         let (dot_color, conn_label, conn_detail) = self.conn_status(theme);
+        let conn_text = if conn_detail.is_empty() {
+            conn_label.to_string()
+        } else {
+            format!("{conn_label} · {conn_detail}")
+        };
         let mut bar = div()
             .flex()
             .flex_row()
@@ -2577,7 +2665,7 @@ impl Workbench {
                         .line_height(px(LEADING_CAPTION))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.foreground)
-                        .child(format!("{conn_label} · {conn_detail}")),
+                        .child(conn_text),
                 ),
         );
         if let Some(elapsed) = self.active_tab().elapsed_ms {
@@ -2602,11 +2690,16 @@ impl Workbench {
                     .child(caption_text(format!("{} rows", result.row_count()), theme)),
             );
         }
+        // Right side: activity while busy, last action while connected,
+        // empty while disconnected — the connection state already shows
+        // once on the left, and every status line is mirrored to Messages.
         bar.child(div().flex_1()).child(caption_text(
             if self.busy {
                 "Running…".to_string()
-            } else {
+            } else if self.session.is_some() {
                 self.status.clone()
+            } else {
+                String::new()
             },
             theme,
         ))
@@ -2624,7 +2717,6 @@ impl Render for Workbench {
             .text_color(theme.foreground)
             .key_context("Workbench")
             .on_action(cx.listener(|this, _action: &RunQuery, _, cx| this.run(cx)))
-            .child(self.render_tab_bar(&theme, cx))
             .child(
                 div().flex_1().child(
                     h_resizable("main-split")
@@ -2707,19 +2799,44 @@ fn export_xlsx_filename(stamp: u64) -> String {
     format!("gpui-like-toad-export-{stamp}.xlsx")
 }
 
-/// Page-number window for the pagination row: at most 5 pages, centered on
-/// the current page when possible. Pages are 0-based.
-fn page_window(current: usize, total: usize) -> Vec<usize> {
+/// One slot in the numbered pagination row: a clickable page or an
+/// ellipsis gap between the pinned first/last pages and the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageItem {
+    Page(usize),
+    Gap,
+}
+
+/// Numbered pagination with pinned first/last pages and ellipsis gaps:
+/// at most 5 window pages, centered on the current page when possible.
+/// Pages are 0-based.
+fn page_items(current: usize, total: usize) -> Vec<PageItem> {
     const WINDOW: usize = 5;
     if total == 0 {
         return Vec::new();
     }
-    let start = if total <= WINDOW {
-        0
-    } else {
-        current.saturating_sub(2).min(total - WINDOW)
-    };
-    (start..(start + WINDOW).min(total)).collect()
+    if total <= WINDOW + 2 {
+        return (0..total).map(PageItem::Page).collect();
+    }
+    let start = current.saturating_sub(2).min(total - WINDOW);
+    let end = start + WINDOW;
+    let mut items = Vec::new();
+    if start > 0 {
+        items.push(PageItem::Page(0));
+        if start > 1 {
+            items.push(PageItem::Gap);
+        }
+    }
+    for page in start..end {
+        items.push(PageItem::Page(page));
+    }
+    if end < total {
+        if end < total - 1 {
+            items.push(PageItem::Gap);
+        }
+        items.push(PageItem::Page(total - 1));
+    }
+    items
 }
 
 #[cfg(test)]
@@ -2740,13 +2857,58 @@ mod tests {
     }
 
     #[test]
-    fn page_window_centers_and_clamps() {
-        assert!(page_window(0, 0).is_empty());
-        assert_eq!(page_window(0, 1), vec![0]);
-        assert_eq!(page_window(0, 3), vec![0, 1, 2]);
-        assert_eq!(page_window(0, 9), vec![0, 1, 2, 3, 4]);
-        assert_eq!(page_window(4, 9), vec![2, 3, 4, 5, 6]);
-        assert_eq!(page_window(8, 9), vec![4, 5, 6, 7, 8]);
-        assert_eq!(page_window(99, 9), vec![4, 5, 6, 7, 8]);
+    fn page_items_pin_first_last_with_ellipsis() {
+        use PageItem::{Gap, Page};
+        assert!(page_items(0, 0).is_empty());
+        assert_eq!(page_items(0, 1), vec![Page(0)]);
+        assert_eq!(page_items(0, 3), vec![Page(0), Page(1), Page(2)]);
+        assert_eq!(
+            page_items(0, 7),
+            vec![
+                Page(0),
+                Page(1),
+                Page(2),
+                Page(3),
+                Page(4),
+                Page(5),
+                Page(6)
+            ]
+        );
+        assert_eq!(
+            page_items(0, 9),
+            vec![Page(0), Page(1), Page(2), Page(3), Page(4), Gap, Page(8)]
+        );
+        assert_eq!(
+            page_items(4, 9),
+            vec![
+                Page(0),
+                Gap,
+                Page(2),
+                Page(3),
+                Page(4),
+                Page(5),
+                Page(6),
+                Gap,
+                Page(8)
+            ]
+        );
+        assert_eq!(
+            page_items(8, 9),
+            vec![Page(0), Gap, Page(4), Page(5), Page(6), Page(7), Page(8)]
+        );
+        assert_eq!(page_items(99, 9), page_items(8, 9));
+        assert_eq!(
+            page_items(3, 8),
+            vec![
+                Page(0),
+                Page(1),
+                Page(2),
+                Page(3),
+                Page(4),
+                Page(5),
+                Gap,
+                Page(7)
+            ]
+        );
     }
 }
