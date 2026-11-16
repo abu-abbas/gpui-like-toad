@@ -1,4 +1,51 @@
-use crate::model::QueryResult;
+use crate::model::{QueryResult, Value};
+
+/// Render a [`QueryResult`] as an `.xlsx` workbook (single sheet named
+/// "Results"): bold header row, numbers as numeric cells, text as string
+/// cells, NULL as blank cells. Returns the raw workbook bytes; the caller
+/// writes them to a file.
+///
+/// `Value::Integer` is i128 while Excel stores IEEE-754 doubles, so very
+/// large integers lose precision past 2^53 — acceptable for a grid export,
+/// and the CSV export keeps the exact text.
+pub fn to_xlsx(result: &QueryResult) -> Result<Vec<u8>, String> {
+    use rust_xlsxwriter::{Format, Workbook};
+
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("Results").map_err(|e| e.to_string())?;
+    let header_format = Format::new().set_bold();
+    for (col, column) in result.columns.iter().enumerate() {
+        sheet
+            .write_string_with_format(0, col as u16, column.name.as_str(), &header_format)
+            .map_err(|e| e.to_string())?;
+    }
+    for (row_ix, row) in result.rows.iter().enumerate() {
+        let row_num = (row_ix + 1) as u32;
+        for (col_ix, value) in row.iter().enumerate() {
+            let col_num = col_ix as u16;
+            match value {
+                Value::Null => {}
+                Value::Integer(n) => {
+                    sheet
+                        .write_number(row_num, col_num, *n as f64)
+                        .map_err(|e| e.to_string())?;
+                }
+                Value::Float(f) => {
+                    sheet
+                        .write_number(row_num, col_num, *f)
+                        .map_err(|e| e.to_string())?;
+                }
+                Value::Text(_) | Value::Bytes(_) => {
+                    sheet
+                        .write_string(row_num, col_num, value.display())
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+    workbook.save_to_buffer().map_err(|e| e.to_string())
+}
 
 /// Render a [`QueryResult`] as RFC 4180 CSV: CRLF line endings, fields
 /// quoted when they contain a comma, quote, or line break, embedded quotes
@@ -121,5 +168,62 @@ mod tests {
             elapsed: Default::default(),
         };
         assert_eq!(to_csv(&result), "T\r\ncafé ☕\r\n\"a\rb\"\r\n");
+    }
+
+    #[test]
+    fn xlsx_writes_a_valid_zip_workbook() {
+        let bytes = to_xlsx(&sample()).unwrap();
+        // ZIP magic: PK\x03\x04.
+        assert!(bytes.len() > 100, "workbook should be non-trivial");
+        assert_eq!(&bytes[0..4], &[0x50, 0x4B, 0x03, 0x04]);
+        // A workbook with different data differs.
+        let other = to_xlsx(&QueryResult::default()).unwrap();
+        assert_ne!(bytes, other);
+        assert_eq!(&other[0..4], &[0x50, 0x4B, 0x03, 0x04]);
+    }
+
+    #[test]
+    fn xlsx_round_trips_through_a_file() {
+        let bytes = to_xlsx(&sample()).unwrap();
+        // Test-only scratch file, unique per process id; no secrets involved.
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let path = std::env::temp_dir().join(format!(
+            "gpui-like-toad-xlsx-test-{}.xlsx",
+            std::process::id()
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        let read_back = std::fs::read(&path).unwrap();
+        assert_eq!(read_back.len(), bytes.len());
+        assert!(!read_back.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn xlsx_handles_floats_bytes_and_nulls() {
+        let result = QueryResult {
+            columns: vec![
+                ColumnInfo {
+                    name: "F".into(),
+                    data_type: "BINARY_DOUBLE".into(),
+                },
+                ColumnInfo {
+                    name: "B".into(),
+                    data_type: "RAW".into(),
+                },
+                ColumnInfo {
+                    name: "N".into(),
+                    data_type: "VARCHAR2".into(),
+                },
+            ],
+            rows: vec![vec![
+                Value::Float(1.5),
+                Value::Bytes(vec![0xDE, 0xAD]),
+                Value::Null,
+            ]],
+            truncated: false,
+            elapsed: Default::default(),
+        };
+        let bytes = to_xlsx(&result).unwrap();
+        assert_eq!(&bytes[0..4], &[0x50, 0x4B, 0x03, 0x04]);
     }
 }

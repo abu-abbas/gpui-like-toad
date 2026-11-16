@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::model::{ColumnDef, ConnectionProfile, QueryResult, SchemaObject};
+use crate::model::{ColumnDef, ConnectionProfile, PlanNode, QueryResult, SchemaObject};
 
 /// Error from a database operation. The message is user-facing: driver errors
 /// are converted to their display text (including the ORA- number) so the UI
@@ -76,4 +76,12 @@ pub trait DbClient: Send {
     /// `EXPLAIN PLAN` output as formatted text lines (DBMS_XPLAN style), one
     /// string per line, without trailing newlines.
     fn explain_plan(&mut self, sql: &str) -> Result<Vec<String>, DbError>;
+
+    /// `EXPLAIN PLAN` output as plan-tree nodes, from a hierarchical
+    /// `PLAN_TABLE` query. Backends that cannot provide nodes keep the
+    /// default, which reports unsupported; the UI then falls back to
+    /// [`DbClient::explain_plan`] text.
+    fn explain_plan_nodes(&mut self, _sql: &str) -> Result<Vec<PlanNode>, DbError> {
+        Err(DbError::new("plan nodes are not supported by this backend"))
+    }
 }

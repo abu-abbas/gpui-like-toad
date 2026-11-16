@@ -1,18 +1,22 @@
+mod plan;
 mod results;
 mod schema;
+mod theme;
 mod workbench;
 mod worker;
 
 use std::borrow::Cow;
 
 use gpui_kit::prelude::*;
-use gpui_kit::{application, assets, init, App, WindowOptions};
+use gpui_kit::{
+    application, assets, init, App, Bounds, KeyBinding, Point, Size, TitlebarOptions, WindowBounds,
+    WindowOptions,
+};
 
-/// UI font family. Preferred when installed on the system (e.g. alongside a
-/// JetBrains IDE); otherwise the platform default is used.
-pub const SANS_FONT_FAMILY: &str = "JetBrains Sans";
-/// Editor and plan-view font family. Bundled under `assets/fonts/` so the
-/// editor renders identically with or without the font installed.
+/// Font family for ALL UI text, per the design system (spec §2): JetBrains
+/// Mono everywhere, including toolbar, tree, grid, and status bar. The TTFs
+/// are bundled under `assets/fonts/` so the UI renders identically with or
+/// without the font installed.
 pub const MONO_FONT_FAMILY: &str = "JetBrains Mono";
 
 fn main() {
@@ -27,10 +31,30 @@ fn main() {
         .run(|cx: &mut App| {
             init(cx);
             load_bundled_fonts(cx);
-            let theme = gpui_kit::base::Theme::global_mut(cx);
-            theme.tokens.typography.sans = SANS_FONT_FAMILY.into();
-            theme.tokens.typography.mono = MONO_FONT_FAMILY.into();
-            cx.open_window(WindowOptions::default(), |window, cx| {
+            // Cmd/Ctrl+Enter and F5 run the active query. "cmd" is the
+            // platform modifier (Command on macOS, Super/Win elsewhere);
+            // the explicit ctrl-enter binding covers Windows/Linux Ctrl.
+            cx.bind_keys([
+                KeyBinding::new("cmd-enter", workbench::RunQuery, Some("Workbench")),
+                KeyBinding::new("ctrl-enter", workbench::RunQuery, Some("Workbench")),
+                KeyBinding::new("f5", workbench::RunQuery, Some("Workbench")),
+            ]);
+            let pref = ora_core::store::load_theme_preference();
+            let mut options = WindowOptions::default();
+            options.window_bounds = Some(WindowBounds::Windowed(Bounds::new(
+                Point::default(),
+                Size {
+                    width: gpui_kit::px(1280.),
+                    height: gpui_kit::px(800.),
+                },
+            )));
+            options.titlebar = Some(TitlebarOptions {
+                title: Some("DB Explorer".into()),
+                appears_transparent: false,
+                traffic_light_position: None,
+            });
+            cx.open_window(options, |window, cx| {
+                theme::apply_preference(pref, window, cx);
                 cx.new(|cx| workbench::Workbench::new(window, cx))
             })
             .expect("failed to open window");

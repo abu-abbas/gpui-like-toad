@@ -2,7 +2,8 @@ use std::time::Instant;
 
 use crate::client::{DbClient, DbError, DbInfo};
 use crate::model::{
-    ColumnDef, ColumnInfo, ConnectionProfile, ObjectKind, QueryResult, SchemaObject, Value,
+    ColumnDef, ColumnInfo, ConnectionProfile, ObjectKind, PlanNode, QueryResult, SchemaObject,
+    Value,
 };
 
 /// In-memory fake Oracle used by Demo mode and by tests.
@@ -255,8 +256,15 @@ impl DbClient for DemoClient {
             ("EMPLOYEES", ObjectKind::Table),
             ("DEPARTMENTS", ObjectKind::Table),
             ("EMP_DETAILS_VIEW", ObjectKind::View),
-            ("EMP_SEQ", ObjectKind::Sequence),
+            ("EMP_EMP_ID_PK", ObjectKind::Index),
+            ("EMP_EMAIL_UK", ObjectKind::Index),
+            ("DEPT_LOCATION_IX", ObjectKind::Index),
+            ("EMP_MGMT", ObjectKind::Package),
             ("GIVE_RAISE", ObjectKind::Procedure),
+            ("GET_SAL", ObjectKind::Function),
+            ("EMP_SEQ", ObjectKind::Sequence),
+            ("EMP_SYN", ObjectKind::Synonym),
+            ("EMP_SAL_TRG", ObjectKind::Trigger),
         ];
         Ok(catalog
             .into_iter()
@@ -323,6 +331,58 @@ impl DbClient for DemoClient {
                 .to_string(),
             "--------------------------------------------------------------------------------"
                 .to_string(),
+        ])
+    }
+
+    fn explain_plan_nodes(&mut self, sql: &str) -> Result<Vec<PlanNode>, DbError> {
+        self.require_connected()?;
+        let _ = sql;
+        Ok(vec![
+            PlanNode {
+                id: 0,
+                parent_id: None,
+                operation: "SELECT STATEMENT".into(),
+                options: String::new(),
+                object_name: String::new(),
+                cost: Some(12),
+                cardinality: Some(7),
+            },
+            PlanNode {
+                id: 1,
+                parent_id: Some(0),
+                operation: "NESTED LOOPS".into(),
+                options: String::new(),
+                object_name: String::new(),
+                cost: Some(12),
+                cardinality: Some(7),
+            },
+            PlanNode {
+                id: 2,
+                parent_id: Some(1),
+                operation: "TABLE ACCESS".into(),
+                options: "FULL".into(),
+                object_name: "EMPLOYEES".into(),
+                cost: Some(7),
+                cardinality: Some(7),
+            },
+            PlanNode {
+                id: 3,
+                parent_id: Some(1),
+                operation: "TABLE ACCESS".into(),
+                options: "BY INDEX ROWID".into(),
+                object_name: "DEPARTMENTS".into(),
+                cost: Some(5),
+                cardinality: Some(1),
+            },
+            PlanNode {
+                id: 4,
+                parent_id: Some(3),
+                operation: "INDEX".into(),
+                options: "UNIQUE SCAN".into(),
+                object_name: "PK_DEPARTMENTS".into(),
+                cost: Some(1),
+                cardinality: Some(1),
+            },
         ])
     }
 }
@@ -396,8 +456,25 @@ mod tests {
     fn demo_list_objects_and_describe() {
         let mut client = connected();
         let objects = client.list_objects("hr").unwrap();
-        assert_eq!(objects.len(), 5);
+        assert_eq!(objects.len(), 12);
         assert!(objects.iter().all(|o| o.owner == "HR"));
+        // Every group the schema tree shows is represented.
+        for kind in [
+            ObjectKind::Table,
+            ObjectKind::View,
+            ObjectKind::Index,
+            ObjectKind::Package,
+            ObjectKind::Procedure,
+            ObjectKind::Function,
+            ObjectKind::Sequence,
+            ObjectKind::Synonym,
+            ObjectKind::Trigger,
+        ] {
+            assert!(
+                objects.iter().any(|o| o.kind == kind),
+                "catalog missing {kind:?}"
+            );
+        }
         let cols = client.describe_table("HR", "employees").unwrap();
         assert_eq!(cols.len(), 7);
         assert_eq!(cols[0].name, "EMPLOYEE_ID");
@@ -441,5 +518,24 @@ mod tests {
         let plan = client.explain_plan("SELECT * FROM employees").unwrap();
         assert!(!plan.is_empty());
         assert!(plan[0].contains("Plan hash"), "{}", plan[0]);
+    }
+
+    #[test]
+    fn demo_explain_nodes_form_a_tree() {
+        let mut client = connected();
+        let nodes = client
+            .explain_plan_nodes("SELECT * FROM employees")
+            .unwrap();
+        assert_eq!(nodes.len(), 5);
+        let root = &nodes[0];
+        assert_eq!(root.parent_id, None);
+        assert_eq!(root.label(), "SELECT STATEMENT");
+        assert_eq!(nodes[2].label(), "TABLE ACCESS FULL EMPLOYEES");
+        assert_eq!(nodes[2].cost, Some(7));
+        // Every non-root node points at an existing parent.
+        for node in &nodes[1..] {
+            let parent = node.parent_id.expect("non-root has a parent");
+            assert!(nodes.iter().any(|n| n.id == parent));
+        }
     }
 }
