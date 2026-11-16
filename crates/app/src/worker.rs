@@ -12,7 +12,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use ora_core::demo::DemoClient;
 use ora_core::sql::statement_kind;
 use ora_core::{
-    ColumnDef, ConnectionProfile, DbClient, DbInfo, QueryResult, SchemaObject, DEFAULT_MAX_ROWS,
+    ColumnDef, ConnectionProfile, DbClient, DbInfo, PlanNode, QueryResult, SchemaObject,
+    DEFAULT_MAX_ROWS,
 };
 use ora_driver::ThinClient;
 
@@ -21,6 +22,13 @@ pub enum Job {
         profile: ConnectionProfile,
         password: String,
         demo: bool,
+    },
+    /// Open a throwaway session with the given profile and close it again,
+    /// without touching the worker's current session. Powers the
+    /// connection manager's Test button.
+    TestConnect {
+        profile: ConnectionProfile,
+        password: String,
     },
     /// Run the editor text: SELECT goes to `query()`, anything else to
     /// `execute()`. Decided here so the UI has one code path.
@@ -44,6 +52,7 @@ pub enum Job {
 
 pub enum Response {
     Connected(DbInfo),
+    Tested(Result<DbInfo, String>),
     QueryDone(QueryResult),
     Executed(u64),
     Committed,
@@ -51,6 +60,9 @@ pub enum Response {
     Objects(Vec<SchemaObject>),
     Described(Vec<ColumnDef>),
     Plan(Vec<String>),
+    /// Structured plan nodes for the tree panel, plus the DBMS_XPLAN text
+    /// lines for the Explain Plan sub-tab (empty when the text path failed).
+    PlanTree(Vec<PlanNode>, Vec<String>),
     Disconnected,
     Failed(String),
 }
@@ -126,6 +138,16 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             }
             Response::Disconnected
         }
+        Job::TestConnect { profile, password } => {
+            // A separate throwaway client: testing must never disturb the
+            // live session (or log it out).
+            let mut probe = ThinClient::new();
+            let outcome = probe
+                .connect(&profile, &password)
+                .map_err(|e| e.to_string());
+            probe.disconnect();
+            Response::Tested(outcome)
+        }
         Job::Run { sql } => {
             let Some(client) = client.as_mut() else {
                 return Response::Failed("not connected".to_string());
@@ -175,10 +197,22 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             None => Response::Failed("not connected".to_string()),
         },
         Job::Explain { sql } => match client.as_mut() {
-            Some(client) => match client.explain_plan(&sql) {
-                Ok(lines) => Response::Plan(lines),
-                Err(err) => Response::Failed(err.to_string()),
-            },
+            Some(client) => {
+                // Prefer structured plan nodes (tree view) with the
+                // DBMS_XPLAN text alongside; fall back to text alone when
+                // the backend cannot provide nodes. Both calls run their
+                // own EXPLAIN PLAN, which is cheap and overwrites the same
+                // PLAN_TABLE rows, so the two views always agree.
+                let nodes = client.explain_plan_nodes(&sql);
+                let lines = client.explain_plan(&sql);
+                match (nodes, lines) {
+                    (Ok(nodes), lines) if !nodes.is_empty() => {
+                        Response::PlanTree(nodes, lines.unwrap_or_default())
+                    }
+                    (_, Ok(lines)) => Response::Plan(lines),
+                    (_, Err(err)) => Response::Failed(err.to_string()),
+                }
+            }
             None => Response::Failed("not connected".to_string()),
         },
     }

@@ -2,16 +2,26 @@
 //! gpui-kit [`DataTable`]. The workbench swaps results in place via
 //! `delegate_mut()` + `refresh()` so the table state (and its scroll
 //! position) survives across runs.
+//!
+//! Pagination is client-side: the delegate shows one [`PAGE_SIZE`]-row
+//! window of the full result. Sorting sorts the whole result first, so
+//! page boundaries stay consistent while paging.
 
 use std::cmp::Ordering;
 
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
-use gpui_kit::{App, Context, IntoElement, SharedString, Window};
+use gpui_kit::{div, px, App, Context, IntoElement, SharedString, Styled as _, Window};
 use ora_core::{QueryResult, Value};
+
+use crate::theme::{FONT_GRID, LEADING_GRID};
+
+/// Rows per grid page (design-system pagination: "10 / page").
+pub const PAGE_SIZE: usize = 10;
 
 pub struct ResultsDelegate {
     result: QueryResult,
     columns: Vec<Column>,
+    page: usize,
 }
 
 impl ResultsDelegate {
@@ -19,6 +29,7 @@ impl ResultsDelegate {
         ResultsDelegate {
             result: QueryResult::default(),
             columns: Vec::new(),
+            page: 0,
         }
     }
 
@@ -34,6 +45,35 @@ impl ResultsDelegate {
             })
             .collect();
         self.result = result;
+        self.page = 0;
+    }
+
+    pub fn page(&self) -> usize {
+        self.page
+    }
+
+    pub fn set_page(&mut self, page: usize) {
+        self.page = page.min(self.total_pages().saturating_sub(1));
+    }
+
+    pub fn total_rows(&self) -> usize {
+        self.result.rows.len()
+    }
+
+    pub fn total_pages(&self) -> usize {
+        self.result.rows.len().div_ceil(PAGE_SIZE)
+    }
+
+    /// 1-based (first, last, total) row numbers for the current page's
+    /// "1–10 of N" label. Empty results report (0, 0, 0).
+    pub fn page_range(&self) -> (usize, usize, usize) {
+        let total = self.total_rows();
+        if total == 0 {
+            return (0, 0, 0);
+        }
+        let first = self.page * PAGE_SIZE + 1;
+        let last = ((self.page + 1) * PAGE_SIZE).min(total);
+        (first, last, total)
     }
 
     fn cell_text(&self, row_ix: usize, col_ix: usize) -> String {
@@ -41,6 +81,11 @@ impl ResultsDelegate {
             .get(row_ix, col_ix)
             .map(|v| v.display())
             .unwrap_or_default()
+    }
+
+    /// Map a visible row index to the underlying result row.
+    fn absolute_row(&self, row_ix: usize) -> usize {
+        self.page * PAGE_SIZE + row_ix
     }
 }
 
@@ -73,7 +118,9 @@ impl TableDelegate for ResultsDelegate {
     }
 
     fn rows_count(&self, _: &App) -> usize {
-        self.result.rows.len()
+        self.total_rows()
+            .saturating_sub(self.page * PAGE_SIZE)
+            .min(PAGE_SIZE)
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
@@ -87,11 +134,17 @@ impl TableDelegate for ResultsDelegate {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        self.cell_text(row_ix, col_ix)
+        // Explicit 12px/20px: the table's own Small cell size would render
+        // 14px text, but the spec fixes the data grid at 12px.
+        div()
+            .text_size(px(FONT_GRID))
+            .line_height(px(LEADING_GRID))
+            .truncate()
+            .child(self.cell_text(self.absolute_row(row_ix), col_ix))
     }
 
     fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
-        Some(self.cell_text(row_ix, col_ix).into())
+        Some(self.cell_text(self.absolute_row(row_ix), col_ix).into())
     }
 
     fn perform_sort(
@@ -120,6 +173,7 @@ impl TableDelegate for ResultsDelegate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ora_core::ColumnInfo;
 
     fn int(n: i128) -> Value {
         Value::Integer(n)
@@ -170,5 +224,40 @@ mod tests {
             cmp_values(Some(&Value::Bytes(vec![1])), Some(&Value::Bytes(vec![2]))),
             Ordering::Less
         );
+    }
+
+    fn result_with_rows(n: usize) -> QueryResult {
+        QueryResult {
+            columns: vec![ColumnInfo {
+                name: "N".into(),
+                data_type: "NUMBER".into(),
+            }],
+            rows: (0..n).map(|i| vec![Value::Integer(i as i128)]).collect(),
+            truncated: false,
+            elapsed: Default::default(),
+        }
+    }
+
+    #[test]
+    fn pagination_windows_rows_ten_per_page() {
+        let mut delegate = ResultsDelegate::empty();
+        delegate.set_result(result_with_rows(25));
+        assert_eq!(delegate.total_pages(), 3);
+        assert_eq!(delegate.page_range(), (1, 10, 25));
+        delegate.set_page(1);
+        assert_eq!(delegate.page_range(), (11, 20, 25));
+        delegate.set_page(2);
+        assert_eq!(delegate.page_range(), (21, 25, 25));
+        // Out-of-range pages clamp to the last page.
+        delegate.set_page(99);
+        assert_eq!(delegate.page(), 2);
+        // A new result resets to page 0.
+        delegate.set_result(result_with_rows(5));
+        assert_eq!(delegate.page(), 0);
+        assert_eq!(delegate.total_pages(), 1);
+        assert_eq!(delegate.page_range(), (1, 5, 5));
+        delegate.set_result(result_with_rows(0));
+        assert_eq!(delegate.total_pages(), 0);
+        assert_eq!(delegate.page_range(), (0, 0, 0));
     }
 }

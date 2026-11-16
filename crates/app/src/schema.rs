@@ -21,7 +21,7 @@ const GROUP_ORDER: &[&str] = &[
     "Synonyms",
 ];
 
-pub fn build_tree_items(objects: &[SchemaObject]) -> Vec<TreeItem> {
+pub fn build_tree_items<'a>(objects: impl IntoIterator<Item = &'a SchemaObject>) -> Vec<TreeItem> {
     let mut groups: Vec<(String, Vec<&SchemaObject>)> = Vec::new();
     for obj in objects {
         let label = obj.kind.group_label().to_string();
@@ -68,6 +68,24 @@ pub fn parse_object_id(id: &str) -> Option<(&str, &str, &str)> {
 
 pub fn is_describable_group(group: &str) -> bool {
     matches!(group, "Tables" | "Views")
+}
+
+/// Case-insensitive substring filter for the schema search box. An empty
+/// query returns every object. Group headers are rebuilt from the filtered
+/// list by [`build_tree_items`], so empty groups disappear.
+pub fn filter_objects<'a>(objects: &'a [SchemaObject], query: &str) -> Vec<&'a SchemaObject> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return objects.iter().collect();
+    }
+    objects
+        .iter()
+        .filter(|obj| {
+            obj.name.to_lowercase().contains(&query)
+                || obj.owner.to_lowercase().contains(&query)
+                || obj.kind.group_label().to_lowercase().contains(&query)
+        })
+        .collect()
 }
 
 /// Render a DESCRIBE as a grid result with the same columns Toad shows.
@@ -151,6 +169,22 @@ mod tests {
         assert!(!is_describable_group("Sequences"));
         assert!(!is_describable_group("Procedures"));
         assert!(!is_describable_group(""));
+    }
+
+    #[test]
+    fn filter_matches_name_owner_and_group_case_insensitively() {
+        let objects = vec![
+            obj("HR", "EMPLOYEES", ObjectKind::Table),
+            obj("HR", "EMP_SEQ", ObjectKind::Sequence),
+            obj("OE", "ORDERS", ObjectKind::Table),
+        ];
+        assert_eq!(filter_objects(&objects, "").len(), 3);
+        assert_eq!(filter_objects(&objects, "  ").len(), 3);
+        let emp = filter_objects(&objects, "emp");
+        assert_eq!(emp.len(), 2);
+        assert_eq!(filter_objects(&objects, "OE").len(), 1);
+        assert_eq!(filter_objects(&objects, "sequence").len(), 1);
+        assert!(filter_objects(&objects, "zzz").is_empty());
     }
 
     #[test]
