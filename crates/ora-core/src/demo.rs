@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use crate::client::{DbClient, DbError, DbInfo};
-use crate::filter::TableFilter;
+use crate::filter::{TableFilter, TablePage};
 use crate::model::{
     ColumnDef, ColumnInfo, ConnectionProfile, IndexDef, ObjectKind, PlanNode, QueryResult,
     SchemaObject, Value,
@@ -242,24 +242,25 @@ impl DbClient for DemoClient {
     }
 
     /// The demo has no SQL engine, so the filter runs in memory over the
-    /// whole demo table, then the row cap applies.
+    /// whole demo table, then the page window applies.
     fn query_table(
         &mut self,
         owner: &str,
         table: &str,
         filter: &TableFilter,
-        max_rows: usize,
+        page: TablePage,
     ) -> Result<QueryResult, DbError> {
         let started = Instant::now();
-        let sql = crate::filter::select_sql(owner, table, &TableFilter::default(), max_rows).sql;
+        let sql = crate::filter::select_sql(owner, table, &TableFilter::default(), page).sql;
         let all = self.query(&sql, usize::MAX)?;
         let columns = all.columns;
         let rows: Vec<Vec<Value>> = all
             .rows
             .into_iter()
             .filter(|row| filter.matches(&columns, row))
+            .skip(page.offset)
             .collect();
-        let mut result = finish(columns, rows, max_rows);
+        let mut result = finish(columns, rows, page.limit);
         result.elapsed = started.elapsed();
         Ok(result)
     }
@@ -597,16 +598,32 @@ mod tests {
             vec![FilterCondition::new("SALARY", FilterOp::Ge, "14000")],
             FilterJoin::And,
         );
-        let all = client.query_table("HR", "EMPLOYEES", &filter, 100).unwrap();
+        let all = client
+            .query_table("HR", "EMPLOYEES", &filter, TablePage::new(0, 100))
+            .unwrap();
         assert_eq!(all.row_count(), 4);
         assert!(!all.truncated);
-        let capped = client.query_table("HR", "EMPLOYEES", &filter, 2).unwrap();
+        let capped = client
+            .query_table("HR", "EMPLOYEES", &filter, TablePage::new(0, 2))
+            .unwrap();
         assert_eq!(capped.row_count(), 2);
         assert!(capped.truncated);
+        // Second page: the offset skips filtered rows, and the last page
+        // is not flagged as truncated.
+        let second = client
+            .query_table("HR", "EMPLOYEES", &filter, TablePage::new(2, 2))
+            .unwrap();
+        assert_eq!(second.row_count(), 2);
+        assert!(!second.truncated);
+        assert_eq!(second.rows[0][0], Value::Integer(102));
+        let past_end = client
+            .query_table("HR", "EMPLOYEES", &filter, TablePage::new(10, 2))
+            .unwrap();
+        assert_eq!(past_end.row_count(), 0);
         let none = TableFilter::default();
         assert_eq!(
             client
-                .query_table("HR", "EMPLOYEES", &none, 100)
+                .query_table("HR", "EMPLOYEES", &none, TablePage::new(0, 100))
                 .unwrap()
                 .row_count(),
             6

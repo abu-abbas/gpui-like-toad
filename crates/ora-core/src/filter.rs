@@ -321,9 +321,60 @@ impl BoundQuery {
     }
 }
 
+/// Most rows one data-tab fetch may ask for; the grid renders them all, so
+/// this bounds memory and paint time.
+pub const MAX_PAGE_LIMIT: usize = 5000;
+
+/// Which slice of the (filtered) table a data-tab fetch returns: the
+/// Limit / Offset boxes at the bottom of the grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TablePage {
+    pub offset: usize,
+    pub limit: usize,
+}
+
+impl Default for TablePage {
+    fn default() -> Self {
+        TablePage {
+            offset: 0,
+            limit: crate::DEFAULT_MAX_ROWS,
+        }
+    }
+}
+
+impl TablePage {
+    /// Clamp to a usable page: at least one row, at most
+    /// [`MAX_PAGE_LIMIT`].
+    pub fn new(offset: usize, limit: usize) -> Self {
+        TablePage {
+            offset,
+            limit: limit.clamp(1, MAX_PAGE_LIMIT),
+        }
+    }
+
+    /// The page after this one.
+    pub fn next(self) -> Self {
+        TablePage {
+            offset: self.offset.saturating_add(self.limit),
+            limit: self.limit,
+        }
+    }
+
+    /// The page before this one (the first page stays first).
+    pub fn prev(self) -> Self {
+        TablePage {
+            offset: self.offset.saturating_sub(self.limit),
+            limit: self.limit,
+        }
+    }
+}
+
 /// `SELECT *` from `owner.table` with the filter's WHERE clause and an
-/// Oracle 12c+ row cap.
-pub fn select_sql(owner: &str, table: &str, filter: &TableFilter, max_rows: usize) -> BoundQuery {
+/// Oracle 12c+ row window. Offset and limit are `usize`s written as
+/// literals, so they cannot carry SQL. No `ORDER BY`: that would force a
+/// full scan to open a big table, so the order is whatever Oracle returns
+/// (Oracle only guarantees a stable order with an explicit sort).
+pub fn select_sql(owner: &str, table: &str, filter: &TableFilter, page: TablePage) -> BoundQuery {
     let mut sql = format!(
         "SELECT * FROM {}.{}",
         quote_ident(owner),
@@ -335,7 +386,14 @@ pub fn select_sql(owner: &str, table: &str, filter: &TableFilter, max_rows: usiz
         sql.push_str(&clause);
         binds = b;
     }
-    sql.push_str(&format!(" FETCH FIRST {max_rows} ROWS ONLY"));
+    if page.offset == 0 {
+        sql.push_str(&format!(" FETCH FIRST {} ROWS ONLY", page.limit));
+    } else {
+        sql.push_str(&format!(
+            " OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
+            page.offset, page.limit
+        ));
+    }
     BoundQuery { sql, binds }
 }
 
@@ -359,12 +417,33 @@ mod tests {
 
     #[test]
     fn empty_filter_selects_everything() {
-        let q = select_sql("HR", "ORDERS", &TableFilter::default(), 1000);
+        let q = select_sql(
+            "HR",
+            "ORDERS",
+            &TableFilter::default(),
+            TablePage::default(),
+        );
         assert_eq!(
             q.sql,
             "SELECT * FROM \"HR\".\"ORDERS\" FETCH FIRST 1000 ROWS ONLY"
         );
         assert!(q.binds.is_empty());
+    }
+
+    #[test]
+    fn paging_uses_offset_fetch_and_clamps_limit() {
+        let none = TableFilter::default();
+        let q = select_sql("HR", "T", &none, TablePage::new(300, 100));
+        assert_eq!(
+            q.sql,
+            "SELECT * FROM \"HR\".\"T\" OFFSET 300 ROWS FETCH NEXT 100 ROWS ONLY"
+        );
+        assert_eq!(TablePage::new(0, 0).limit, 1);
+        assert_eq!(TablePage::new(0, 1_000_000).limit, MAX_PAGE_LIMIT);
+        let page = TablePage::new(250, 100);
+        assert_eq!(page.next().offset, 350);
+        assert_eq!(page.prev().offset, 150);
+        assert_eq!(TablePage::new(50, 100).prev().offset, 0);
     }
 
     #[test]
@@ -376,7 +455,7 @@ mod tests {
             ],
             FilterJoin::And,
         );
-        let q = select_sql("HR", "ORDERS", &filter, 50);
+        let q = select_sql("HR", "ORDERS", &filter, TablePage::new(0, 50));
         assert_eq!(
             q.sql,
             "SELECT * FROM \"HR\".\"ORDERS\" WHERE \"STATUS\" = :1 AND \"TOTAL\" > :2 FETCH FIRST 50 ROWS ONLY"

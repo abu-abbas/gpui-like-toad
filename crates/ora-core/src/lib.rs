@@ -20,7 +20,9 @@ pub mod sql;
 pub mod store;
 
 pub use client::{DbClient, DbError, DbInfo};
-pub use filter::{BoundQuery, FilterCondition, FilterJoin, FilterOp, TableFilter};
+pub use filter::{
+    BoundQuery, FilterCondition, FilterJoin, FilterOp, TableFilter, TablePage, MAX_PAGE_LIMIT,
+};
 pub use model::{
     compose_easy_connect, parse_easy_connect, ColumnDef, ColumnInfo, ConnectionProfile, IndexDef,
     ObjectKind, PlanNode, QueryResult, SchemaObject, Value,
