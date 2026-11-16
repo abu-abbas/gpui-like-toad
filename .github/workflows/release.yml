@@ -97,9 +97,9 @@ jobs:
         shell: bash
         run: |
           bin="target/release/gpui-like-toad${{ matrix.ext }}"
-          out="gpui-like-toad-$VERSION-${{ matrix.suffix }}${{ matrix.ext }}"
+          out="Ora-The-Explorer-$VERSION-${{ matrix.suffix }}${{ matrix.ext }}"
           "$bin" --version
-          test "$("$bin" --version)" = "gpui-like-toad $VERSION"
+          test "$("$bin" --version)" = "Ora The Explorer $VERSION"
           mkdir -p out
           cp "$bin" "out/$out"
           ls -la out/
@@ -107,20 +107,23 @@ jobs:
         name: Bundel .app dan DMG
         shell: bash
         run: |
-          app="bundle/gpui-like-toad.app"
+          app="bundle/Ora The Explorer.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp "target/release/gpui-like-toad" "$app/Contents/MacOS/gpui-like-toad"
           iconutil -c icns -o "$app/Contents/Resources/AppIcon.icns" \
             crates/app/assets/icon/AppIcon.iconset
+          # Nama tampilan "Ora The Explorer"; CFBundleIdentifier dan nama
+          # executable sengaja tetap gpui-like-toad supaya izin Keychain dan
+          # preferensi macOS dari build lama tidak hilang.
           cat > "$app/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
             <key>CFBundleName</key>
-            <string>gpui-like-toad</string>
+            <string>Ora The Explorer</string>
             <key>CFBundleDisplayName</key>
-            <string>gpui-like-toad</string>
+            <string>Ora The Explorer</string>
             <key>CFBundleIdentifier</key>
             <string>com.github.abu-abbas.gpui-like-toad</string>
             <key>CFBundleVersion</key>
@@ -140,14 +143,14 @@ jobs:
           EOF
           # Smoke test biner di dalam bundel (bukan cuma biner mentahnya).
           "$app/Contents/MacOS/gpui-like-toad" --version
-          test "$("$app/Contents/MacOS/gpui-like-toad" --version)" = "gpui-like-toad $VERSION"
+          test "$("$app/Contents/MacOS/gpui-like-toad" --version)" = "Ora The Explorer $VERSION"
           # DMG: .app + symlink ke /Applications (drag-and-drop).
           mkdir -p dmg-staging
           cp -R "$app" dmg-staging/
           ln -s /Applications dmg-staging/Applications
-          hdiutil create -volname "gpui-like-toad $VERSION" \
+          hdiutil create -volname "Ora The Explorer $VERSION" \
             -srcfolder dmg-staging -ov -format UDZO \
-            "out/gpui-like-toad-$VERSION-macos-arm64.dmg"
+            "out/Ora-The-Explorer-$VERSION-macos-arm64.dmg"
           ls -la out/
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -178,7 +181,7 @@ jobs:
           test "$(ls out/* | wc -l)" -eq 4
           notes=$(git log -n 15 --no-merges --pretty='- %s' -- crates | head -15)
           gh release create "v$VERSION" out/* \
-            --title "gpui-like-toad $VERSION" \
+            --title "Ora The Explorer $VERSION" \
             --notes "Dibangun dari ${{ github.sha }}"$'\n\n'"$notes" --latest
           # Pangkas: sisakan KEEP_RELEASES terbaru, hapus sisanya beserta tag.
           gh release list --limit 100 --json tagName --jq '.[].tagName' \
