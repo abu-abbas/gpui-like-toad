@@ -106,15 +106,19 @@ fn render_node(
     } else {
         row = row.child(div().w(px(12.)).flex_none());
     }
-    row = row
-        .child(
-            div()
-                .text_size(px(FONT_LABEL))
-                .line_height(px(18.))
-                .text_color(theme.foreground)
-                .child(node.label()),
-        )
-        .child(div().flex_1());
+    // The label flexes and truncates with an ellipsis; without `min_w_0`
+    // a flex item refuses to shrink below its content width and the label
+    // clips raw at the panel edge, pushing the cost off-screen.
+    row = row.child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(px(FONT_LABEL))
+            .line_height(px(18.))
+            .text_color(theme.foreground)
+            .child(node.label()),
+    );
     if let Some(cost) = node.cost {
         let mut cost_text = format!("(Cost: {cost}");
         if let Some(card) = node.cardinality {
@@ -123,6 +127,7 @@ fn render_node(
         cost_text.push(')');
         row = row.child(
             div()
+                .flex_none()
                 .text_size(px(FONT_CAPTION))
                 .line_height(px(16.))
                 .text_color(theme.muted_foreground)
