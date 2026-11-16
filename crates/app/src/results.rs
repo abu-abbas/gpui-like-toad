@@ -10,6 +10,8 @@
 use std::cmp::Ordering;
 
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
+use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, App, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window,
 };
@@ -20,11 +22,52 @@ use crate::theme::{FONT_GRID, LEADING_GRID};
 /// Rows per grid page (design-system pagination: "10 / page").
 pub const PAGE_SIZE: usize = 10;
 
+/// Width of the row-number gutter: fits "1000" at the grid font.
+const GUTTER_WIDTH: f32 = 52.;
+
 pub struct ResultsDelegate {
     result: QueryResult,
     columns: Vec<Column>,
+    /// Per result column: right-align its cells (numeric types).
+    numeric: Vec<bool>,
+    /// Show a fixed row-number column on the left (data tabs).
+    row_numbers: bool,
     page: usize,
     page_size: usize,
+}
+
+/// Whether a database type name is numeric, e.g. "NUMBER(8,2)".
+fn is_numeric_type(data_type: &str) -> bool {
+    let t = data_type.trim().to_ascii_uppercase();
+    [
+        "NUMBER", "FLOAT", "BINARY_", "INTEGER", "DECIMAL", "NUMERIC",
+    ]
+    .iter()
+    .any(|p| t.starts_with(p))
+}
+
+/// Right-align a column when its declared type is numeric, or when every
+/// non-NULL value in it is a number (expressions report no useful type).
+fn numeric_columns(result: &QueryResult) -> Vec<bool> {
+    result
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(ix, col)| {
+            if is_numeric_type(&col.data_type) {
+                return true;
+            }
+            let mut seen = false;
+            for row in &result.rows {
+                match row.get(ix) {
+                    Some(Value::Integer(_) | Value::Float(_)) => seen = true,
+                    Some(Value::Null) | None => {}
+                    Some(_) => return false,
+                }
+            }
+            seen
+        })
+        .collect()
 }
 
 impl ResultsDelegate {
@@ -32,6 +75,8 @@ impl ResultsDelegate {
         ResultsDelegate {
             result: QueryResult::default(),
             columns: Vec::new(),
+            numeric: Vec::new(),
+            row_numbers: false,
             page: 0,
             page_size: PAGE_SIZE,
         }
@@ -44,21 +89,49 @@ impl ResultsDelegate {
         self
     }
 
+    /// Add the row-number gutter as a fixed first column.
+    pub fn with_row_numbers(mut self) -> Self {
+        self.row_numbers = true;
+        self
+    }
+
+    /// Table column index to result column index; `None` is the gutter.
+    fn data_col(&self, col_ix: usize) -> Option<usize> {
+        if self.row_numbers {
+            col_ix.checked_sub(1)
+        } else {
+            Some(col_ix)
+        }
+    }
+
     pub fn page_size(&self) -> usize {
         self.page_size
     }
 
     pub fn set_result(&mut self, result: QueryResult) {
-        self.columns = result
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                Column::new(format!("c{i}"), c.name.clone())
-                    .width(140.)
-                    .sortable()
-            })
-            .collect();
+        self.numeric = numeric_columns(&result);
+        self.columns = Vec::with_capacity(result.columns.len() + 1);
+        if self.row_numbers {
+            self.columns.push(
+                Column::new("rownum", "#")
+                    .width(GUTTER_WIDTH)
+                    .fixed_left()
+                    .text_right()
+                    .resizable(false)
+                    .movable(false)
+                    .selectable(false),
+            );
+        }
+        for (i, c) in result.columns.iter().enumerate() {
+            let column = Column::new(format!("c{i}"), c.name.clone())
+                .width(140.)
+                .sortable();
+            self.columns.push(if self.numeric[i] {
+                column.text_right()
+            } else {
+                column
+            });
+        }
         self.result = result;
         self.page = 0;
     }
@@ -147,19 +220,47 @@ impl TableDelegate for ResultsDelegate {
         row_ix: usize,
         col_ix: usize,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        // Explicit 12px/20px: the table's own Small cell size would render
-        // 14px text, but the spec fixes the data grid at 12px.
-        div()
+        // Explicit 12px/20px: the table's own cell size would render 14px
+        // text, but the spec fixes the data grid at 12px. Monospace keeps
+        // digits and codes aligned down a column.
+        let cell = div()
+            .w_full()
+            .font_family(crate::MONO_FONT_FAMILY)
+            .font_features(gpui_kit::FontFeatures::disable_ligatures())
             .text_size(px(FONT_GRID))
             .line_height(px(LEADING_GRID))
-            .truncate()
-            .child(self.cell_text(self.absolute_row(row_ix), col_ix))
+            .truncate();
+        let abs_row = self.absolute_row(row_ix);
+        let Some(data_col) = self.data_col(col_ix) else {
+            return cell
+                .text_right()
+                .text_color(cx.theme().muted_foreground)
+                .child((abs_row + 1).to_string());
+        };
+        let is_null = self
+            .result
+            .get(abs_row, data_col)
+            .is_some_and(Value::is_null);
+        if is_null {
+            // NULL is not an empty string: show it, dimmed.
+            return cell
+                .text_color(cx.theme().muted_foreground.opacity(0.6))
+                .child("NULL");
+        }
+        cell.when(self.numeric.get(data_col) == Some(&true), |c| {
+            c.text_right()
+        })
+        .child(self.cell_text(abs_row, data_col))
     }
 
     fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
-        Some(self.cell_text(self.absolute_row(row_ix), col_ix).into())
+        let abs_row = self.absolute_row(row_ix);
+        Some(match self.data_col(col_ix) {
+            Some(data_col) => self.cell_text(abs_row, data_col).into(),
+            None => (abs_row + 1).to_string().into(),
+        })
     }
 
     fn perform_sort(
@@ -169,6 +270,9 @@ impl TableDelegate for ResultsDelegate {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) {
+        let Some(col_ix) = self.data_col(col_ix) else {
+            return;
+        };
         match sort {
             ColumnSort::Ascending => self
                 .result
@@ -274,5 +378,37 @@ mod tests {
         delegate.set_result(result_with_rows(0));
         assert_eq!(delegate.total_pages(), 0);
         assert_eq!(delegate.page_range(), (0, 0, 0));
+    }
+
+    #[test]
+    fn numeric_columns_by_type_or_by_values() {
+        assert!(is_numeric_type("NUMBER(8,2)"));
+        assert!(is_numeric_type("binary_double"));
+        assert!(!is_numeric_type("VARCHAR2(20)"));
+        let col = |name: &str, data_type: &str| ColumnInfo {
+            name: name.into(),
+            data_type: data_type.into(),
+        };
+        let result = QueryResult {
+            columns: vec![col("A", "NUMBER"), col("B", ""), col("C", ""), col("D", "")],
+            rows: vec![
+                vec![text("1"), int(1), text("x"), Value::Null],
+                vec![Value::Null, Value::Null, int(2), Value::Null],
+            ],
+            truncated: false,
+            elapsed: Default::default(),
+        };
+        // A by type, B by values, C mixed, D all NULL.
+        assert_eq!(numeric_columns(&result), vec![true, true, false, false]);
+    }
+
+    #[test]
+    fn row_number_gutter_shifts_data_columns() {
+        let mut delegate = ResultsDelegate::empty().with_row_numbers();
+        delegate.set_result(result_with_rows(3));
+        assert_eq!(delegate.columns.len(), 2);
+        assert_eq!(delegate.data_col(0), None);
+        assert_eq!(delegate.data_col(1), Some(0));
+        assert_eq!(ResultsDelegate::empty().data_col(0), Some(0));
     }
 }

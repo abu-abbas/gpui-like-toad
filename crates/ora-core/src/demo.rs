@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use crate::client::{DbClient, DbError, DbInfo};
+use crate::filter::TableFilter;
 use crate::model::{
     ColumnDef, ColumnInfo, ConnectionProfile, ObjectKind, PlanNode, QueryResult, SchemaObject,
     Value,
@@ -236,6 +237,29 @@ impl DbClient for DemoClient {
                 "demo: unknown table in query (demo catalog: EMPLOYEES, DEPARTMENTS, DUAL)",
             ));
         };
+        result.elapsed = started.elapsed();
+        Ok(result)
+    }
+
+    /// The demo has no SQL engine, so the filter runs in memory over the
+    /// whole demo table, then the row cap applies.
+    fn query_table(
+        &mut self,
+        owner: &str,
+        table: &str,
+        filter: &TableFilter,
+        max_rows: usize,
+    ) -> Result<QueryResult, DbError> {
+        let started = Instant::now();
+        let sql = crate::filter::select_sql(owner, table, &TableFilter::default(), max_rows).sql;
+        let all = self.query(&sql, usize::MAX)?;
+        let columns = all.columns;
+        let rows: Vec<Vec<Value>> = all
+            .rows
+            .into_iter()
+            .filter(|row| filter.matches(&columns, row))
+            .collect();
+        let mut result = finish(columns, rows, max_rows);
         result.elapsed = started.elapsed();
         Ok(result)
     }
@@ -543,6 +567,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn demo_query_table_applies_filter_before_cap() {
+        use crate::filter::{FilterCondition, FilterJoin, FilterOp};
+        let mut client = connected();
+        let filter = TableFilter::new(
+            vec![FilterCondition::new("SALARY", FilterOp::Ge, "14000")],
+            FilterJoin::And,
+        );
+        let all = client.query_table("HR", "EMPLOYEES", &filter, 100).unwrap();
+        assert_eq!(all.row_count(), 4);
+        assert!(!all.truncated);
+        let capped = client.query_table("HR", "EMPLOYEES", &filter, 2).unwrap();
+        assert_eq!(capped.row_count(), 2);
+        assert!(capped.truncated);
+        let none = TableFilter::default();
+        assert_eq!(
+            client
+                .query_table("HR", "EMPLOYEES", &none, 100)
+                .unwrap()
+                .row_count(),
+            6
+        );
+        // Binds without a SQL engine are refused, not silently ignored.
+        assert!(client
+            .query_binds("SELECT * FROM employees WHERE x = :1", &["1".into()], 10)
+            .is_err());
     }
 
     #[test]

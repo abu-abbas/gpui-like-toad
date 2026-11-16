@@ -2,10 +2,7 @@
 //! one tab per object category, and a flat, filterable object list under
 //! it. Also turns a `DESCRIBE` into a grid-ready [`QueryResult`].
 
-use ora_core::import::quote_ident;
-use ora_core::{
-    ColumnDef, ColumnInfo, ObjectKind, QueryResult, SchemaObject, Value, DEFAULT_MAX_ROWS,
-};
+use ora_core::{ColumnDef, ColumnInfo, ObjectKind, QueryResult, SchemaObject, Value};
 
 /// One tab of the object browser. "Procs" groups procedures, functions and
 /// packages, as Toad does.
@@ -88,18 +85,6 @@ pub fn has_data(kind: &ObjectKind) -> bool {
     kind.is_describable()
 }
 
-/// `SELECT *` for the double-click "show data" action: qualified, quoted
-/// identifiers plus an Oracle 12c+ row cap matching the driver's own
-/// [`DEFAULT_MAX_ROWS`] fetch limit, so a peek never floods the grid.
-pub fn select_all_sql(owner: &str, name: &str) -> String {
-    format!(
-        "SELECT * FROM {}.{} FETCH FIRST {} ROWS ONLY",
-        quote_ident(owner),
-        quote_ident(name),
-        DEFAULT_MAX_ROWS
-    )
-}
-
 /// Render a DESCRIBE as a grid result with the same columns Toad shows.
 pub fn describe_to_result(defs: &[ColumnDef]) -> QueryResult {
     QueryResult {
@@ -176,18 +161,6 @@ mod tests {
         assert_eq!(count_in(&objects, ObjectCategory::Programs), 1);
         assert!(has_data(&ObjectKind::View));
         assert!(!has_data(&ObjectKind::Sequence));
-    }
-
-    #[test]
-    fn select_all_sql_quotes_identifiers_and_caps_rows() {
-        assert_eq!(
-            select_all_sql("HR", "EMPLOYEES"),
-            "SELECT * FROM \"HR\".\"EMPLOYEES\" FETCH FIRST 1000 ROWS ONLY"
-        );
-        assert_eq!(
-            select_all_sql("A\"B", "T"),
-            "SELECT * FROM \"A\"\"B\".\"T\" FETCH FIRST 1000 ROWS ONLY"
-        );
     }
 
     #[test]
