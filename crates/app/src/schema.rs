@@ -1,78 +1,91 @@
-//! Schema browser helpers: group [`SchemaObject`]s into tree items and turn
-//! a `DESCRIBE` result into a grid-ready [`QueryResult`].
-//!
-//! Tree item ids encode what was clicked: `group:<label>` for group headers,
-//! `obj:<owner>:<name>:<group>` for objects. Oracle identifiers cannot contain
-//! `:`, so splitting on it is safe.
+//! Schema browser helpers for the Toad-style explorer: a schema dropdown,
+//! one tab per object category, and a flat, filterable object list under
+//! it. Also turns a `DESCRIBE` into a grid-ready [`QueryResult`].
 
-use gpui_kit::component::tree::TreeItem;
-use ora_core::{ColumnDef, ColumnInfo, QueryResult, SchemaObject, Value, DEFAULT_MAX_ROWS};
+use ora_core::import::quote_ident;
+use ora_core::{
+    ColumnDef, ColumnInfo, ObjectKind, QueryResult, SchemaObject, Value, DEFAULT_MAX_ROWS,
+};
 
-/// Group display order in the tree; kinds outside this list sort after it.
-const GROUP_ORDER: &[&str] = &[
-    "Tables",
-    "Views",
-    "Indexes",
-    "Sequences",
-    "Procedures",
-    "Functions",
-    "Packages",
-    "Triggers",
-    "Synonyms",
-];
+/// One tab of the object browser. "Procs" groups procedures, functions and
+/// packages, as Toad does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectCategory {
+    Tables,
+    Views,
+    Indexes,
+    Sequences,
+    Programs,
+    Triggers,
+    Synonyms,
+}
 
-pub fn build_tree_items<'a>(objects: impl IntoIterator<Item = &'a SchemaObject>) -> Vec<TreeItem> {
-    let mut groups: Vec<(String, Vec<&SchemaObject>)> = Vec::new();
-    for obj in objects {
-        let label = obj.kind.group_label().to_string();
-        match groups.iter_mut().find(|(g, _)| *g == label) {
-            Some((_, members)) => members.push(obj),
-            None => groups.push((label, vec![obj])),
+impl ObjectCategory {
+    pub const ALL: [ObjectCategory; 7] = [
+        ObjectCategory::Tables,
+        ObjectCategory::Views,
+        ObjectCategory::Indexes,
+        ObjectCategory::Sequences,
+        ObjectCategory::Programs,
+        ObjectCategory::Triggers,
+        ObjectCategory::Synonyms,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ObjectCategory::Tables => "Tables",
+            ObjectCategory::Views => "Views",
+            ObjectCategory::Indexes => "Indexes",
+            ObjectCategory::Sequences => "Sequences",
+            ObjectCategory::Programs => "Procs",
+            ObjectCategory::Triggers => "Triggers",
+            ObjectCategory::Synonyms => "Synonyms",
         }
     }
-    groups.sort_by_key(|(label, _)| {
-        GROUP_ORDER
-            .iter()
-            .position(|g| g == label)
-            .unwrap_or(GROUP_ORDER.len())
-    });
-    groups
-        .into_iter()
-        .map(|(label, members)| {
-            let children = members
-                .into_iter()
-                .map(|obj| {
-                    TreeItem::new(
-                        format!("obj:{}:{}:{}", obj.owner, obj.name, label),
-                        obj.name.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let count = children.len();
-            TreeItem::new(format!("group:{label}"), format!("{label} ({count})"))
-                .children(children)
-                .expanded(label == "Tables")
-        })
-        .collect()
-}
 
-/// Parse a clicked tree item id. Returns `(owner, name, group)` for objects,
-/// `None` for group headers and anything unrecognized.
-pub fn parse_object_id(id: &str) -> Option<(&str, &str, &str)> {
-    let mut parts = id.split(':');
-    match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some("obj"), Some(owner), Some(name), Some(group)) => Some((owner, name, group)),
-        _ => None,
+    pub fn contains(self, kind: &ObjectKind) -> bool {
+        match self {
+            ObjectCategory::Tables => *kind == ObjectKind::Table,
+            ObjectCategory::Views => *kind == ObjectKind::View,
+            ObjectCategory::Indexes => *kind == ObjectKind::Index,
+            ObjectCategory::Sequences => *kind == ObjectKind::Sequence,
+            ObjectCategory::Programs => matches!(
+                kind,
+                ObjectKind::Procedure | ObjectKind::Function | ObjectKind::Package
+            ),
+            ObjectCategory::Triggers => *kind == ObjectKind::Trigger,
+            ObjectCategory::Synonyms => *kind == ObjectKind::Synonym,
+        }
     }
 }
 
-pub fn is_describable_group(group: &str) -> bool {
-    matches!(group, "Tables" | "Views")
+/// Objects of one category whose name contains `filter` (case-insensitive),
+/// sorted by name. An empty filter keeps everything.
+pub fn objects_in<'a>(
+    objects: &'a [SchemaObject],
+    category: ObjectCategory,
+    filter: &str,
+) -> Vec<&'a SchemaObject> {
+    let filter = filter.trim().to_lowercase();
+    let mut list: Vec<&SchemaObject> = objects
+        .iter()
+        .filter(|o| category.contains(&o.kind))
+        .filter(|o| filter.is_empty() || o.name.to_lowercase().contains(&filter))
+        .collect();
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+    list
 }
 
-/// Quote an Oracle identifier, doubling embedded quotes.
-fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
+pub fn count_in(objects: &[SchemaObject], category: ObjectCategory) -> usize {
+    objects
+        .iter()
+        .filter(|o| category.contains(&o.kind))
+        .count()
+}
+
+/// Tables and views have data to open and columns to describe.
+pub fn has_data(kind: &ObjectKind) -> bool {
+    kind.is_describable()
 }
 
 /// `SELECT *` for the double-click "show data" action: qualified, quoted
@@ -85,24 +98,6 @@ pub fn select_all_sql(owner: &str, name: &str) -> String {
         quote_ident(name),
         DEFAULT_MAX_ROWS
     )
-}
-
-/// Case-insensitive substring filter for the schema search box. An empty
-/// query returns every object. Group headers are rebuilt from the filtered
-/// list by [`build_tree_items`], so empty groups disappear.
-pub fn filter_objects<'a>(objects: &'a [SchemaObject], query: &str) -> Vec<&'a SchemaObject> {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return objects.iter().collect();
-    }
-    objects
-        .iter()
-        .filter(|obj| {
-            obj.name.to_lowercase().contains(&query)
-                || obj.owner.to_lowercase().contains(&query)
-                || obj.kind.group_label().to_lowercase().contains(&query)
-        })
-        .collect()
 }
 
 /// Render a DESCRIBE as a grid result with the same columns Toad shows.
@@ -145,7 +140,6 @@ pub fn describe_to_result(defs: &[ColumnDef]) -> QueryResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ora_core::ObjectKind;
 
     fn obj(owner: &str, name: &str, kind: ObjectKind) -> SchemaObject {
         SchemaObject {
@@ -156,36 +150,32 @@ mod tests {
     }
 
     #[test]
-    fn tree_groups_objects_one_item_per_group() {
+    fn categories_cover_kinds_and_group_programs() {
+        assert!(ObjectCategory::Programs.contains(&ObjectKind::Package));
+        assert!(ObjectCategory::Programs.contains(&ObjectKind::Function));
+        assert!(!ObjectCategory::Tables.contains(&ObjectKind::View));
+        assert_eq!(ObjectCategory::ALL.len(), 7);
+    }
+
+    #[test]
+    fn objects_in_filters_by_category_and_name_and_sorts() {
         let objects = vec![
-            obj("HR", "EMP_SEQ", ObjectKind::Sequence),
             obj("HR", "EMPLOYEES", ObjectKind::Table),
-            obj("HR", "EMP_DETAILS_VIEW", ObjectKind::View),
+            obj("HR", "EMP_SEQ", ObjectKind::Sequence),
             obj("HR", "DEPARTMENTS", ObjectKind::Table),
+            obj("HR", "GET_SAL", ObjectKind::Function),
         ];
-        assert_eq!(build_tree_items(&objects).len(), 3);
-        assert!(build_tree_items(&[]).is_empty());
-    }
-
-    #[test]
-    fn parse_object_id_round_trips_tree_ids() {
+        let tables = objects_in(&objects, ObjectCategory::Tables, "");
+        let names: Vec<&str> = tables.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, ["DEPARTMENTS", "EMPLOYEES"]);
         assert_eq!(
-            parse_object_id("obj:HR:EMPLOYEES:Tables"),
-            Some(("HR", "EMPLOYEES", "Tables"))
+            objects_in(&objects, ObjectCategory::Tables, " emp ").len(),
+            1
         );
-        assert_eq!(parse_object_id("group:Tables"), None);
-        assert_eq!(parse_object_id("obj:HR:EMPLOYEES"), None);
-        assert_eq!(parse_object_id(""), None);
-        assert_eq!(parse_object_id("obj:::"), Some(("", "", "")));
-    }
-
-    #[test]
-    fn only_tables_and_views_are_describable() {
-        assert!(is_describable_group("Tables"));
-        assert!(is_describable_group("Views"));
-        assert!(!is_describable_group("Sequences"));
-        assert!(!is_describable_group("Procedures"));
-        assert!(!is_describable_group(""));
+        assert!(objects_in(&objects, ObjectCategory::Tables, "zzz").is_empty());
+        assert_eq!(count_in(&objects, ObjectCategory::Programs), 1);
+        assert!(has_data(&ObjectKind::View));
+        assert!(!has_data(&ObjectKind::Sequence));
     }
 
     #[test]
@@ -198,22 +188,6 @@ mod tests {
             select_all_sql("A\"B", "T"),
             "SELECT * FROM \"A\"\"B\".\"T\" FETCH FIRST 1000 ROWS ONLY"
         );
-    }
-
-    #[test]
-    fn filter_matches_name_owner_and_group_case_insensitively() {
-        let objects = vec![
-            obj("HR", "EMPLOYEES", ObjectKind::Table),
-            obj("HR", "EMP_SEQ", ObjectKind::Sequence),
-            obj("OE", "ORDERS", ObjectKind::Table),
-        ];
-        assert_eq!(filter_objects(&objects, "").len(), 3);
-        assert_eq!(filter_objects(&objects, "  ").len(), 3);
-        let emp = filter_objects(&objects, "emp");
-        assert_eq!(emp.len(), 2);
-        assert_eq!(filter_objects(&objects, "OE").len(), 1);
-        assert_eq!(filter_objects(&objects, "sequence").len(), 1);
-        assert!(filter_objects(&objects, "zzz").is_empty());
     }
 
     #[test]

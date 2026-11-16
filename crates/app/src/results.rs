@@ -24,6 +24,7 @@ pub struct ResultsDelegate {
     result: QueryResult,
     columns: Vec<Column>,
     page: usize,
+    page_size: usize,
 }
 
 impl ResultsDelegate {
@@ -32,7 +33,19 @@ impl ResultsDelegate {
             result: QueryResult::default(),
             columns: Vec::new(),
             page: 0,
+            page_size: PAGE_SIZE,
         }
+    }
+
+    /// Rows per page. Query tabs keep the compact 10; data tabs, where the
+    /// grid fills the whole work area, use a larger page.
+    pub fn with_page_size(mut self, page_size: usize) -> Self {
+        self.page_size = page_size.max(1);
+        self
+    }
+
+    pub fn page_size(&self) -> usize {
+        self.page_size
     }
 
     pub fn set_result(&mut self, result: QueryResult) {
@@ -63,7 +76,7 @@ impl ResultsDelegate {
     }
 
     pub fn total_pages(&self) -> usize {
-        self.result.rows.len().div_ceil(PAGE_SIZE)
+        self.result.rows.len().div_ceil(self.page_size)
     }
 
     /// 1-based (first, last, total) row numbers for the current page's
@@ -73,8 +86,8 @@ impl ResultsDelegate {
         if total == 0 {
             return (0, 0, 0);
         }
-        let first = self.page * PAGE_SIZE + 1;
-        let last = ((self.page + 1) * PAGE_SIZE).min(total);
+        let first = self.page * self.page_size + 1;
+        let last = ((self.page + 1) * self.page_size).min(total);
         (first, last, total)
     }
 
@@ -87,7 +100,7 @@ impl ResultsDelegate {
 
     /// Map a visible row index to the underlying result row.
     fn absolute_row(&self, row_ix: usize) -> usize {
-        self.page * PAGE_SIZE + row_ix
+        self.page * self.page_size + row_ix
     }
 }
 
@@ -121,8 +134,8 @@ impl TableDelegate for ResultsDelegate {
 
     fn rows_count(&self, _: &App) -> usize {
         self.total_rows()
-            .saturating_sub(self.page * PAGE_SIZE)
-            .min(PAGE_SIZE)
+            .saturating_sub(self.page * self.page_size)
+            .min(self.page_size)
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {

@@ -213,10 +213,21 @@ impl DbClient for DemoClient {
     fn query(&mut self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError> {
         self.require_connected()?;
         let started = Instant::now();
-        let lowered = sql.to_ascii_lowercase();
-        let mut result = if lowered.contains("from employees") {
+        // Ignore identifier quotes and the owner prefix so the explorer's
+        // `SELECT * FROM "HR"."EMPLOYEES"` hits the same demo table as a
+        // hand-typed `select * from employees`.
+        let lowered = sql.to_ascii_lowercase().replace('"', "");
+        let from_clause = lowered.split_once("from ").map_or("", |(_, rest)| rest);
+        let table = from_clause
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .rsplit('.')
+            .next()
+            .unwrap_or("");
+        let mut result = if table == "employees" || table == "emp_details_view" {
             employees_result(max_rows)
-        } else if lowered.contains("from departments") {
+        } else if table == "departments" {
             departments_result(max_rows)
         } else if lowered.contains("dual") {
             dual_result(max_rows)
@@ -274,6 +285,76 @@ impl DbClient for DemoClient {
                 kind,
             })
             .collect())
+    }
+
+    fn list_schemas(&mut self) -> Result<Vec<String>, DbError> {
+        self.require_connected()?;
+        let mut schemas = vec![
+            "HR".to_string(),
+            "OE".to_string(),
+            "SCOTT".to_string(),
+            "SYSTEM".to_string(),
+        ];
+        if let Some(user) = &self.connected_user {
+            if !schemas.contains(user) {
+                schemas.push(user.clone());
+            }
+        }
+        schemas.sort();
+        Ok(schemas)
+    }
+
+    fn object_ddl(
+        &mut self,
+        owner: &str,
+        name: &str,
+        kind: &ObjectKind,
+    ) -> Result<String, DbError> {
+        self.require_connected()?;
+        let owner = owner.trim().to_ascii_uppercase();
+        let name = name.trim().to_ascii_uppercase();
+        let q = |s: &str| format!("\"{s}\"");
+        match kind {
+            ObjectKind::Table => {
+                let cols = self.describe_table(&owner, &name)?;
+                let body = cols
+                    .iter()
+                    .map(|c| {
+                        let null = if c.nullable { "" } else { " NOT NULL ENABLE" };
+                        format!("    {} {}{null}", q(&c.name), c.data_type)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",\n");
+                Ok(format!(
+                    "CREATE TABLE {}.{}\n(\n{body}\n)\nSEGMENT CREATION IMMEDIATE\nTABLESPACE \"USERS\";",
+                    q(&owner),
+                    q(&name)
+                ))
+            }
+            ObjectKind::View => Ok(format!(
+                "CREATE OR REPLACE FORCE VIEW {}.{} AS\nSELECT e.employee_id, e.first_name, e.last_name, d.department_name\n  FROM employees e\n  JOIN departments d ON d.department_id = e.department_id;",
+                q(&owner),
+                q(&name)
+            )),
+            ObjectKind::Sequence => Ok(format!(
+                "CREATE SEQUENCE {}.{} MINVALUE 1 MAXVALUE 9999999999 INCREMENT BY 1 START WITH 300 CACHE 20 NOORDER NOCYCLE;",
+                q(&owner),
+                q(&name)
+            )),
+            ObjectKind::Index => Ok(format!(
+                "CREATE UNIQUE INDEX {}.{} ON {}.\"EMPLOYEES\" (\"EMPLOYEE_ID\")\nTABLESPACE \"USERS\";",
+                q(&owner),
+                q(&name),
+                q(&owner)
+            )),
+            other => Ok(format!(
+                "-- demo: DDL for {} {owner}.{name}\nCREATE OR REPLACE {} {}.{} AS\nBEGIN\n  NULL;\nEND;\n/",
+                other.group_label(),
+                other.oracle_type(),
+                q(&owner),
+                q(&name)
+            )),
+        }
     }
 
     fn describe_table(&mut self, _owner: &str, name: &str) -> Result<Vec<ColumnDef>, DbError> {
@@ -419,6 +500,49 @@ mod tests {
         let capped = client.query("SELECT * FROM employees", 2).unwrap();
         assert_eq!(capped.row_count(), 2);
         assert!(capped.truncated);
+    }
+
+    #[test]
+    fn demo_query_accepts_quoted_owner_qualified_names() {
+        let mut client = connected();
+        let r = client
+            .query(
+                "SELECT * FROM \"HR\".\"DEPARTMENTS\" FETCH FIRST 1000 ROWS ONLY",
+                100,
+            )
+            .unwrap();
+        assert_eq!(r.columns[0].name, "DEPARTMENT_ID");
+    }
+
+    #[test]
+    fn demo_schemas_and_ddl() {
+        let mut client = connected();
+        let schemas = client.list_schemas().unwrap();
+        assert!(schemas.contains(&"HR".to_string()));
+        assert!(schemas.windows(2).all(|w| w[0] <= w[1]));
+        let ddl = client
+            .object_ddl("hr", "employees", &ObjectKind::Table)
+            .unwrap();
+        assert!(ddl.starts_with("CREATE TABLE \"HR\".\"EMPLOYEES\""));
+        assert!(ddl.contains("\"EMPLOYEE_ID\" NUMBER(6) NOT NULL ENABLE"));
+        assert!(client
+            .object_ddl("HR", "GIVE_RAISE", &ObjectKind::Procedure)
+            .unwrap()
+            .contains("PROCEDURE"));
+    }
+
+    #[test]
+    fn demo_insert_rows_counts_rows() {
+        let mut client = connected();
+        let n = client
+            .insert_rows(
+                "HR",
+                "DEPARTMENTS",
+                &["DEPARTMENT_ID".into()],
+                &[vec!["50".into()], vec!["60".into()]],
+            )
+            .unwrap();
+        assert_eq!(n, 2);
     }
 
     #[test]

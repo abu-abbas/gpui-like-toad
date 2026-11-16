@@ -2,17 +2,30 @@
 
 Semacam Toad for Oracle, tapi ditulis ulang di Rust dengan [gpui-kit](https://gpui-kit.com) — ringan, satu binary, tanpa install Oracle Client.
 
-> Status: MVP. Connection manager, schema browser, SQL editor + run, result grid, export CSV, dan explain plan sudah ada. GUI-nya sendiri belum pernah dikompilasi di VM ini (RAM tidak cukup); kompilasi GUI pertama kali lewat GitHub Actions, lihat [Verifikasi](#verifikasi).
+> Status: MVP. Home ala Navicat, explorer ala Toad (dropdown schema, double klik buka data, klik kanan View Script / Export / Import), SQL editor, result grid, export, dan explain plan sudah ada.
 
 ## Fitur MVP
 
-- **Connection manager** — form koneksi (nama, username, connect string, password) + mode **Demo** yang jalan tanpa database sama sekali.
-- **Schema browser** — tree objek per owner (`ALL_OBJECTS`): tables, views, indexes, sequences, procedures, functions, packages, triggers, synonyms. Klik tabel/view untuk DESCRIBE.
-- **SQL editor** — syntax highlighting SQL, nomor baris, folding. Run query (SELECT) atau statement lain (DML/DDL/PL/SQL) dari tombol Run.
-- **Result grid** — virtual scrolling, kolom bisa di-resize, klik header untuk sort. Hasil dibatasi 1.000 baris dan UI-nya bilang kalau terpotong.
-- **Export CSV** — hasil terakhir diekspor ke `gpui-like-toad-export-<unix>.csv` di working directory.
-- **Explain plan** — `EXPLAIN PLAN` + `DBMS_XPLAN.DISPLAY`, tampil sebagai teks.
+![Explorer ala Toad dengan klik kanan](docs/screenshots/context-menu.png)
+
+- **Layar awal ala Navicat** — tab Home berisi tile koneksi (Demo, profil tersimpan, New connection) dan riwayat query terakhir.
+- **Connection manager** — dialog modal New/Edit connection dengan Host, Port, dan Service name terpisah (atau mode TNS untuk alias/descriptor), Test, Save, dan mode **Demo** yang jalan tanpa database sama sekali.
+- **Explorer ala Toad** — dropdown schema (`ALL_USERS`), dropdown jenis objek (default Tables; Views, Indexes, Sequences, Procs, Triggers, Synonyms), kotak filter, dan daftar objek datar yang divirtualisasi.
+  - **Double klik** table/view → tab data baru: grid penuh (100 baris per halaman, maks 1.000), panel Info di bawah untuk ringkasan dan error, tanpa editor SQL. Double klik objek lain → View Script.
+  - **Klik kanan** → Open Data, Describe, **View Script** (DDL lewat `DBMS_METADATA.GET_DDL`, terbuka di tab baru), **Export Data** (CSV/XLSX seluruh tabel, maks 100.000 baris, lewat dialog Save), **Import Data** (CSV, header dicocokkan ke nama kolom, tidak auto-commit).
+- **SQL editor** — tombol **New SQL** di toolbar membuka tab editor baru. Syntax highlighting SQL, nomor baris, folding, multi tab, Format. Run (Ctrl/Cmd+Enter, F5) untuk SELECT maupun DML/DDL/PL/SQL.
+- **Result grid** — virtual scrolling, pagination, kolom bisa di-resize, klik header untuk sort. Hasil dibatasi 1.000 baris dan UI-nya bilang kalau terpotong.
+- **Export hasil query** — CSV/XLSX dari grid ke working directory.
+- **Explain plan** — tree plan + teks `DBMS_XPLAN.DISPLAY`.
 - **Commit / Rollback** — eksplisit, tidak ada auto-commit.
+
+| Home | New connection | Tab data |
+|---|---|---|
+| ![Home](docs/screenshots/home.png) | ![Dialog koneksi](docs/screenshots/connection-dialog.png) | ![Data](docs/screenshots/data-tab.png) |
+| **Jenis objek** | **View Script** | |
+| ![Dropdown objek](docs/screenshots/object-dropdown.png) | ![DDL](docs/screenshots/view-script.png) | |
+
+Screenshot diambil dari mode Demo di Xvfb (Linux, render Vulkan software).
 
 Yang sengaja belum ada di MVP: dock layout yang bisa di-drag, shortcut F5/F9, save dialog native, autocomplete, session browser, PL/SQL debugger. Semuanya tercatat sebagai follow-up, bukan lupa.
 
@@ -46,7 +59,7 @@ Build pertama lama (gpui-kit besar); build berikutnya jauh lebih cepat. Profil d
 
 ### Mode Demo (tanpa database)
 
-Klik **Demo** di panel kiri, lalu **Run**. Editor sudah berisi `SELECT * FROM employees` yang dijawab oleh database demo in-memory (tabel `EMPLOYEES`, `DEPARTMENTS`, `DUAL`). Semua fitur — schema tree, describe, explain, export — bisa dicoba tanpa Oracle sama sekali.
+Klik **Connect** di tile *Demo database* (atau **Demo** di panel kiri). Database demo in-memory menjawab `EMPLOYEES`, `DEPARTMENTS`, dan `DUAL`, jadi explorer, double klik tabel, View Script, export/import, dan explain bisa dicoba tanpa Oracle sama sekali.
 
 ### Konek ke Oracle
 
@@ -72,13 +85,13 @@ Workspace tiga crate, supaya logika database bisa dites tanpa GUI:
 
 ```
 crates/
-  ora-core/    # Tanpa GUI, tanpa dependensi: trait DbClient, model hasil,
-               # export CSV, helper SQL, backend demo in-memory.
+  ora-core/    # Tanpa GUI: trait DbClient, model hasil, export CSV/XLSX,
+               # import CSV, helper SQL, backend demo in-memory.
   ora-driver/  # Implementasi DbClient di atas driver resmi Oracle
                # (rust-oracledb, thin mode). Satu-satunya crate yang
                # tahu soal driver.
   app/         # GUI gpui-kit: workbench, worker thread database,
-               # adapter result grid, schema tree.
+               # adapter result grid, explorer objek.
 ```
 
 Alur database: UI → `Job` (channel) → satu worker thread yang memiliki `DbClient` → `Response` → UI. Driver bersifat blocking, jadi tidak pernah dipanggil dari UI thread.
@@ -97,11 +110,10 @@ Revisi di-pin ke commit yang diverifikasi tanggal tersebut (`26.0.0-beta.7`, pre
 
 Yang sudah dibuktikan mesin (bukan klaim):
 
-- `cargo test -p ora-core -p ora-driver` hijau di VM dev: 21 test (model, CSV, helper SQL, backend demo, parsing connect string, error path driver).
-- `cargo clippy -p ora-core -p ora-driver -- -D warnings` hijau.
-- `cargo check -p ora-driver` hijau — glue code driver terkompilasi, termasuk konversi tipe per `DB_TYPE_*`.
-- Unit test app crate (sorting grid, schema tree, nama file export) hanya jalan di CI — mengompilasinya butuh gpui-kit yang tidak muat di RAM VM ini.
-- GUI (`cargo check -p gpui-like-toad`) **belum** terkompilasi di VM ini: dependensi gpui-kit butuh RAM jauh di atas yang tersedia. Kompilasi GUI pertama kali lewat CI (Ubuntu + Windows + macOS) di setiap push/PR; statusnya terlihat di tab Actions repo ini. Kode GUI ditulis mengikuti API gpui-kit 0.9.1 yang diverifikasi dari source crate-nya, tapi kejujuran batas ini penting: sampai CI hijau, GUI belum terbukti kompil.
+- `cargo test --workspace` hijau (ora-core 44, app 11, ora-driver 4 test), termasuk round-trip export → import CSV lewat worker dengan backend demo.
+- `cargo clippy -p ora-core -p ora-driver --all-targets -- -D warnings` hijau.
+- GUI terkompilasi dan dijalankan di Linux (Xvfb + Vulkan software); screenshot di `docs/screenshots/` diambil dari build itu dalam mode Demo.
+- Belum diuji ke Oracle sungguhan: `list_schemas` (`ALL_USERS`) dan `object_ddl` (`DBMS_METADATA.GET_DDL`) di `ora-driver` baru terbukti kompil. Import memakai INSERT literal per baris, jadi kolom DATE bergantung pada `NLS_DATE_FORMAT` session.
 
 CI (`ci.yml`) meniru pola Sistem Akademis: deteksi perubahan, cek judul PR (Conventional Commits), job test headless, job GUI per OS, Semgrep, dan agregator `ci-ok` sebagai satu-satunya required check.
 

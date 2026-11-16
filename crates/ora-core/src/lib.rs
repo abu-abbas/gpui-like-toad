@@ -11,17 +11,22 @@
 pub mod client;
 pub mod demo;
 pub mod export;
+pub mod import;
 pub mod model;
 pub mod sql;
 pub mod store;
 
 pub use client::{DbClient, DbError, DbInfo};
 pub use model::{
-    ColumnDef, ColumnInfo, ConnectionProfile, ObjectKind, PlanNode, QueryResult, SchemaObject,
-    Value,
+    compose_easy_connect, parse_easy_connect, ColumnDef, ColumnInfo, ConnectionProfile, ObjectKind,
+    PlanNode, QueryResult, SchemaObject, Value,
 };
 
 /// Default cap for rows fetched into the grid. Queries that hit the cap set
 /// [`QueryResult::truncated`] so the UI can say so instead of silently
 /// showing a partial result.
 pub const DEFAULT_MAX_ROWS: usize = 1000;
+
+/// Row cap for "Export Data" on a whole table. Higher than the grid cap
+/// because nothing is rendered; the UI reports when the cap was hit.
+pub const EXPORT_MAX_ROWS: usize = 100_000;
