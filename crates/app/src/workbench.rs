@@ -2047,7 +2047,7 @@ impl Workbench {
     fn render_results_content(
         &self,
         theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tab = self.active_tab();
         match tab.results_tab {

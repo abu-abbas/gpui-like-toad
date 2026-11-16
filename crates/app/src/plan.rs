@@ -82,6 +82,7 @@ fn render_node(
     let has_children = children.is_some_and(|c| !c.is_empty());
     let is_expanded = expanded.contains(&node.id);
     let mut row = div()
+        .id(format!("plan-node-{}", node.id))
         .flex()
         .flex_row()
         .items_center()

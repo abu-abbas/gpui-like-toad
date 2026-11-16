@@ -10,7 +10,9 @@
 use std::cmp::Ordering;
 
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
-use gpui_kit::{div, px, App, Context, IntoElement, SharedString, Styled as _, Window};
+use gpui_kit::{
+    div, px, App, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window,
+};
 use ora_core::{QueryResult, Value};
 
 use crate::theme::{FONT_GRID, LEADING_GRID};
