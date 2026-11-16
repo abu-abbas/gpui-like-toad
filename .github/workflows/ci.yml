@@ -1,19 +1,118 @@
+# CI: fmt + clippy + unit test headless di semua PR/push; GUI check
+# (Ubuntu + Windows) dan Semgrep. Job `ci-ok` satu-satunya required check
+# di branch protection `main`. Repo ini publik, jadi menit Actions tidak
+# dibatasi — GUI check jalan di PR maupun push ke main.
 name: CI
 
 on:
-  push:
   pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  check:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.diff.outputs.rust }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        name: Deteksi perubahan kode Rust
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            files=$(git ls-files)   # push pertama / base tidak ada: anggap semua berubah
+          else
+            files=$(git diff --name-only "$base" HEAD)
+          fi
+          echo "$files"
+          if echo "$files" | grep -qE '^(crates/|Cargo\.toml|Cargo\.lock|\.github/workflows/ci\.yml)'; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Judul PR jadi pesan commit di main (squash merge) → wajib Conventional Commits untuk versioning otomatis.
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Judul PR mengikuti Conventional Commits
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)(\((app|core|driver|ci|docs|deps)\))?!?: .+'
+          if ! printf '%s' "$TITLE" | grep -qE "$pattern"; then
+            echo "::error::Judul PR \"$TITLE\" harus format Conventional Commits, mis. 'feat(app): editor' atau 'ci: cek judul PR'"
+            exit 1
+          fi
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Toolchain Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+      # Cache target/ dibaca semua job tapi hanya disimpan dari main: cache dari branch PR tidak bisa dipakai PR lain,
+      # jadi menyimpannya dari PR hanya memboroskan penyimpanan dan waktu upload.
+      - id: cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - run: cargo fmt --check
+      - run: cargo clippy -p ora-core -p ora-driver --all-targets --locked -- -D warnings
+      - run: cargo test -p ora-core -p ora-driver --locked
+      - name: Simpan cache build (hanya main, hanya kalau belum ada)
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+  # Kompilasi GUI pertama dan satu-satunya yang terpercaya: VM dev tidak
+  # cukup RAM untuk gpui-kit. Job ini juga menjalankan unit test app crate.
+  # Clippy di sini tanpa -D warnings: kode GUI belum pernah dikompilasi di
+  # luar CI, jadi warning gaya tidak boleh memblokir sinyal kompilasi.
+  gui:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
@@ -21,20 +120,51 @@ jobs:
           sudo apt-get install -y gcc g++ clang libfontconfig-dev libwayland-dev \
             libwebkit2gtk-4.1-dev libxkbcommon-x11-dev libx11-xcb-dev \
             libssl-dev libzstd-dev libasound2-dev vulkan-validationlayers libvulkan1 pkg-config
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Toolchain Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+      - id: cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          components: rustfmt, clippy
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - run: cargo check --workspace --all-targets --locked
+      - run: cargo clippy --workspace --all-targets --locked
+      - run: cargo test --workspace --locked
+      - name: Simpan cache build (hanya main, hanya kalau belum ada)
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Format check
-        run: cargo fmt --check
+  # Security test statis: ruleset Semgrep registry. Temuan apa pun membuat
+  # CI merah; false positive diberi komentar `nosemgrep: <id>` beserta alasannya.
+  security:
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep:1.182.1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Semgrep
+        run: >-
+          semgrep scan --error --metrics=off
+          --config p/rust --config p/secrets --config p/github-actions
 
-      - name: Check workspace
-        run: cargo check --workspace --all-targets
-
-      - name: Test headless crates
-        run: cargo test -p ora-core -p ora-driver
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets
+  ci-ok:
+    if: always()
+    needs: [changes, pr-title, test, gui, security]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Semua job yang jalan harus lulus (skipped dianggap lulus)
+        run: |
+          echo '${{ toJSON(needs) }}'
+          if echo '${{ toJSON(needs.*.result) }}' | grep -qE '"(failure|cancelled)"'; then
+            exit 1
+          fi

@@ -60,6 +60,12 @@ Password tidak pernah disimpan ke disk — hanya hidup di memori selama sesi ber
 
 Catatan: statement tidak boleh diakhiri `;` atau `/` saat dikirim ke driver — aplikasi otomatis membersihkannya sebelum eksekusi.
 
+## Font & ligature
+
+- **Editor** memakai **JetBrains Mono** v2.304 yang di-bundle di `crates/app/assets/fonts/` (lisensi OFL, lihat `OFL.txt` di folder yang sama) — tampilannya sama di semua mesin, font terinstall atau tidak.
+- **Ligature kode** (`->`, `=>`, `!=`, `===`, ...) aktif: text system membiarkan fitur OpenType `calt` menyala secara default, dan tidak ada jalur di editor yang mematikannya.
+- **UI** memakai **JetBrains Sans** kalau terinstall di sistem (misalnya bawaan JetBrains IDE); kalau tidak ada, fallback ke font default platform. JetBrains Sans tidak di-bundle karena tidak ada rilis OFL-nya — hanya tersedia sebagai webfont dari CDN JetBrains.
+
 ## Arsitektur
 
 Workspace tiga crate, supaya logika database bisa dites tanpa GUI:
@@ -91,9 +97,25 @@ Revisi di-pin ke commit yang diverifikasi tanggal tersebut (`26.0.0-beta.7`, pre
 
 Yang sudah dibuktikan mesin (bukan klaim):
 
-- `cargo test -p ora-core -p ora-driver` hijau di VM dev (model, CSV, helper SQL, backend demo, parsing connect string).
+- `cargo test -p ora-core -p ora-driver` hijau di VM dev: 21 test (model, CSV, helper SQL, backend demo, parsing connect string, error path driver).
+- `cargo clippy -p ora-core -p ora-driver -- -D warnings` hijau.
 - `cargo check -p ora-driver` hijau — glue code driver terkompilasi, termasuk konversi tipe per `DB_TYPE_*`.
+- Unit test app crate (sorting grid, schema tree, nama file export) hanya jalan di CI — mengompilasinya butuh gpui-kit yang tidak muat di RAM VM ini.
 - GUI (`cargo check -p gpui-like-toad`) **belum** terkompilasi di VM ini: dependensi gpui-kit butuh RAM jauh di atas yang tersedia. Kompilasi GUI pertama kali lewat CI (Ubuntu + Windows) di setiap push/PR; statusnya terlihat di tab Actions repo ini. Kode GUI ditulis mengikuti API gpui-kit 0.9.1 yang diverifikasi dari source crate-nya, tapi kejujuran batas ini penting: sampai CI hijau, GUI belum terbukti kompil.
+
+CI (`ci.yml`) meniru pola Sistem Akademis: deteksi perubahan, cek judul PR (Conventional Commits), job test headless, job GUI per OS, Semgrep, dan agregator `ci-ok` sebagai satu-satunya required check.
+
+## Rilis
+
+Pola rilis meniru Sistem Akademis: setiap push ke `main` yang menyentuh kode (atau manual via workflow_dispatch) membangun biner rilis Linux + Windows, lalu menerbitkannya sebagai GitHub Release di repo publik terpisah **`abu-abbas/gpui-like-toad-releases`**, versi `0.1.<run_number>`, 5 rilis terakhir dipertahankan. Setiap biner di-smoke-test dulu (`--version` harus mencetak versi yang sama dengan nomor rilis).
+
+Setup sekali (oleh pemilik repo):
+
+1. Buat repo publik `abu-abbas/gpui-like-toad-releases` (kosong, tanpa README).
+2. Buat fine-grained PAT dengan akses **Contents: Read and write** ke repo rilis tersebut saja.
+3. Tambahkan sebagai secret `RELEASES_TOKEN` di repo `gpui-like-toad` (Settings → Secrets and variables → Actions).
+
+Kalau secret belum diisi, workflow rilis hanya memberi warning dan dilewati — tidak merah. Biner belum ditandatangani; code signing menyusul.
 
 ## Roadmap (follow-up)
 

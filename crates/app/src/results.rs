@@ -116,3 +116,59 @@ impl TableDelegate for ResultsDelegate {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn int(n: i128) -> Value {
+        Value::Integer(n)
+    }
+
+    fn float(n: f64) -> Value {
+        Value::Float(n)
+    }
+
+    fn text(s: &str) -> Value {
+        Value::Text(s.to_string())
+    }
+
+    #[test]
+    fn sort_puts_nulls_last_and_orders_numbers() {
+        assert_eq!(
+            cmp_values(Some(&Value::Null), Some(&int(1))),
+            Ordering::Greater
+        );
+        assert_eq!(
+            cmp_values(Some(&int(1)), Some(&Value::Null)),
+            Ordering::Less
+        );
+        assert_eq!(
+            cmp_values(Some(&Value::Null), Some(&Value::Null)),
+            Ordering::Equal
+        );
+        assert_eq!(cmp_values(Some(&int(2)), Some(&int(10))), Ordering::Less);
+        assert_eq!(
+            cmp_values(Some(&int(10)), Some(&float(2.5))),
+            Ordering::Greater
+        );
+        assert_eq!(cmp_values(Some(&float(2.5)), Some(&int(3))), Ordering::Less);
+        assert_eq!(cmp_values(None, Some(&int(1))), Ordering::Greater);
+        assert_eq!(cmp_values(Some(&int(1)), None), Ordering::Less);
+        assert_eq!(cmp_values(None, None), Ordering::Equal);
+    }
+
+    #[test]
+    fn sort_falls_back_to_display_text_for_mixed_types() {
+        assert_eq!(
+            cmp_values(Some(&text("a")), Some(&text("b"))),
+            Ordering::Less
+        );
+        // Integer vs Text compares display strings: "10" < "2" lexicographically.
+        assert_eq!(cmp_values(Some(&int(10)), Some(&text("2"))), Ordering::Less);
+        assert_eq!(
+            cmp_values(Some(&Value::Bytes(vec![1])), Some(&Value::Bytes(vec![2]))),
+            Ordering::Less
+        );
+    }
+}

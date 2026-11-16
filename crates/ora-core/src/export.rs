@@ -84,4 +84,42 @@ mod tests {
             "ID,NAME,NOTE\r\n1,Ada,\"says \"\"hi\"\", then\nleft\"\r\n2,,plain\r\n"
         );
     }
+
+    #[test]
+    fn csv_empty_result_writes_header_only() {
+        let empty = QueryResult {
+            columns: vec![
+                ColumnInfo {
+                    name: "A".into(),
+                    data_type: "NUMBER".into(),
+                },
+                ColumnInfo {
+                    name: "B".into(),
+                    data_type: "VARCHAR2".into(),
+                },
+            ],
+            rows: vec![],
+            truncated: false,
+            elapsed: Default::default(),
+        };
+        assert_eq!(to_csv(&empty), "A,B\r\n");
+        assert_eq!(to_csv(&QueryResult::default()), "\r\n");
+    }
+
+    #[test]
+    fn csv_unicode_unquoted_and_cr_quoted() {
+        let result = QueryResult {
+            columns: vec![ColumnInfo {
+                name: "T".into(),
+                data_type: "VARCHAR2".into(),
+            }],
+            rows: vec![
+                vec![Value::Text("café ☕".into())],
+                vec![Value::Text("a\rb".into())],
+            ],
+            truncated: false,
+            elapsed: Default::default(),
+        };
+        assert_eq!(to_csv(&result), "T\r\ncafé ☕\r\n\"a\rb\"\r\n");
+    }
 }

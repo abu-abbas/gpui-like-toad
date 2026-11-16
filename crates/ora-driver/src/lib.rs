@@ -331,4 +331,29 @@ mod tests {
             .set_connect_string("(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=dbhost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=orcl)))");
         assert!(descriptor.is_ok());
     }
+
+    #[test]
+    fn connect_string_validation_rejects_blank_and_garbage() {
+        let blank = oracledb::Config::default().set_connect_string("");
+        assert!(blank.is_err(), "empty connect string should not parse");
+        let garbage = oracledb::Config::default().set_connect_string("::::");
+        assert!(garbage.is_err(), "garbage connect string should not parse");
+    }
+
+    #[test]
+    fn thin_client_connect_reports_refused_connection() {
+        let mut client = ThinClient::new();
+        let err = client
+            .connect(
+                &ora_core::ConnectionProfile {
+                    name: "refused".into(),
+                    username: "hr".into(),
+                    connect_string: "127.0.0.1:1/nonexistent".into(),
+                },
+                "password",
+            )
+            .unwrap_err();
+        assert!(!err.to_string().is_empty());
+        assert!(!client.is_connected());
+    }
 }

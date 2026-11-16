@@ -374,4 +374,72 @@ mod tests {
         assert!(client.query("SELECT * FROM dual", 10).is_err());
         assert!(!client.is_connected());
     }
+
+    #[test]
+    fn demo_execute_commit_rollback_cycle() {
+        let mut client = connected();
+        assert_eq!(
+            client.execute("UPDATE employees SET salary = 1").unwrap(),
+            1
+        );
+        assert!(client.execute("SELECT * FROM employees").is_err());
+        assert!(client.execute("").is_err());
+        assert!(client.commit().is_ok());
+        assert!(client.rollback().is_ok());
+        client.disconnect();
+        assert!(!client.is_connected());
+        assert!(client.commit().is_err());
+        assert!(client.execute("UPDATE employees SET salary = 1").is_err());
+    }
+
+    #[test]
+    fn demo_list_objects_and_describe() {
+        let mut client = connected();
+        let objects = client.list_objects("hr").unwrap();
+        assert_eq!(objects.len(), 5);
+        assert!(objects.iter().all(|o| o.owner == "HR"));
+        let cols = client.describe_table("HR", "employees").unwrap();
+        assert_eq!(cols.len(), 7);
+        assert_eq!(cols[0].name, "EMPLOYEE_ID");
+        assert!(!cols[0].nullable);
+        assert!(cols[1].nullable);
+        let err = client.describe_table("HR", "nope").unwrap_err();
+        assert!(err.0.contains("NOPE"), "{err}");
+    }
+
+    #[test]
+    fn demo_connect_requires_username_and_uppercases() {
+        let mut client = DemoClient::new();
+        let err = client
+            .connect(
+                &ConnectionProfile {
+                    name: "demo".into(),
+                    username: "  ".into(),
+                    connect_string: "demo".into(),
+                },
+                "",
+            )
+            .unwrap_err();
+        assert!(err.0.contains("username"), "{err}");
+        let info = client
+            .connect(
+                &ConnectionProfile {
+                    name: "demo".into(),
+                    username: "demo".into(),
+                    connect_string: "demo".into(),
+                },
+                "",
+            )
+            .unwrap();
+        assert_eq!(info.user, "DEMO");
+        assert_eq!(info.database, "DEMO");
+    }
+
+    #[test]
+    fn demo_explain_returns_plan_lines() {
+        let mut client = connected();
+        let plan = client.explain_plan("SELECT * FROM employees").unwrap();
+        assert!(!plan.is_empty());
+        assert!(plan[0].contains("Plan hash"), "{}", plan[0]);
+    }
 }
