@@ -110,6 +110,8 @@ jobs:
           app="bundle/gpui-like-toad.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp "target/release/gpui-like-toad" "$app/Contents/MacOS/gpui-like-toad"
+          iconutil -c icns -o "$app/Contents/Resources/AppIcon.icns" \
+            crates/app/assets/icon/AppIcon.iconset
           cat > "$app/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -127,6 +129,8 @@ jobs:
             <string>$VERSION</string>
             <key>CFBundleExecutable</key>
             <string>gpui-like-toad</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon</string>
             <key>CFBundlePackageType</key>
             <string>APPL</string>
             <key>NSHighResolutionCapable</key>
