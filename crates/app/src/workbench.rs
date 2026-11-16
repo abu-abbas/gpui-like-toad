@@ -2683,7 +2683,7 @@ impl Workbench {
             .child(div().h(px(SPACE_4)))
             .child(form_label("About", theme))
             .child(body_text(
-                format!("DB Explorer {}", env!("CARGO_PKG_VERSION")),
+                format!(concat!(app_name!(), " {}"), env!("CARGO_PKG_VERSION")),
                 theme,
             ))
             .child(caption_text(
@@ -3515,7 +3515,7 @@ impl Workbench {
                             .line_height(px(LEADING_HEADING_XL))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
-                            .child("DB Explorer"),
+                            .child(app_name!()),
                     )
                     .child(caption_text(
                         "Desktop Database Client · Built with GPUI + Rust".to_string(),
@@ -4015,12 +4015,12 @@ fn unix_stamp() -> u64 {
 
 /// CSV export filename for a unix timestamp. Split out for tests.
 fn export_filename(stamp: u64) -> String {
-    format!("gpui-like-toad-export-{stamp}.csv")
+    format!("Ora-The-Explorer-export-{stamp}.csv")
 }
 
 /// XLSX export filename for a unix timestamp. Split out for tests.
 fn export_xlsx_filename(stamp: u64) -> String {
-    format!("gpui-like-toad-export-{stamp}.xlsx")
+    format!("Ora-The-Explorer-export-{stamp}.xlsx")
 }
 
 /// One slot in the numbered pagination row: a clickable page or an
@@ -4069,14 +4069,14 @@ mod tests {
 
     #[test]
     fn export_filename_is_stable_and_suffixed() {
-        assert_eq!(export_filename(0), "gpui-like-toad-export-0.csv");
+        assert_eq!(export_filename(0), "Ora-The-Explorer-export-0.csv");
         assert_eq!(
             export_filename(1_700_000_000),
-            "gpui-like-toad-export-1700000000.csv"
+            "Ora-The-Explorer-export-1700000000.csv"
         );
         assert_eq!(
             export_xlsx_filename(1_700_000_000),
-            "gpui-like-toad-export-1700000000.xlsx"
+            "Ora-The-Explorer-export-1700000000.xlsx"
         );
     }
 
