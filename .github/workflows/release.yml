@@ -1,6 +1,9 @@
-# Build biner rilis dari main lalu terbitkan sebagai GitHub Release di repo
-# ini sendiri (repo sudah publik, jadi tidak perlu repo cermin seperti
-# Sistem Akademis). Versi: 0.1.<run_number>. Rilis lama dipangkas
+# Build biner rilis lalu terbitkan sebagai GitHub Release di repo ini
+# sendiri (repo sudah publik, jadi tidak perlu repo cermin seperti
+# Sistem Akademis). Tidak lagi jalan otomatis di setiap merge ke main:
+# rilis hanya dibuat saat push tag `v*` (versi = nama tag tanpa `v`, mis.
+# v0.2.0 -> 0.2.0) atau manual lewat Run workflow (versi dari input, kalau
+# kosong 0.1.<run_number>). Rilis lama dipangkas
 # (sisakan 5 terakhir). Biner belum ditandatangani (code signing menyusul);
 # Windows SmartScreen akan menampilkan peringatan saat pertama kali
 # menjalankan .exe-nya, dan macOS Gatekeeper akan memblokir .app/.dmg
@@ -10,9 +13,13 @@ name: Release
 
 on:
   push:
-    branches: [main]
-    paths: ['crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/release.yml']
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versi rilis, mis. 0.2.0 (kosongkan untuk 0.1.<run_number>)'
+        required: false
+        default: ''
 
 concurrency:
   group: release
@@ -23,7 +30,9 @@ permissions:
 
 env:
   KEEP_RELEASES: 5
-  VERSION: 0.1.${{ github.run_number }}
+  # Tag -> nama tag; manual -> input, atau 0.1.<run_number> kalau kosong.
+  # Awalan `v` dibuang di setiap step (v0.2.0 -> 0.2.0).
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || inputs.version || format('0.1.{0}', github.run_number) }}
 
 jobs:
   build:
@@ -67,8 +76,9 @@ jobs:
       - name: Sematkan nomor versi
         shell: python
         run: |
-          import pathlib
-          version = "${{ env.VERSION }}"
+          import os, pathlib, re
+          version = os.environ["VERSION"].removeprefix("v")
+          assert re.fullmatch(r"\d+\.\d+\.\d+", version), f"versi harus X.Y.Z, dapat {version!r}"
           p = pathlib.Path("crates/app/Cargo.toml")
           s = p.read_text()
           updated = s.replace('version = "0.1.0"', f'version = "{version}"', 1)
@@ -96,6 +106,7 @@ jobs:
       - name: Smoke test --version dan siapkan artifact
         shell: bash
         run: |
+          VERSION="${VERSION#v}"
           bin="target/release/gpui-like-toad${{ matrix.ext }}"
           out="Ora-The-Explorer-$VERSION-${{ matrix.suffix }}${{ matrix.ext }}"
           "$bin" --version
@@ -107,6 +118,7 @@ jobs:
         name: Bundel .app dan DMG
         shell: bash
         run: |
+          VERSION="${VERSION#v}"
           app="bundle/Ora The Explorer.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp "target/release/gpui-like-toad" "$app/Contents/MacOS/gpui-like-toad"
@@ -180,7 +192,8 @@ jobs:
           ls -la out/
           test "$(ls out/* | wc -l)" -eq 4
           notes=$(git log -n 15 --no-merges --pretty='- %s' -- crates | head -15)
-          gh release create "v$VERSION" out/* \
+          VERSION="${VERSION#v}"
+          gh release create "v$VERSION" out/* --target "${{ github.sha }}" \
             --title "Ora The Explorer $VERSION" \
             --notes "Dibangun dari ${{ github.sha }}"$'\n\n'"$notes" --latest
           # Pangkas: sisakan KEEP_RELEASES terbaru, hapus sisanya beserta tag.
