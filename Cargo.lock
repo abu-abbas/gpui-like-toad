@@ -2343,8 +2343,10 @@ dependencies = [
 name = "gpui-like-toad"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "gpui-kit",
  "keyring",
+ "lsp-types",
  "ora-core",
  "ora-driver",
 ]

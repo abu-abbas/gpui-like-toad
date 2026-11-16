@@ -9,6 +9,7 @@ macro_rules! app_name {
     };
 }
 
+mod completion;
 mod keychain;
 mod plan;
 mod results;
@@ -19,7 +20,7 @@ mod worker;
 
 use std::borrow::Cow;
 
-use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
+use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, ShowCompletions, Undo};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     actions, application, assets, init, App, Bounds, KeyBinding, Menu, MenuItem, OsAction, Point,
@@ -83,6 +84,10 @@ fn main() {
             KeyBinding::new("cmd-enter", workbench::RunQuery, Some("Workbench")),
             KeyBinding::new("ctrl-enter", workbench::RunQuery, Some("Workbench")),
             KeyBinding::new("f5", workbench::RunQuery, Some("Workbench")),
+            // Open the SQL autocomplete popup by hand (it also opens by
+            // itself while typing). Only editors with a completion
+            // provider react, i.e. the SQL tabs.
+            KeyBinding::new("ctrl-space", ShowCompletions, Some("Input")),
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-h", Hide, None),
             KeyBinding::new("alt-cmd-h", HideOthers, None),

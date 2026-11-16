@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::completion::CatalogObject;
 use crate::filter::{self, TableFilter};
 use crate::model::{ColumnDef, ConnectionProfile, ObjectKind, PlanNode, QueryResult, SchemaObject};
 
@@ -134,6 +135,29 @@ pub trait DbClient: Send {
 
     /// Columns of one table or view.
     fn describe_table(&mut self, owner: &str, name: &str) -> Result<Vec<ColumnDef>, DbError>;
+
+    /// Everything the editor's autocomplete needs for one schema: its
+    /// objects, with columns for tables and views. The default asks per
+    /// table; backends with a data dictionary should override it with one
+    /// bulk query, since a real schema can hold thousands of tables.
+    fn catalog_objects(&mut self, owner: &str) -> Result<Vec<CatalogObject>, DbError> {
+        let objects = self.list_objects(owner)?;
+        let mut out = Vec::with_capacity(objects.len());
+        for object in objects {
+            let columns = match object.kind {
+                ObjectKind::Table | ObjectKind::View => self
+                    .describe_table(&object.owner, &object.name)
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            out.push(CatalogObject {
+                name: object.name,
+                kind: object.kind,
+                columns,
+            });
+        }
+        Ok(out)
+    }
 
     /// `EXPLAIN PLAN` output as formatted text lines (DBMS_XPLAN style), one
     /// string per line, without trailing newlines.

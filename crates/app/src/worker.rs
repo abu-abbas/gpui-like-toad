@@ -10,6 +10,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 
+use ora_core::completion::CatalogObject;
 use ora_core::credentials::{CredentialStore as _, ExposeSecret as _, SecretString};
 use ora_core::demo::DemoClient;
 use ora_core::export::{to_csv, to_xlsx};
@@ -122,6 +123,10 @@ pub enum Job {
     Explain {
         sql: String,
     },
+    /// Objects and columns of one schema, for the editor's autocomplete.
+    Catalog {
+        owner: String,
+    },
     Disconnect,
 }
 
@@ -146,6 +151,7 @@ pub enum Response {
     /// Structured plan nodes for the tree panel, plus the DBMS_XPLAN text
     /// lines for the Explain Plan sub-tab (empty when the text path failed).
     PlanTree(Vec<PlanNode>, Vec<String>),
+    Catalog(Vec<CatalogObject>),
     Disconnected,
     Failed(String),
 }
@@ -325,6 +331,13 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
         Job::ListObjects { owner } => match client.as_mut() {
             Some(client) => match client.list_objects(&owner) {
                 Ok(objects) => Response::Objects(objects),
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
+        Job::Catalog { owner } => match client.as_mut() {
+            Some(client) => match client.catalog_objects(&owner) {
+                Ok(objects) => Response::Catalog(objects),
                 Err(err) => Response::Failed(err.to_string()),
             },
             None => Response::Failed("not connected".to_string()),
