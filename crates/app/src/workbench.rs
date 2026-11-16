@@ -10,15 +10,19 @@
 //! soft-cancel: the worker thread stays blocked until Oracle returns (see
 //! [`Workbench::stop`]).
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::mpsc::{Receiver, RecvError};
 
 use gpui_kit::actions;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_kit::component::input::{
+    highlight_characters, Editor, EditorState, Enter, IndentInline, Input, InputEvent, InputState,
+};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::{
@@ -27,9 +31,11 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, relative, uniform_list, AnyWindowHandle, App, ClickEvent, Context, Entity, FontWeight,
-    Hsla, IntoElement, PathPromptOptions, Render, Subscription, UniformListScrollHandle, Window,
+    div, px, relative, uniform_list, AnyWindowHandle, App, ClickEvent, Context, Entity,
+    Focusable as _, FontWeight, Hsla, IntoElement, PathPromptOptions, Render, Subscription,
+    UniformListScrollHandle, Window,
 };
+use ora_core::completion::Catalog;
 use ora_core::credentials::{PasswordAction, SecretString};
 use ora_core::export::{to_csv, to_xlsx};
 use ora_core::sql::{clean_statement, format_sql};
@@ -39,6 +45,7 @@ use ora_core::{
     QueryResult, SchemaObject, DEFAULT_MAX_ROWS,
 };
 
+use crate::completion::SqlCompletionProvider;
 use crate::plan;
 use crate::results::ResultsDelegate;
 use crate::schema::{self, ObjectCategory};
@@ -153,6 +160,7 @@ impl QueryTab {
         id: u64,
         title: String,
         default_sql: &str,
+        completion: &Rc<SqlCompletionProvider>,
         window: &mut Window,
         cx: &mut Context<Workbench>,
     ) -> Self {
@@ -162,6 +170,15 @@ impl QueryTab {
                 .line_number(true)
                 .folding(true)
                 .default_value(default_sql)
+        });
+        editor.update(cx, |state, cx| {
+            let lsp = state.lsp_mut();
+            lsp.completion_provider = Some(completion.clone());
+            // Matches are fuzzy, so paint the matched characters rather
+            // than a prefix.
+            lsp.set_completion_highlighter(Rc::new(highlight_characters));
+            lsp.completion_menu.max_width = px(460.);
+            cx.notify();
         });
         let table_state = cx.new(|cx| TableState::new(ResultsDelegate::empty(), &mut *window, cx));
         QueryTab {
@@ -232,6 +249,17 @@ pub struct Workbench {
     tree_filter: String,
     messages: Vec<String>,
     status: String,
+    /// Autocomplete metadata, shared with every tab's completion provider.
+    catalog: Rc<RefCell<Catalog>>,
+    completion: Rc<SqlCompletionProvider>,
+    /// Schemas whose catalog load is in flight, so one is not asked twice.
+    catalog_loading: HashSet<String>,
+    /// Bumped on connect and disconnect; a catalog response from an older
+    /// session is dropped.
+    catalog_epoch: u64,
+    /// Schema the user is waiting on after typing `SCHEMA.`: reopen the
+    /// popup when its catalog arrives.
+    catalog_retrigger: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -254,7 +282,25 @@ impl Workbench {
         let password_input = cx.new(|cx| InputState::new(&mut *window, cx).masked(true));
         let search_input =
             cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Filter objects..."));
-        let first_tab = QueryTab::new(1, "Query 1".to_string(), WELCOME_SQL, window, cx);
+        let catalog = Rc::new(RefCell::new(Catalog::new()));
+        let workbench = cx.weak_entity();
+        let completion = Rc::new(SqlCompletionProvider::new(
+            catalog.clone(),
+            Rc::new(move |schema, cx| {
+                let _ = workbench.update(cx, |this, cx| {
+                    this.catalog_retrigger = Some(schema.to_ascii_uppercase());
+                    this.load_catalog(schema, cx);
+                });
+            }),
+        ));
+        let first_tab = QueryTab::new(
+            1,
+            "Query 1".to_string(),
+            WELCOME_SQL,
+            &completion,
+            window,
+            cx,
+        );
 
         // Rebuild the tree on every keystroke in the search box.
         let search_sub = cx.subscribe(&search_input, |this, _, event: &InputEvent, cx| {
@@ -309,6 +355,11 @@ impl Workbench {
             tree_filter: String::new(),
             messages: Vec::new(),
             status: "Belum terhubung.".to_string(),
+            catalog,
+            completion,
+            catalog_loading: HashSet::new(),
+            catalog_epoch: 0,
+            catalog_retrigger: None,
             _subscriptions: vec![search_sub, appearance_sub],
         }
     }
@@ -476,6 +527,88 @@ impl Workbench {
             });
         })
         .detach();
+    }
+
+    /// Load one schema's objects and columns into the autocomplete catalog.
+    /// Deliberately outside `spawn_db`: it must not set the busy flag or
+    /// supersede the operation the user is waiting on. The worker runs it
+    /// in turn, after whatever is already queued.
+    fn load_catalog(&mut self, owner: String, cx: &mut Context<Self>) {
+        let Some(db) = self.db.clone() else {
+            return;
+        };
+        if self.session.is_none() {
+            return;
+        }
+        let key = owner.to_ascii_uppercase();
+        if !self.catalog_loading.insert(key.clone()) {
+            return;
+        }
+        let rx: Receiver<Response> = db.request(Job::Catalog { owner });
+        let epoch = self.catalog_epoch;
+        let handle = self.window_handle;
+        cx.spawn(async move |view, cx| {
+            let resp = cx
+                .background_executor()
+                .spawn(async move { rx.recv() })
+                .await;
+            let _ = cx.update_window(handle, |_, window, cx| {
+                view.update(cx, |this, cx| {
+                    this.on_catalog_response(epoch, key, resp, window, cx)
+                })
+            });
+        })
+        .detach();
+    }
+
+    fn on_catalog_response(
+        &mut self,
+        epoch: u64,
+        owner: String,
+        resp: Result<Response, RecvError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if epoch != self.catalog_epoch {
+            return;
+        }
+        self.catalog_loading.remove(&owner);
+        let waiting = self.catalog_retrigger.as_deref() == Some(owner.as_str());
+        if waiting {
+            self.catalog_retrigger = None;
+        }
+        match resp {
+            Ok(Response::Catalog(objects)) => {
+                self.catalog.borrow_mut().set_owner(&owner, objects);
+                // The user typed `SCHEMA.` and got nothing because it was
+                // still loading: show the list now, if they are still there.
+                if waiting && !self.show_home {
+                    let editor = self.active_tab().editor.clone();
+                    if editor.read(cx).focus_handle(cx).is_focused(window) {
+                        editor.update(cx, |state, cx| state.show_completions(window, cx));
+                    }
+                }
+            }
+            Ok(Response::Failed(message)) => {
+                // Stored as loaded-but-empty so every later `SCHEMA.` does
+                // not retry a schema the session cannot read.
+                self.catalog.borrow_mut().set_owner(&owner, Vec::new());
+                self.push_message(format!(
+                    "Autocomplete: gagal memuat metadata {owner}: {message}"
+                ));
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    fn reset_catalog(&mut self, default_owner: Option<String>) {
+        self.catalog_epoch += 1;
+        self.catalog_loading.clear();
+        self.catalog_retrigger = None;
+        let mut catalog = self.catalog.borrow_mut();
+        catalog.clear();
+        catalog.set_default_owner(default_owner);
     }
 
     fn record_run(&mut self, sql: &str) {
@@ -647,6 +780,7 @@ impl Workbench {
             let _ = db.request(Job::Disconnect);
         }
         self.session = None;
+        self.reset_catalog(None);
         self.demo_mode = false;
         self.show_connection_form = false;
         self.objects.clear();
@@ -860,7 +994,8 @@ impl Workbench {
     fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.next_tab_id += 1;
         let id = self.next_tab_id;
-        let tab = QueryTab::new(id, format!("Query {id}"), "", window, cx);
+        let completion = self.completion.clone();
+        let tab = QueryTab::new(id, format!("Query {id}"), "", &completion, window, cx);
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         self.show_home = false;
@@ -1380,6 +1515,7 @@ impl Workbench {
         match (pending, resp) {
             (Some(PendingOp::Connect), Response::Connected(info)) => {
                 self.session = Some(info.clone());
+                self.reset_catalog(Some(info.user.clone()));
                 self.current_schema = None;
                 self.connect_error = None;
                 self.show_connection_form = false;
@@ -1460,6 +1596,7 @@ impl Workbench {
                 self.current_schema = keep
                     .or_else(|| user.filter(|u| schemas.contains(u)))
                     .or_else(|| schemas.first().cloned());
+                self.catalog.borrow_mut().set_schemas(schemas.clone());
                 self.schemas = schemas;
                 self.load_objects(cx);
             }
@@ -1469,6 +1606,18 @@ impl Workbench {
                 self.selected_object = None;
                 let schema = self.current_schema.clone().unwrap_or_default();
                 self.status = format!("{schema}: {count} objek dimuat.");
+                // Autocomplete metadata follows the explorer: (re)load the
+                // schema just listed, and the session user's own schema,
+                // which unqualified names resolve against.
+                let user = self.session.as_ref().map(|s| s.user.clone());
+                if !schema.is_empty() {
+                    self.load_catalog(schema, cx);
+                }
+                if let Some(user) = user {
+                    if !self.catalog.borrow().has_owner(&user) {
+                        self.load_catalog(user, cx);
+                    }
+                }
             }
             (Some(PendingOp::Ddl { owner, name }), Response::Ddl(ddl)) => {
                 self.new_tab_with_sql(ddl, window, cx);
@@ -2753,7 +2902,7 @@ impl Workbench {
             let top = if self.active_tab().kind == TabKind::Data {
                 self.render_data_grid(theme, cx).into_any_element()
             } else {
-                self.render_editor().into_any_element()
+                self.render_editor(cx).into_any_element()
             };
             main = main.child(
                 div().flex_1().child(
@@ -2771,7 +2920,7 @@ impl Workbench {
             main = main.child(
                 div().flex_1().child(
                     v_resizable("editor-split")
-                        .child(resizable_panel().child(self.render_editor()))
+                        .child(resizable_panel().child(self.render_editor(cx)))
                         .child(
                             resizable_panel()
                                 .size(px(320.))
@@ -3022,11 +3171,33 @@ impl Workbench {
             )
     }
 
-    fn render_editor(&self) -> impl IntoElement {
+    fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
             .size_full()
+            // Tab accepts the highlighted suggestion while the popup is
+            // open. The editor only does that for Enter, so Tab (its
+            // indent action) is caught on the way down and replayed as
+            // Enter; with the popup closed it indents as usual.
+            .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
+                let open = this
+                    .active_tab()
+                    .editor
+                    .read(cx)
+                    .completion_menu_state()
+                    .open;
+                if open {
+                    cx.stop_propagation();
+                    window.dispatch_action(
+                        Box::new(Enter {
+                            secondary: false,
+                            shift: false,
+                        }),
+                        cx,
+                    );
+                }
+            }))
             .child(Editor::new(&self.active_tab().editor).flex_1())
     }
 
