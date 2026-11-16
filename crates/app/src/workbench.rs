@@ -2057,8 +2057,10 @@ impl Workbench {
         let schemas = self.schemas.clone();
         let current = self.current_schema.clone();
         let schema_button = Button::new("schema-select")
-            .label(current.clone().unwrap_or_else(|| "(schema)".to_string()))
-            .icon(IconName::ChevronsUpDown)
+            .child(select_trigger(
+                current.clone().unwrap_or_else(|| "(schema)".to_string()),
+                theme,
+            ))
             .w_full()
             .disabled(self.schemas.is_empty())
             .dropdown_menu(move |menu, _, _| {
@@ -2085,12 +2087,14 @@ impl Workbench {
             .collect();
         let current_category = self.category;
         let category_button = Button::new("category-select")
-            .label(format!(
-                "{} ({})",
-                current_category.label(),
-                schema::count_in(&self.objects, current_category)
+            .child(select_trigger(
+                format!(
+                    "{} ({})",
+                    current_category.label(),
+                    schema::count_in(&self.objects, current_category)
+                ),
+                theme,
             ))
-            .icon(IconName::ChevronsUpDown)
             .w_full()
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.min_w(px(220.));
@@ -3690,6 +3694,20 @@ fn empty_state_text(text: String, theme: &gpui_kit::component::Theme) -> gpui_ki
         .line_height(px(LEADING_LABEL))
         .text_color(theme.muted_foreground)
         .child(text)
+}
+
+/// Content of a select-style dropdown button: the value left aligned and a
+/// chevron on the right, like a native select (Button centers its label).
+fn select_trigger(text: String, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .w_full()
+        .min_w(px(0.))
+        .gap(px(SPACE_2))
+        .child(div().flex_1().min_w(px(0.)).truncate().child(text))
+        .child(icon(IconName::ChevronDown, 14., theme.muted_foreground))
 }
 
 /// Messages are plain strings; ORA-/driver errors and Indonesian failure
