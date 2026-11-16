@@ -6,7 +6,7 @@
 //! `:`, so splitting on it is safe.
 
 use gpui_kit::component::tree::TreeItem;
-use ora_core::{ColumnDef, ColumnInfo, QueryResult, SchemaObject, Value};
+use ora_core::{ColumnDef, ColumnInfo, QueryResult, SchemaObject, Value, DEFAULT_MAX_ROWS};
 
 /// Group display order in the tree; kinds outside this list sort after it.
 const GROUP_ORDER: &[&str] = &[
@@ -68,6 +68,23 @@ pub fn parse_object_id(id: &str) -> Option<(&str, &str, &str)> {
 
 pub fn is_describable_group(group: &str) -> bool {
     matches!(group, "Tables" | "Views")
+}
+
+/// Quote an Oracle identifier, doubling embedded quotes.
+fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+/// `SELECT *` for the double-click "show data" action: qualified, quoted
+/// identifiers plus an Oracle 12c+ row cap matching the driver's own
+/// [`DEFAULT_MAX_ROWS`] fetch limit, so a peek never floods the grid.
+pub fn select_all_sql(owner: &str, name: &str) -> String {
+    format!(
+        "SELECT * FROM {}.{} FETCH FIRST {} ROWS ONLY",
+        quote_ident(owner),
+        quote_ident(name),
+        DEFAULT_MAX_ROWS
+    )
 }
 
 /// Case-insensitive substring filter for the schema search box. An empty
@@ -169,6 +186,18 @@ mod tests {
         assert!(!is_describable_group("Sequences"));
         assert!(!is_describable_group("Procedures"));
         assert!(!is_describable_group(""));
+    }
+
+    #[test]
+    fn select_all_sql_quotes_identifiers_and_caps_rows() {
+        assert_eq!(
+            select_all_sql("HR", "EMPLOYEES"),
+            "SELECT * FROM \"HR\".\"EMPLOYEES\" FETCH FIRST 1000 ROWS ONLY"
+        );
+        assert_eq!(
+            select_all_sql("A\"B", "T"),
+            "SELECT * FROM \"A\"\"B\".\"T\" FETCH FIRST 1000 ROWS ONLY"
+        );
     }
 
     #[test]

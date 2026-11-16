@@ -26,8 +26,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, relative, App, Context, Entity, FontWeight, Hsla, IntoElement, Render, SharedString,
-    Subscription, Window,
+    div, px, relative, App, ClickEvent, Context, Entity, FontWeight, Hsla, IntoElement, Render,
+    SharedString, Subscription, Window,
 };
 use ora_core::export::{to_csv, to_xlsx};
 use ora_core::sql::{clean_statement, format_sql};
@@ -779,10 +779,26 @@ impl Workbench {
         });
     }
 
-    fn on_tree_click(&mut self, id: SharedString, cx: &mut Context<Self>) {
+    fn on_tree_click(
+        &mut self,
+        id: SharedString,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some((owner, name, group)) = schema::parse_object_id(&id) else {
             return; // group header: expand/collapse is handled by the tree
         };
+        // No dedicated double-click API: the platform reports the tap count
+        // on the mouse-down event, so a double-click arrives as a second
+        // click with `click_count >= 2`. The first click still runs the
+        // single-click describe below; the data query supersedes it.
+        let double_click =
+            matches!(event, ClickEvent::Mouse(m) if m.down.click_count >= 2);
+        if double_click && schema::is_describable_group(group) {
+            self.open_table_data(owner, name, window, cx);
+            return;
+        }
         if !schema::is_describable_group(group) {
             self.push_message(format!(
                 "Describe untuk {group} belum didukung di MVP ({owner}.{name})."
@@ -807,6 +823,37 @@ impl Workbench {
             },
             cx,
         );
+    }
+
+    /// Double-click on a table/view row: fill the editor with a capped
+    /// `SELECT *` and run it, like Toad/Navicat. A describe fired by the
+    /// first click of the double-click is superseded with the same
+    /// soft-cancel as Stop (its late response is dropped by the generation
+    /// check); a real in-flight query is never cancelled.
+    fn open_table_data(
+        &mut self,
+        owner: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() {
+            return;
+        }
+        if self.busy && matches!(self.pending_op, Some(PendingOp::Describe { .. })) {
+            self.op_generation += 1;
+            self.pending_op = None;
+            self.pending_sql = None;
+            self.busy = false;
+        }
+        if self.busy {
+            return;
+        }
+        self.show_home = false;
+        let sql = schema::select_all_sql(owner, name);
+        let editor = self.active_tab().editor.clone();
+        editor.update(cx, |state, cx| state.set_value(sql, window, cx));
+        self.run(cx);
     }
 
     // ----- response handling -----
@@ -1537,8 +1584,8 @@ impl Workbench {
                         .text_size(px(FONT_LABEL))
                         .pl(px(12. + 16. * entry.depth() as f32))
                         .child(item.label.clone())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.on_tree_click(item_id.clone(), cx);
+                        .on_click(cx.listener(move |this, event, window, cx| {
+                            this.on_tree_click(item_id.clone(), event, window, cx);
                         }))
                 })
             }
