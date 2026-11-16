@@ -18,6 +18,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::tree::{tree, TreeItem, TreeState};
 use gpui_kit::component::{
@@ -2079,59 +2080,41 @@ impl Workbench {
                 .flex_row()
                 .items_center()
                 .gap(px(SPACE_2))
-                .child(self.render_export_button("CSV", theme, cx, true))
-                .child(self.render_export_button("XLSX", theme, cx, false)),
+                .child(self.render_export_dropdown(cx)),
         )
     }
 
-    fn render_export_button(
+    /// One Export dropdown (CSV/XLSX) via the component `DropdownMenu`
+    /// API. The trigger shows no chevron glyph: `Button` renders none
+    /// automatically and a unicode chevron is not allowed in this UI.
+    fn render_export_dropdown(
         &self,
-        label: &str,
-        theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-        is_csv: bool,
     ) -> impl IntoElement {
         let has_result = self.active_tab().last_result.is_some();
-        div()
-            .id(format!("export-{label}"))
-            .flex()
-            .flex_row()
-            .items_center()
-            .h(px(28.))
-            .gap(px(SPACE_1))
-            .px(px(SPACE_2))
-            .rounded(px(RADIUS_MD))
-            .border_1()
-            .border_color(theme.border)
-            .hover(|this| this.bg(theme.secondary))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if is_csv {
-                    this.export_csv(cx);
-                } else {
-                    this.export_xlsx(cx);
-                }
-            }))
-            .child(icon(
-                IconName::Download,
-                14.,
-                if has_result {
-                    theme.foreground
-                } else {
-                    theme.muted_foreground
-                },
-            ))
-            .child(
-                div()
-                    .text_size(px(FONT_LABEL))
-                    .line_height(px(LEADING_LABEL))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(if has_result {
-                        theme.foreground
-                    } else {
-                        theme.muted_foreground
-                    })
-                    .child(label.to_string()),
-            )
+        let view = cx.entity();
+        Button::new("export")
+            .label("Export")
+            .icon(IconName::Download)
+            .disabled(!has_result)
+            .dropdown_menu(move |menu, _, _| {
+                let csv_view = view.clone();
+                let xlsx_view = view.clone();
+                menu.item(
+                    PopupMenuItem::new("Export CSV")
+                        .disabled(!has_result)
+                        .on_click(move |_, _, cx: &mut App| {
+                            csv_view.update(cx, |this, cx| this.export_csv(cx));
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Export XLSX")
+                        .disabled(!has_result)
+                        .on_click(move |_, _, cx: &mut App| {
+                            xlsx_view.update(cx, |this, cx| this.export_xlsx(cx));
+                        }),
+                )
+            })
     }
 
     fn render_results_content(
