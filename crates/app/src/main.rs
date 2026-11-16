@@ -15,6 +15,8 @@ pub const SANS_FONT_FAMILY: &str = "JetBrains Sans";
 pub const MONO_FONT_FAMILY: &str = "JetBrains Mono";
 
 fn main() {
+    // Checking for --version/-V is not a security operation: argv[0] is never read.
+    // nosemgrep: rust.lang.security.args.args
     if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
         println!("gpui-like-toad {}", env!("CARGO_PKG_VERSION"));
         return;
