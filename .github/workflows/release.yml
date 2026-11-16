@@ -66,11 +66,28 @@ jobs:
         shell: python
         run: |
           import pathlib
+          version = "${{ env.VERSION }}"
           p = pathlib.Path("crates/app/Cargo.toml")
           s = p.read_text()
-          updated = s.replace('version = "0.1.0"', 'version = "${{ env.VERSION }}"', 1)
-          assert updated != s, "version line not found"
+          updated = s.replace('version = "0.1.0"', f'version = "{version}"', 1)
+          assert updated != s, "version line not found in Cargo.toml"
           p.write_text(updated)
+          # Cargo.lock ikut dibump: kalau tidak, `cargo build --locked` gagal
+          # karena lockfile dianggap basi (penyebab gagalnya rilis di main).
+          lock = pathlib.Path("Cargo.lock")
+          lines = lock.read_text().splitlines(keepends=True)
+          out, in_pkg, done = [], False, False
+          for line in lines:
+              if line.startswith("[[package]]"):
+                  in_pkg = False
+              if line.strip() == 'name = "gpui-like-toad"':
+                  in_pkg = True
+              if in_pkg and not done and line.startswith("version = "):
+                  line = f'version = "{version}"\n'
+                  done = True
+              out.append(line)
+          assert done, "gpui-like-toad entry not found in Cargo.lock"
+          lock.write_text("".join(out))
           print([line for line in updated.splitlines() if line.startswith("version")])
       - name: Build biner rilis
         run: cargo build --locked --release -p gpui-like-toad
