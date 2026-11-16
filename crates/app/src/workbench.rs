@@ -1159,7 +1159,7 @@ impl Workbench {
                     .pr(px(SPACE_1))
                     .on_click(cx.listener(move |this, _, _, cx| this.activate_tab(ix, cx)))
                     .child(icon(
-                        IconName::FileCode,
+                        IconName::Database,
                         14.,
                         if active {
                             theme.primary
@@ -1891,13 +1891,6 @@ impl Workbench {
                     .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
             )
             .child(
-                Button::new("stop")
-                    .label("Stop")
-                    .icon(IconName::Square)
-                    .disabled(!self.busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
-            )
-            .child(
                 Button::new("explain")
                     .label("Explain")
                     .icon(IconName::ChartColumn)
@@ -1910,6 +1903,13 @@ impl Workbench {
                     .icon(IconName::WandSparkles)
                     .disabled(on_home)
                     .on_click(cx.listener(|this, _, window, cx| this.format_editor(window, cx))),
+            )
+            .child(
+                Button::new("stop")
+                    .label("Stop")
+                    .icon(IconName::Square)
+                    .disabled(!self.busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
             )
             .child(
                 Button::new("commit")
