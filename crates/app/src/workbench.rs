@@ -1005,7 +1005,7 @@ impl Workbench {
 
     fn conn_status(&self, theme: &gpui_kit::component::Theme) -> (Hsla, &'static str, String) {
         if self.busy && matches!(self.pending_op, Some(PendingOp::Connect)) {
-            return (theme.warning, "Connecting…", "Menghubungkan...".to_string());
+            return (theme.warning, "Connecting…", String::new());
         }
         if let Some(session) = &self.session {
             let mode = if self.demo_mode { "Demo" } else { "Connected" };
@@ -1019,13 +1019,13 @@ impl Workbench {
             return (
                 theme.danger,
                 "Connection failed",
-                "Koneksi gagal (lihat Messages).".to_string(),
+                "lihat Messages".to_string(),
             );
         }
         (
             theme.muted_foreground,
             "Disconnected",
-            "Belum terhubung.".to_string(),
+            String::new(),
         )
     }
 
@@ -2660,6 +2660,11 @@ impl Workbench {
 
     fn render_status_bar(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
         let (dot_color, conn_label, conn_detail) = self.conn_status(theme);
+        let conn_text = if conn_detail.is_empty() {
+            conn_label.to_string()
+        } else {
+            format!("{conn_label} · {conn_detail}")
+        };
         let mut bar = div()
             .flex()
             .flex_row()
@@ -2683,7 +2688,7 @@ impl Workbench {
                         .line_height(px(LEADING_CAPTION))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.foreground)
-                        .child(format!("{conn_label} · {conn_detail}")),
+                        .child(conn_text),
                 ),
         );
         if let Some(elapsed) = self.active_tab().elapsed_ms {
@@ -2708,11 +2713,16 @@ impl Workbench {
                     .child(caption_text(format!("{} rows", result.row_count()), theme)),
             );
         }
+        // Right side: activity while busy, last action while connected,
+        // empty while disconnected — the connection state already shows
+        // once on the left, and every status line is mirrored to Messages.
         bar.child(div().flex_1()).child(caption_text(
             if self.busy {
                 "Running…".to_string()
-            } else {
+            } else if self.session.is_some() {
                 self.status.clone()
+            } else {
+                String::new()
             },
             theme,
         ))
