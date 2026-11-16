@@ -9,6 +9,7 @@ macro_rules! app_name {
     };
 }
 
+mod keychain;
 mod plan;
 mod results;
 mod schema;
