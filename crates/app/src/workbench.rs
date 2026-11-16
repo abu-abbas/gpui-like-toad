@@ -59,7 +59,7 @@ use crate::theme::{
 use crate::worker::{DbHandle, ExportFormat, Job, Password, Response};
 
 mod data_tab;
-use data_tab::DataTab;
+use data_tab::{DataTab, DataView};
 
 actions!(db_explorer, [RunQuery]);
 
@@ -102,10 +102,26 @@ enum PendingOp {
     Explain,
     ListSchemas,
     ListObjects,
-    Describe { owner: String, name: String },
-    Ddl { owner: String, name: String },
-    ExportTable { owner: String, name: String },
-    ImportCsv { owner: String, name: String },
+    Describe {
+        owner: String,
+        name: String,
+    },
+    /// Data tab views: the table's columns, indexes and DDL.
+    DataStructure,
+    DataIndexes,
+    DataDdl,
+    Ddl {
+        owner: String,
+        name: String,
+    },
+    ExportTable {
+        owner: String,
+        name: String,
+    },
+    ImportCsv {
+        owner: String,
+        name: String,
+    },
     Commit,
     Rollback,
 }
@@ -842,8 +858,8 @@ impl Workbench {
             return;
         }
         if self.active_tab().data.is_some() {
-            // Data tab "Refresh": re-run the table fetch with its filter.
-            self.reload_data(cx);
+            // Data tab "Refresh": reload whichever view is showing.
+            self.load_data_view(cx);
             return;
         }
         let sql = self.editor_text(cx);
@@ -1321,12 +1337,18 @@ impl Workbench {
             cx.notify();
             return;
         }
+        let kind = self
+            .objects
+            .iter()
+            .find(|o| o.owner == owner && o.name == name)
+            .map_or(ObjectKind::Table, |o| o.kind.clone());
         self.add_tab(window, cx);
         let view = cx.entity().downgrade();
+        let data = DataTab::new(owner, name, kind, window, cx);
         let tab = self.active_tab_mut();
         tab.title = format!("{owner}.{name}");
         tab.kind = TabKind::Data;
-        tab.data = Some(DataTab::new(owner, name));
+        tab.data = Some(data);
         tab.table_state.update(cx, |state, _| {
             *state.delegate_mut() = ResultsDelegate::empty()
                 .with_page_size(DATA_PAGE_SIZE)
@@ -1662,6 +1684,42 @@ impl Workbench {
                 self.set_grid_result(result, cx);
                 self.target_tab_mut().results_tab = ResultsTab::Results;
                 self.status = format!("{owner}.{name}: {count} kolom.");
+            }
+            (Some(PendingOp::DataStructure), Response::Described(defs)) => {
+                let result = schema::describe_to_result(&defs);
+                self.status = format!("{} kolom.", result.row_count());
+                if let Some(state) = self
+                    .target_tab_mut()
+                    .data
+                    .as_ref()
+                    .map(|d| d.structure.clone())
+                {
+                    state.update(cx, |state, cx| {
+                        state.delegate_mut().set_result(result);
+                        state.refresh(cx);
+                    });
+                }
+            }
+            (Some(PendingOp::DataIndexes), Response::Indexes(indexes)) => {
+                let result = schema::indexes_to_result(&indexes);
+                self.status = format!("{} index.", result.row_count());
+                if let Some(state) = self
+                    .target_tab_mut()
+                    .data
+                    .as_ref()
+                    .map(|d| d.indexes.clone())
+                {
+                    state.update(cx, |state, cx| {
+                        state.delegate_mut().set_result(result);
+                        state.refresh(cx);
+                    });
+                }
+            }
+            (Some(PendingOp::DataDdl), Response::Ddl(ddl)) => {
+                self.status = "DDL dimuat.".to_string();
+                if let Some(editor) = self.target_tab_mut().data.as_ref().map(|d| d.ddl.clone()) {
+                    editor.update(cx, |state, cx| state.set_value(ddl, window, cx));
+                }
             }
             (Some(PendingOp::Commit), Response::Committed) => {
                 self.push_message("Commit berhasil.".to_string());
@@ -3094,15 +3152,58 @@ impl Workbench {
                 ))
                 .into_any_element()
         };
+        let view = tab.data.as_ref().map_or(DataView::Data, |d| d.view);
+        let body = match (view, tab.data.as_ref()) {
+            (DataView::Structure, Some(data)) => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .child(
+                    div().flex_1().child(
+                        DataTable::new(&data.structure)
+                            .stripe(true)
+                            .bordered(true)
+                            .xsmall()
+                            .header_row_height(px(DATA_HEADER_HEIGHT)),
+                    ),
+                )
+                .into_any_element(),
+            (DataView::Index, Some(data)) => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .child(
+                    div().flex_1().child(
+                        DataTable::new(&data.indexes)
+                            .stripe(true)
+                            .bordered(true)
+                            .xsmall()
+                            .header_row_height(px(DATA_HEADER_HEIGHT)),
+                    ),
+                )
+                .into_any_element(),
+            (DataView::Ddl, Some(data)) => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .child(Editor::new(&data.ddl).readonly(true).flex_1())
+                .into_any_element(),
+            _ => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .child(self.render_filter_bar(theme, cx))
+                .child(div().flex().flex_col().flex_1().child(grid))
+                .into_any_element(),
+        };
         div()
             .flex()
             .flex_col()
             .size_full()
             .min_w(px(0.))
             .overflow_hidden()
-            .child(self.render_filter_bar(theme, cx))
-            .child(div().flex().flex_col().flex_1().child(grid))
-            .child(self.render_data_footer(theme))
+            .child(body)
+            .child(self.render_data_footer(theme, cx))
     }
 
     /// Info strip under a data/script tab: what the tab shows, then the

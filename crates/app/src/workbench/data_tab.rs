@@ -8,6 +8,9 @@ use gpui_kit::component::Selectable as _;
 use ora_core::filter::select_sql;
 use ora_core::{FilterCondition, FilterJoin, FilterOp, TableFilter};
 
+/// Rows shown at once in the Structure / Index grids (no paging there).
+const INFO_GRID_ROWS: usize = 1000;
+
 use super::*;
 
 /// One editable condition in the filter bar.
@@ -30,10 +33,44 @@ impl FilterRow {
     }
 }
 
+/// The bottom tabs of a data tab: one table, four views of it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DataView {
+    Data,
+    Structure,
+    Index,
+    Ddl,
+}
+
+impl DataView {
+    const ALL: [DataView; 4] = [
+        DataView::Data,
+        DataView::Structure,
+        DataView::Index,
+        DataView::Ddl,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            DataView::Data => "Data",
+            DataView::Structure => "Structure",
+            DataView::Index => "Index",
+            DataView::Ddl => "DDL",
+        }
+    }
+}
+
 /// What a data tab shows: one table or view, and the filter on it.
 pub(super) struct DataTab {
     pub(super) owner: String,
     pub(super) name: String,
+    pub(super) kind: ObjectKind,
+    pub(super) view: DataView,
+    /// Own grids/editor for the non-data views, so switching views never
+    /// disturbs the data grid's rows, sort or scroll position.
+    pub(super) structure: Entity<TableState<ResultsDelegate>>,
+    pub(super) indexes: Entity<TableState<ResultsDelegate>>,
+    pub(super) ddl: Entity<EditorState>,
     /// Column names of the table, known after the first fetch.
     pub(super) columns: Vec<String>,
     rows: Vec<FilterRow>,
@@ -45,10 +82,38 @@ pub(super) struct DataTab {
 }
 
 impl DataTab {
-    pub(super) fn new(owner: &str, name: &str) -> Self {
+    pub(super) fn new(
+        owner: &str,
+        name: &str,
+        kind: ObjectKind,
+        window: &mut Window,
+        cx: &mut Context<Workbench>,
+    ) -> Self {
+        let mut info_grid = |cx: &mut Context<Workbench>| {
+            cx.new(|cx| {
+                TableState::new(
+                    ResultsDelegate::empty().with_page_size(INFO_GRID_ROWS),
+                    &mut *window,
+                    cx,
+                )
+            })
+        };
+        let structure = info_grid(cx);
+        let indexes = info_grid(cx);
+        let ddl = cx.new(|cx| {
+            EditorState::new(&mut *window, cx)
+                .language("sql")
+                .line_number(true)
+                .folding(true)
+        });
         DataTab {
             owner: owner.to_string(),
             name: name.to_string(),
+            kind,
+            view: DataView::Data,
+            structure,
+            indexes,
+            ddl,
             columns: Vec::new(),
             rows: Vec::new(),
             join: FilterJoin::And,
@@ -228,6 +293,60 @@ impl Workbench {
         data.applied = TableFilter::default();
         self.add_filter_row(None, None, window, cx);
         self.reload_data(cx);
+    }
+
+    /// Switch the bottom tab. Structure, Index and DDL are fetched from
+    /// the data dictionary each time they are opened, so they never show
+    /// stale definitions; Data keeps its rows.
+    pub(super) fn set_data_view(&mut self, view: DataView, cx: &mut Context<Self>) {
+        let busy = self.busy;
+        let Some(data) = self.data_mut() else {
+            return;
+        };
+        if data.view == view {
+            return;
+        }
+        if view != DataView::Data && busy {
+            self.status = "Masih ada operasi berjalan.".to_string();
+            cx.notify();
+            return;
+        }
+        data.view = view;
+        cx.notify();
+        if view != DataView::Data {
+            self.load_data_view(cx);
+        }
+    }
+
+    /// (Re)load whatever the active data tab's current view shows.
+    pub(super) fn load_data_view(&mut self, cx: &mut Context<Self>) {
+        if self.busy || self.session.is_none() {
+            return;
+        }
+        let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
+            return;
+        };
+        let (owner, name, kind, view) = (
+            data.owner.clone(),
+            data.name.clone(),
+            data.kind.clone(),
+            data.view,
+        );
+        match view {
+            DataView::Data => self.reload_data(cx),
+            DataView::Structure => {
+                self.status = format!("Memuat struktur {owner}.{name}...");
+                self.spawn_db(Job::Describe { owner, name }, PendingOp::DataStructure, cx);
+            }
+            DataView::Index => {
+                self.status = format!("Memuat index {owner}.{name}...");
+                self.spawn_db(Job::Indexes { owner, name }, PendingOp::DataIndexes, cx);
+            }
+            DataView::Ddl => {
+                self.status = format!("Memuat DDL {owner}.{name}...");
+                self.spawn_db(Job::Ddl { owner, name, kind }, PendingOp::DataDdl, cx);
+            }
+        }
     }
 
     /// Fetch the active data tab's table with its applied filter. The
@@ -539,8 +658,11 @@ impl Workbench {
     pub(super) fn render_data_footer(
         &self,
         theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tab = self.active_tab();
+        let current = tab.data.as_ref().map_or(DataView::Data, |d| d.view);
+        let on_data = current == DataView::Data;
         let mut text = match &tab.last_result {
             Some(result) => {
                 let rows = result.row_count();
@@ -566,11 +688,23 @@ impl Workbench {
             .bg(theme.background)
             .border_t_1()
             .border_color(theme.border)
-            .when(filters > 0, |this| {
+            .children(DataView::ALL.map(|view| {
+                let active = view == current;
+                let button = Button::new(("data-view", view as usize))
+                    .small()
+                    .label(view.label())
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_data_view(view, cx)));
+                if active {
+                    button.primary()
+                } else {
+                    button.ghost()
+                }
+            }))
+            .when(on_data && filters > 0, |this| {
                 this.child(icon(IconName::ListFilter, 14., theme.success))
                     .child(caption_text(format!("{filters} filter"), theme))
             })
             .child(div().flex_1())
-            .child(caption_text(text, theme))
+            .when(on_data, |this| this.child(caption_text(text, theme)))
     }
 }

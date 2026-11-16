@@ -2,6 +2,7 @@ use std::fmt;
 
 use crate::completion::CatalogObject;
 use crate::filter::{self, TableFilter};
+use crate::model::IndexDef;
 use crate::model::{ColumnDef, ConnectionProfile, ObjectKind, PlanNode, QueryResult, SchemaObject};
 
 /// Error from a database operation. The message is user-facing: driver errors
@@ -157,6 +158,12 @@ pub trait DbClient: Send {
             });
         }
         Ok(out)
+    }
+
+    /// Indexes on one table, sorted by name, for the data tab's Index
+    /// view. A table without indexes (or a view) is an empty list.
+    fn list_indexes(&mut self, _owner: &str, _table: &str) -> Result<Vec<IndexDef>, DbError> {
+        Err(DbError::new("indexes are not supported by this backend"))
     }
 
     /// `EXPLAIN PLAN` output as formatted text lines (DBMS_XPLAN style), one
