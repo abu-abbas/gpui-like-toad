@@ -136,6 +136,11 @@ pub struct Workbench {
     rail: RailPanel,
     profiles: Vec<SavedProfile>,
     editing_profile: Option<usize>,
+    /// Whether the new-connection form is shown while connected. The form
+    /// is always shown while disconnected; once connected it collapses
+    /// until "+" toggles it back. Collapsing never clears the inputs:
+    /// they live on `Workbench` as entities and survive re-render.
+    show_connection_form: bool,
     history: Vec<HistoryEntry>,
     theme_pref: ThemePreference,
     tabs: Vec<QueryTab>,
@@ -191,6 +196,7 @@ impl Workbench {
             rail: RailPanel::Connections,
             profiles: store::load_profiles(),
             editing_profile: None,
+            show_connection_form: true,
             history: store::load_history(),
             theme_pref: theme::preference(cx),
             tabs: vec![first_tab],
@@ -407,6 +413,7 @@ impl Workbench {
         }
         self.session = None;
         self.demo_mode = false;
+        self.show_connection_form = true;
         self.objects.clear();
         self.tree_state.update(cx, |state, cx| {
             state.set_items(Vec::<TreeItem>::new(), cx);
@@ -680,6 +687,20 @@ impl Workbench {
         cx.notify();
     }
 
+    /// "+" in the Connections header: while connected it toggles the
+    /// new-connection form (hidden by default once connected); while
+    /// disconnected the form is always visible, so "+" clears it for a
+    /// fresh profile instead. Toggling never clears typed text.
+    fn toggle_connection_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_some() {
+            self.show_connection_form = !self.show_connection_form;
+            cx.notify();
+        } else {
+            self.show_connection_form = true;
+            self.new_profile_form(window, cx);
+        }
+    }
+
     fn save_profile(&mut self, cx: &mut Context<Self>) {
         let username = Self::input_text(&self.user_input, cx);
         let connect_string = Self::input_text(&self.host_input, cx);
@@ -895,6 +916,7 @@ impl Workbench {
             (Some(PendingOp::Connect), Response::Connected(info)) => {
                 self.session = Some(info.clone());
                 self.connect_error = None;
+                self.show_connection_form = false;
                 self.status = format!("Connected sebagai {}.", info.user);
                 self.push_message(format!(
                     "Connected: {} @ {} ({})",
@@ -1292,13 +1314,15 @@ impl Workbench {
                 .w(px(28.))
                 .rounded(px(RADIUS_MD))
                 .hover(|this| this.bg(theme.secondary))
-                .on_click(cx.listener(|this, _, window, cx| this.new_profile_form(window, cx)))
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_connection_form(window, cx)))
                 .child(icon(IconName::Plus, 16., theme.muted_foreground)),
         );
         panel = panel.child(header);
         panel = panel.child(self.render_session_card(theme, cx));
         panel = panel.child(self.render_profile_list(theme, cx));
-        panel = panel.child(self.render_connection_form(theme, cx));
+        if self.session.is_none() || self.show_connection_form {
+            panel = panel.child(self.render_connection_form(theme, cx));
+        }
         panel = panel.child(
             div()
                 .px(px(SPACE_3))
