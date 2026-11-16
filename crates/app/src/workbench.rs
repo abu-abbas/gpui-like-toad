@@ -318,7 +318,7 @@ impl Workbench {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let filename = format!("gpui-like-toad-export-{stamp}.csv");
+        let filename = export_filename(stamp);
         let path = std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("."))
             .join(&filename);
@@ -544,7 +544,7 @@ impl Workbench {
                     v_flex()
                         .flex_1()
                         .p_2()
-                        .font_family(cx.theme().mono_font_family.clone())
+                        .font_family(crate::MONO_FONT_FAMILY)
                         .children(self.plan_lines.iter().map(|line| div().child(line.clone())))
                         .into_any_element()
                 }
@@ -642,5 +642,24 @@ impl Render for Workbench {
                         .child(self.render_results(cx)),
                 ),
             )
+    }
+}
+
+/// CSV export filename for a unix timestamp. Split out for tests.
+fn export_filename(stamp: u64) -> String {
+    format!("gpui-like-toad-export-{stamp}.csv")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_filename_is_stable_and_suffixed() {
+        assert_eq!(export_filename(0), "gpui-like-toad-export-0.csv");
+        assert_eq!(
+            export_filename(1_700_000_000),
+            "gpui-like-toad-export-1700000000.csv"
+        );
     }
 }
