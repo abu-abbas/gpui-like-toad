@@ -51,12 +51,19 @@ use crate::theme::{
 };
 use crate::worker::{DbHandle, ExportFormat, Job, Password, Response};
 
+mod data_tab;
+use data_tab::DataTab;
+
 actions!(db_explorer, [RunQuery]);
 
 const MAX_MESSAGES: usize = 200;
 
-/// Rows per page in a data tab, where the grid fills the work area.
-const DATA_PAGE_SIZE: usize = 100;
+/// Rows per page in a data tab: the whole capped fetch, so the grid
+/// scrolls instead of paging.
+const DATA_PAGE_SIZE: usize = DEFAULT_MAX_ROWS;
+
+/// Header height of the dense data-tab grid (rows are 26px).
+const DATA_HEADER_HEIGHT: f32 = 28.;
 
 const FORM_INCOMPLETE: &str = "Isi username dan host (atau TNS) dulu.";
 const MAX_MESSAGES_SHOWN: usize = 30;
@@ -137,6 +144,8 @@ struct QueryTab {
     plan_lines: Vec<String>,
     plan_expanded: HashSet<i64>,
     results_tab: ResultsTab,
+    /// Set for data tabs: the table shown and its filter bar.
+    data: Option<DataTab>,
 }
 
 impl QueryTab {
@@ -167,6 +176,7 @@ impl QueryTab {
             plan_lines: Vec::new(),
             plan_expanded: HashSet::new(),
             results_tab: ResultsTab::Results,
+            data: None,
         }
     }
 }
@@ -697,6 +707,11 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.active_tab().data.is_some() {
+            // Data tab "Refresh": re-run the table fetch with its filter.
+            self.reload_data(cx);
+            return;
+        }
         let sql = self.editor_text(cx);
         if clean_statement(&sql).is_empty() {
             self.push_message("Editor kosong.".to_string());
@@ -1171,15 +1186,18 @@ impl Workbench {
             cx.notify();
             return;
         }
-        let sql = schema::select_all_sql(owner, name);
-        self.new_tab_with_sql(sql, window, cx);
+        self.add_tab(window, cx);
         let tab = self.active_tab_mut();
         tab.title = format!("{owner}.{name}");
         tab.kind = TabKind::Data;
+        tab.data = Some(DataTab::new(owner, name));
         tab.table_state.update(cx, |state, _| {
-            *state.delegate_mut() = ResultsDelegate::empty().with_page_size(DATA_PAGE_SIZE);
+            *state.delegate_mut() = ResultsDelegate::empty()
+                .with_page_size(DATA_PAGE_SIZE)
+                .with_row_numbers();
         });
-        self.run(cx);
+        self.add_filter_row(None, None, window, cx);
+        self.reload_data(cx);
     }
 
     fn describe_object(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
@@ -1396,7 +1414,13 @@ impl Workbench {
                 if let Some(sql) = pending_sql {
                     self.record_run(&sql);
                 }
-                self.target_tab_mut().elapsed_ms = Some(elapsed);
+                let column_names: Vec<String> =
+                    result.columns.iter().map(|c| c.name.clone()).collect();
+                let tab = self.target_tab_mut();
+                tab.elapsed_ms = Some(elapsed);
+                if let Some(data) = tab.data.as_mut() {
+                    data.set_columns(column_names);
+                }
                 self.set_grid_result(result, cx);
                 self.target_tab_mut().results_tab = ResultsTab::Results;
                 self.status = if truncated {
@@ -2897,8 +2921,8 @@ impl Workbench {
                     DataTable::new(&tab.table_state)
                         .stripe(true)
                         .bordered(true)
-                        .small()
-                        .header_row_height(px(GRID_ROW_HEIGHT)),
+                        .xsmall()
+                        .header_row_height(px(DATA_HEADER_HEIGHT)),
                 )
                 .into_any_element()
         } else {
@@ -2923,8 +2947,9 @@ impl Workbench {
             .size_full()
             .min_w(px(0.))
             .overflow_hidden()
+            .child(self.render_filter_bar(theme, cx))
             .child(div().flex().flex_col().flex_1().child(grid))
-            .child(self.render_pagination(theme, cx))
+            .child(self.render_data_footer(theme))
     }
 
     /// Info strip under a data/script tab: what the tab shows, then the
