@@ -241,6 +241,54 @@ impl DbClient for ThinClient {
         Ok(objects)
     }
 
+    fn list_schemas(&mut self) -> Result<Vec<String>, DbError> {
+        let conn = self.conn()?;
+        let cursor = conn
+            .query("SELECT username FROM all_users ORDER BY username", &[])
+            .map_err(db_err)?;
+        let mut schemas = Vec::new();
+        for row in cursor {
+            let row = row.map_err(db_err)?;
+            let name: String = row.get(0).map_err(db_err)?;
+            schemas.push(name);
+        }
+        Ok(schemas)
+    }
+
+    fn object_ddl(
+        &mut self,
+        owner: &str,
+        name: &str,
+        kind: &ObjectKind,
+    ) -> Result<String, DbError> {
+        let conn = self.conn()?;
+        // End each statement with `;`/`/` and pretty-print, like Toad's
+        // View Script. Session-scoped, so setting it every call is cheap and
+        // never leaks into other sessions.
+        conn.execute(
+            "BEGIN \
+             DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SQLTERMINATOR', TRUE); \
+             DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'PRETTY', TRUE); \
+             END;",
+            &[],
+        )
+        .map_err(db_err)?;
+        let type_param: &str = kind.oracle_type();
+        let name_param: &str = name;
+        let owner_param: &str = owner;
+        let cursor = conn
+            .query(
+                "SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM dual",
+                &[&type_param, &name_param, &owner_param],
+            )
+            .map_err(db_err)?;
+        let Some(row) = cursor.into_iter().next() else {
+            return Err(DbError::new(format!("DDL kosong untuk {owner}.{name}")));
+        };
+        let ddl: Option<String> = row.map_err(db_err)?.get(0).map_err(db_err)?;
+        Ok(ddl.unwrap_or_default().trim().to_string())
+    }
+
     fn describe_table(&mut self, owner: &str, name: &str) -> Result<Vec<ColumnDef>, DbError> {
         let conn = self.conn()?;
         let owner_upper = owner.trim().to_ascii_uppercase();

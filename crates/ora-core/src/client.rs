@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::model::{ColumnDef, ConnectionProfile, PlanNode, QueryResult, SchemaObject};
+use crate::model::{ColumnDef, ConnectionProfile, ObjectKind, PlanNode, QueryResult, SchemaObject};
 
 /// Error from a database operation. The message is user-facing: driver errors
 /// are converted to their display text (including the ORA- number) so the UI
@@ -69,6 +69,35 @@ pub trait DbClient: Send {
     /// Objects owned by `owner` (case-insensitive), grouped by the UI using
     /// [`crate::ObjectKind::group_label`].
     fn list_objects(&mut self, owner: &str) -> Result<Vec<SchemaObject>, DbError>;
+
+    /// Schemas (users) the session can browse, sorted by name. Feeds the
+    /// schema dropdown in the explorer.
+    fn list_schemas(&mut self) -> Result<Vec<String>, DbError>;
+
+    /// The object's DDL script (CREATE statement), as Toad's "View Script".
+    fn object_ddl(&mut self, owner: &str, name: &str, kind: &ObjectKind)
+        -> Result<String, DbError>;
+
+    /// Insert rows into `owner.table`, one statement per row, values given
+    /// as text in `columns` order. Does not commit. Returns rows inserted.
+    /// Stops at the first failing row and reports its 1-based number; rows
+    /// before it stay inserted (uncommitted) so the user can roll back.
+    fn insert_rows(
+        &mut self,
+        owner: &str,
+        table: &str,
+        columns: &[String],
+        rows: &[Vec<String>],
+    ) -> Result<u64, DbError> {
+        let mut inserted = 0u64;
+        for (ix, row) in rows.iter().enumerate() {
+            let sql = crate::import::insert_statement(owner, table, columns, row);
+            self.execute(&sql)
+                .map_err(|e| DbError::new(format!("baris data {}: {e}", ix + 1)))?;
+            inserted += 1;
+        }
+        Ok(inserted)
+    }
 
     /// Columns of one table or view.
     fn describe_table(&mut self, owner: &str, name: &str) -> Result<Vec<ColumnDef>, DbError>;

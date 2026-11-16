@@ -11,6 +11,7 @@
 pub mod client;
 pub mod demo;
 pub mod export;
+pub mod import;
 pub mod model;
 pub mod sql;
 pub mod store;
@@ -25,3 +26,7 @@ pub use model::{
 /// [`QueryResult::truncated`] so the UI can say so instead of silently
 /// showing a partial result.
 pub const DEFAULT_MAX_ROWS: usize = 1000;
+
+/// Row cap for "Export Data" on a whole table. Higher than the grid cap
+/// because nothing is rendered; the UI reports when the cap was hit.
+pub const EXPORT_MAX_ROWS: usize = 100_000;

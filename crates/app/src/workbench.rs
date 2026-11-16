@@ -11,33 +11,34 @@
 //! [`Workbench::stop`]).
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvError};
 
 use gpui_kit::actions;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
-use gpui_kit::component::list::ListItem;
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::table::{DataTable, TableState};
-use gpui_kit::component::tree::{tree, TreeItem, TreeState};
 use gpui_kit::component::{
     h_resizable, resizable_panel, v_resizable, ActiveTheme as _, Disableable as _, Icon,
     Sizable as _,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, relative, App, ClickEvent, Context, Entity, FontWeight, Hsla, IntoElement, Render,
-    SharedString, Subscription, Window,
+    div, px, relative, uniform_list, AnyWindowHandle, App, ClickEvent, Context, Entity, FontWeight,
+    Hsla, IntoElement, PathPromptOptions, Render, Subscription, UniformListScrollHandle, Window,
 };
 use ora_core::export::{to_csv, to_xlsx};
 use ora_core::sql::{clean_statement, format_sql};
 use ora_core::store::{self, HistoryEntry, SavedProfile, ThemePreference};
-use ora_core::{ConnectionProfile, DbInfo, PlanNode, QueryResult, SchemaObject, DEFAULT_MAX_ROWS};
+use ora_core::{
+    ConnectionProfile, DbInfo, ObjectKind, PlanNode, QueryResult, SchemaObject, DEFAULT_MAX_ROWS,
+};
 
 use crate::plan;
 use crate::results::ResultsDelegate;
-use crate::schema;
+use crate::schema::{self, ObjectCategory};
 use crate::theme::{
     self, FONT_BODY, FONT_CAPTION, FONT_HEADING_MD, FONT_HEADING_XL, FONT_LABEL, FONT_RAIL,
     GRID_ROW_HEIGHT, LEADING_BODY, LEADING_CAPTION, LEADING_HEADING_MD, LEADING_HEADING_XL,
@@ -45,7 +46,7 @@ use crate::theme::{
     RAIL_BUTTON_HEIGHT, RAIL_WIDTH, SIDE_PANEL_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6,
     STATUS_BAR_HEIGHT, SUB_TAB_HEIGHT, TAB_BAR_HEIGHT, TOOLBAR_HEIGHT, TREE_ROW_HEIGHT,
 };
-use crate::worker::{DbHandle, Job, Response};
+use crate::worker::{DbHandle, ExportFormat, Job, Response};
 
 actions!(db_explorer, [RunQuery]);
 
@@ -77,16 +78,39 @@ enum PendingOp {
     TestConnect,
     Run,
     Explain,
+    ListSchemas,
     ListObjects,
     Describe { owner: String, name: String },
+    Ddl { owner: String, name: String },
+    ExportTable { owner: String, name: String },
+    ImportCsv { owner: String, name: String },
     Commit,
     Rollback,
+}
+
+/// What a work-area tab holds; only changes its icon and default title.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TabKind {
+    Query,
+    /// Opened by double-clicking a table/view in the explorer.
+    Data,
+    /// DDL from the explorer's "View Script".
+    Script,
+}
+
+/// The explorer object a context-menu action applies to.
+#[derive(Clone)]
+struct ObjectRef {
+    owner: String,
+    name: String,
+    kind: ObjectKind,
 }
 
 /// One query tab: its own editor, grid, last result, and plan.
 struct QueryTab {
     id: u64,
     title: String,
+    kind: TabKind,
     editor: Entity<EditorState>,
     table_state: Entity<TableState<ResultsDelegate>>,
     last_result: Option<QueryResult>,
@@ -116,6 +140,7 @@ impl QueryTab {
         QueryTab {
             id,
             title,
+            kind: TabKind::Query,
             editor,
             table_state,
             last_result: None,
@@ -156,7 +181,15 @@ pub struct Workbench {
     pending_sql: Option<String>,
     op_generation: u64,
     connect_error: Option<String>,
-    tree_state: Entity<TreeState>,
+    /// Tab (by id) that the in-flight operation writes its result into, so
+    /// switching tabs mid-query never lands the result in the wrong tab.
+    pending_tab: Option<u64>,
+    window_handle: AnyWindowHandle,
+    schemas: Vec<String>,
+    current_schema: Option<String>,
+    category: ObjectCategory,
+    selected_object: Option<String>,
+    object_scroll: UniformListScrollHandle,
     objects: Vec<SchemaObject>,
     tree_filter: String,
     messages: Vec<String>,
@@ -174,8 +207,7 @@ impl Workbench {
             cx.new(|cx| InputState::new(&mut *window, cx).placeholder("host:1521/service"));
         let password_input = cx.new(|cx| InputState::new(&mut *window, cx).masked(true));
         let search_input =
-            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Search schemas..."));
-        let tree_state = cx.new(|cx| TreeState::new(cx).items(Vec::<TreeItem>::new()));
+            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Filter objects..."));
         let first_tab = QueryTab::new(1, "Query 1".to_string(), WELCOME_SQL, window, cx);
 
         // Rebuild the tree on every keystroke in the search box.
@@ -202,7 +234,8 @@ impl Workbench {
             theme_pref: theme::preference(cx),
             tabs: vec![first_tab],
             active_tab: 0,
-            show_home: false,
+            // Start on the Navicat-style Home page.
+            show_home: true,
             next_tab_id: 1,
             db: None,
             session: None,
@@ -212,7 +245,13 @@ impl Workbench {
             pending_sql: None,
             op_generation: 0,
             connect_error: None,
-            tree_state,
+            pending_tab: None,
+            window_handle: window.window_handle(),
+            schemas: Vec::new(),
+            current_schema: None,
+            category: ObjectCategory::Tables,
+            selected_object: None,
+            object_scroll: UniformListScrollHandle::new(),
             objects: Vec::new(),
             tree_filter: String::new(),
             messages: Vec::new(),
@@ -256,8 +295,21 @@ impl Workbench {
         self.active_tab().editor.read(cx).value().to_string()
     }
 
+    /// Index of the tab the finished operation belongs to: the tab it was
+    /// started from if it still exists, else the active tab.
+    fn target_ix(&self) -> usize {
+        self.pending_tab
+            .and_then(|id| self.tabs.iter().position(|t| t.id == id))
+            .unwrap_or(self.active_tab)
+    }
+
+    fn target_tab_mut(&mut self) -> &mut QueryTab {
+        let ix = self.target_ix();
+        &mut self.tabs[ix]
+    }
+
     fn set_grid_result(&mut self, result: QueryResult, cx: &mut Context<Self>) {
-        let tab = self.active_tab_mut();
+        let tab = self.target_tab_mut();
         tab.last_result = Some(result.clone());
         tab.table_state.update(cx, |state, cx| {
             state.delegate_mut().set_result(result);
@@ -291,14 +343,22 @@ impl Workbench {
         self.op_generation += 1;
         let generation = self.op_generation;
         self.pending_op = Some(op);
+        self.pending_tab = self.tabs.get(self.active_tab).map(|t| t.id);
         self.busy = true;
         cx.notify();
+        let handle = self.window_handle;
         cx.spawn(async move |view, cx| {
             let resp = cx
                 .background_executor()
                 .spawn(async move { rx.recv() })
                 .await;
-            let _ = view.update(cx, |this, cx| this.on_db_response(generation, resp, cx));
+            // The window is needed to create tabs (View Script) and set
+            // editor text from a response.
+            let _ = cx.update_window(handle, |_, window, cx| {
+                view.update(cx, |this, cx| {
+                    this.on_db_response(generation, resp, window, cx)
+                })
+            });
         })
         .detach();
     }
@@ -416,31 +476,51 @@ impl Workbench {
         self.demo_mode = false;
         self.show_connection_form = true;
         self.objects.clear();
-        self.tree_state.update(cx, |state, cx| {
-            state.set_items(Vec::<TreeItem>::new(), cx);
-        });
+        self.schemas.clear();
+        self.current_schema = None;
+        self.selected_object = None;
         self.clear_all_grids(cx);
         self.status = "Belum terhubung.".to_string();
         self.push_message("Disconnected.".to_string());
         cx.notify();
     }
 
+    /// Reload the schema list, then the objects of the current schema
+    /// (the session user's own schema on first load).
     fn refresh_schema(&mut self, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
-        let Some(session) = self.session.clone() else {
+        if self.session.is_none() {
             self.push_message("Belum terhubung.".to_string());
             return;
+        }
+        self.status = "Memuat daftar schema...".to_string();
+        self.spawn_db(Job::ListSchemas, PendingOp::ListSchemas, cx);
+    }
+
+    fn load_objects(&mut self, cx: &mut Context<Self>) {
+        let Some(owner) = self.current_schema.clone() else {
+            return;
         };
-        self.status = "Memuat schema...".to_string();
-        self.spawn_db(
-            Job::ListObjects {
-                owner: session.user,
-            },
-            PendingOp::ListObjects,
-            cx,
-        );
+        self.status = format!("Memuat objek {owner}...");
+        self.spawn_db(Job::ListObjects { owner }, PendingOp::ListObjects, cx);
+    }
+
+    fn select_schema(&mut self, schema: String, cx: &mut Context<Self>) {
+        if self.busy || self.current_schema.as_deref() == Some(schema.as_str()) {
+            return;
+        }
+        self.current_schema = Some(schema);
+        self.selected_object = None;
+        self.objects.clear();
+        self.load_objects(cx);
+    }
+
+    fn select_category(&mut self, category: ObjectCategory, cx: &mut Context<Self>) {
+        self.category = category;
+        self.selected_object = None;
+        cx.notify();
     }
 
     fn run(&mut self, cx: &mut Context<Self>) {
@@ -790,67 +870,37 @@ impl Workbench {
         cx.notify();
     }
 
-    // ----- schema tree -----
+    // ----- explorer (Toad-style object browser) -----
 
     fn apply_tree_filter(&mut self, cx: &mut Context<Self>) {
         self.tree_filter = Self::input_text(&self.search_input, cx);
-        let filtered = schema::filter_objects(&self.objects, &self.tree_filter);
-        let items = schema::build_tree_items(filtered);
-        self.tree_state.update(cx, |state, cx| {
-            state.set_items(items, cx);
-        });
+        cx.notify();
     }
 
-    fn on_tree_click(
+    /// Single click selects; double click on a table/view opens its data
+    /// in a new tab, like Toad. The platform reports the tap count on the
+    /// mouse-down event, so a double click arrives with `click_count >= 2`.
+    fn on_object_click(
         &mut self,
-        id: SharedString,
+        object: ObjectRef,
         event: &ClickEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((owner, name, group)) = schema::parse_object_id(&id) else {
-            return; // group header: expand/collapse is handled by the tree
-        };
-        // No dedicated double-click API: the platform reports the tap count
-        // on the mouse-down event, so a double-click arrives as a second
-        // click with `click_count >= 2`. The first click still runs the
-        // single-click describe below; the data query supersedes it.
+        self.selected_object = Some(object.name.clone());
         let double_click = matches!(event, ClickEvent::Mouse(m) if m.down.click_count >= 2);
-        if double_click && schema::is_describable_group(group) {
-            self.open_table_data(owner, name, window, cx);
-            return;
+        if double_click {
+            if schema::has_data(&object.kind) {
+                self.open_table_data(&object.owner, &object.name, window, cx);
+            } else {
+                self.view_script(object, cx);
+            }
         }
-        if !schema::is_describable_group(group) {
-            self.push_message(format!(
-                "Describe untuk {group} belum didukung di MVP ({owner}.{name})."
-            ));
-            self.active_tab_mut().results_tab = ResultsTab::Messages;
-            cx.notify();
-            return;
-        }
-        if self.busy || self.session.is_none() {
-            return;
-        }
-        self.show_home = false;
-        self.status = format!("Describe {owner}.{name}...");
-        self.spawn_db(
-            Job::Describe {
-                owner: owner.to_string(),
-                name: name.to_string(),
-            },
-            PendingOp::Describe {
-                owner: owner.to_string(),
-                name: name.to_string(),
-            },
-            cx,
-        );
+        cx.notify();
     }
 
-    /// Double-click on a table/view row: fill the editor with a capped
-    /// `SELECT *` and run it, like Toad/Navicat. A describe fired by the
-    /// first click of the double-click is superseded with the same
-    /// soft-cancel as Stop (its late response is dropped by the generation
-    /// check); a real in-flight query is never cancelled.
+    /// Open `owner.name` in a new data tab titled after the table and run a
+    /// capped `SELECT *` there.
     fn open_table_data(
         &mut self,
         owner: &str,
@@ -861,20 +911,146 @@ impl Workbench {
         if self.session.is_none() {
             return;
         }
-        if self.busy && matches!(self.pending_op, Some(PendingOp::Describe { .. })) {
-            self.op_generation += 1;
-            self.pending_op = None;
-            self.pending_sql = None;
-            self.busy = false;
-        }
         if self.busy {
+            self.status = "Masih ada operasi berjalan.".to_string();
+            cx.notify();
             return;
         }
-        self.show_home = false;
         let sql = schema::select_all_sql(owner, name);
-        let editor = self.active_tab().editor.clone();
-        editor.update(cx, |state, cx| state.set_value(sql, window, cx));
+        self.new_tab_with_sql(sql, window, cx);
+        let tab = self.active_tab_mut();
+        tab.title = name.to_string();
+        tab.kind = TabKind::Data;
         self.run(cx);
+    }
+
+    fn describe_object(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
+        if self.busy || self.session.is_none() || self.show_home {
+            return;
+        }
+        self.status = format!("Describe {}.{}...", object.owner, object.name);
+        self.spawn_db(
+            Job::Describe {
+                owner: object.owner.clone(),
+                name: object.name.clone(),
+            },
+            PendingOp::Describe {
+                owner: object.owner,
+                name: object.name,
+            },
+            cx,
+        );
+    }
+
+    /// "View Script": fetch the DDL; the response opens it in a new tab.
+    fn view_script(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
+        if self.busy || self.session.is_none() {
+            return;
+        }
+        self.status = format!("Mengambil DDL {}.{}...", object.owner, object.name);
+        self.spawn_db(
+            Job::Ddl {
+                owner: object.owner.clone(),
+                name: object.name.clone(),
+                kind: object.kind,
+            },
+            PendingOp::Ddl {
+                owner: object.owner,
+                name: object.name,
+            },
+            cx,
+        );
+    }
+
+    /// "Export Data": ask where to save (native save dialog), then let the
+    /// worker fetch and write the whole table. If the platform has no file
+    /// dialog, fall back to a timestamped file in the working directory.
+    fn export_table(&mut self, object: ObjectRef, format: ExportFormat, cx: &mut Context<Self>) {
+        if self.busy || self.session.is_none() {
+            return;
+        }
+        let suggested = format!("{}.{}", object.name, format.extension());
+        let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let prompt = cx.prompt_for_new_path(&dir, Some(&suggested));
+        cx.spawn(async move |view, cx| {
+            let path = match prompt.await {
+                Ok(Ok(Some(path))) => Some(path),
+                Ok(Ok(None)) => None, // cancelled
+                _ => Some(dir.join(format!(
+                    "{}-{}.{}",
+                    object.name,
+                    unix_stamp(),
+                    format.extension()
+                ))),
+            };
+            let Some(path) = path else {
+                return;
+            };
+            let _ = view.update(cx, |this, cx| {
+                this.status = format!("Export {}.{}...", object.owner, object.name);
+                this.spawn_db(
+                    Job::ExportTable {
+                        owner: object.owner.clone(),
+                        name: object.name.clone(),
+                        path,
+                        format,
+                    },
+                    PendingOp::ExportTable {
+                        owner: object.owner,
+                        name: object.name,
+                    },
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
+    /// "Import Data": pick a CSV file whose header names match the table's
+    /// columns; rows are inserted without commit.
+    fn import_table(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
+        if self.busy || self.session.is_none() {
+            return;
+        }
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import CSV".into()),
+        });
+        cx.spawn(async move |view, cx| {
+            let picked = prompt.await;
+            let _ = view.update(cx, |this, cx| {
+                let path = match picked {
+                    Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                    Ok(Ok(None)) => None,
+                    _ => {
+                        this.push_message(
+                            "Dialog pilih file tidak tersedia di sistem ini.".to_string(),
+                        );
+                        cx.notify();
+                        None
+                    }
+                };
+                let Some(path) = path else {
+                    return;
+                };
+                this.status = format!("Import ke {}.{}...", object.owner, object.name);
+                this.spawn_db(
+                    Job::ImportCsv {
+                        owner: object.owner.clone(),
+                        name: object.name.clone(),
+                        path,
+                    },
+                    PendingOp::ImportCsv {
+                        owner: object.owner,
+                        name: object.name,
+                    },
+                    cx,
+                );
+            });
+        })
+        .detach();
     }
 
     // ----- response handling -----
@@ -883,6 +1059,7 @@ impl Workbench {
         &mut self,
         generation: u64,
         resp: Result<Response, RecvError>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // A superseded operation (after Stop, or a newer op) drops its
@@ -908,13 +1085,14 @@ impl Workbench {
             }
             self.push_message(message.clone());
             self.status = "Error (lihat Messages).".to_string();
-            self.active_tab_mut().results_tab = ResultsTab::Messages;
+            self.target_tab_mut().results_tab = ResultsTab::Messages;
             cx.notify();
             return;
         }
         match (pending, resp) {
             (Some(PendingOp::Connect), Response::Connected(info)) => {
                 self.session = Some(info.clone());
+                self.current_schema = None;
                 self.connect_error = None;
                 self.show_connection_form = false;
                 self.status = format!("Connected sebagai {}.", info.user);
@@ -945,9 +1123,9 @@ impl Workbench {
                 if let Some(sql) = pending_sql {
                     self.record_run(&sql);
                 }
-                self.active_tab_mut().elapsed_ms = Some(elapsed);
+                self.target_tab_mut().elapsed_ms = Some(elapsed);
                 self.set_grid_result(result, cx);
-                self.active_tab_mut().results_tab = ResultsTab::Results;
+                self.target_tab_mut().results_tab = ResultsTab::Results;
                 self.status = if truncated {
                     format!("{rows} baris dalam {elapsed}ms (dibatasi {DEFAULT_MAX_ROWS} baris)")
                 } else {
@@ -960,10 +1138,10 @@ impl Workbench {
                 }
                 self.push_message(format!("{affected} baris terpengaruh."));
                 self.status = format!("{affected} baris terpengaruh (belum commit).");
-                self.active_tab_mut().results_tab = ResultsTab::Messages;
+                self.target_tab_mut().results_tab = ResultsTab::Messages;
             }
             (Some(PendingOp::Explain), Response::PlanTree(nodes, lines)) => {
-                let tab = self.active_tab_mut();
+                let tab = self.target_tab_mut();
                 tab.plan_expanded = plan::all_plan_ids(&nodes);
                 tab.plan_nodes = Some(nodes);
                 tab.plan_lines = lines;
@@ -971,23 +1149,68 @@ impl Workbench {
                 self.status = "Explain plan selesai.".to_string();
             }
             (Some(PendingOp::Explain), Response::Plan(lines)) => {
-                let tab = self.active_tab_mut();
+                let tab = self.target_tab_mut();
                 tab.plan_nodes = None;
                 tab.plan_lines = lines;
                 tab.results_tab = ResultsTab::Plan;
                 self.status = "Explain plan selesai.".to_string();
             }
+            (Some(PendingOp::ListSchemas), Response::Schemas(schemas)) => {
+                let user = self.session.as_ref().map(|s| s.user.clone());
+                // Keep the current pick on refresh; otherwise start in the
+                // session user's own schema, as Toad does.
+                let keep = self.current_schema.clone().filter(|c| schemas.contains(c));
+                self.current_schema = keep
+                    .or_else(|| user.filter(|u| schemas.contains(u)))
+                    .or_else(|| schemas.first().cloned());
+                self.schemas = schemas;
+                self.load_objects(cx);
+            }
             (Some(PendingOp::ListObjects), Response::Objects(objects)) => {
                 let count = objects.len();
                 self.objects = objects;
-                self.apply_tree_filter(cx);
-                self.status = format!("{count} objek dimuat.");
+                self.selected_object = None;
+                let schema = self.current_schema.clone().unwrap_or_default();
+                self.status = format!("{schema}: {count} objek dimuat.");
+            }
+            (Some(PendingOp::Ddl { owner, name }), Response::Ddl(ddl)) => {
+                self.new_tab_with_sql(ddl, window, cx);
+                let tab = self.active_tab_mut();
+                tab.title = format!("{name}.sql");
+                tab.kind = TabKind::Script;
+                self.status = format!("Script {owner}.{name}.");
+            }
+            (
+                Some(PendingOp::ExportTable { owner, name }),
+                Response::Exported {
+                    path,
+                    rows,
+                    truncated,
+                },
+            ) => {
+                let cap = if truncated {
+                    format!(" (dibatasi {} baris)", ora_core::EXPORT_MAX_ROWS)
+                } else {
+                    String::new()
+                };
+                self.push_message(format!(
+                    "Export {owner}.{name}: {rows} baris ke {}{cap}",
+                    path.display()
+                ));
+                self.status = format!("Export {name} selesai: {rows} baris.");
+            }
+            (Some(PendingOp::ImportCsv { owner, name }), Response::Imported(rows)) => {
+                self.push_message(format!(
+                    "Import {owner}.{name}: {rows} baris dimasukkan (belum commit)."
+                ));
+                self.status = format!("{rows} baris diimpor ke {name} (belum commit).");
+                self.target_tab_mut().results_tab = ResultsTab::Messages;
             }
             (Some(PendingOp::Describe { owner, name }), Response::Described(defs)) => {
                 let result = schema::describe_to_result(&defs);
                 let count = result.row_count();
                 self.set_grid_result(result, cx);
-                self.active_tab_mut().results_tab = ResultsTab::Results;
+                self.target_tab_mut().results_tab = ResultsTab::Results;
                 self.status = format!("{owner}.{name}: {count} kolom.");
             }
             (Some(PendingOp::Commit), Response::Committed) => {
@@ -1154,7 +1377,11 @@ impl Workbench {
                     .pr(px(SPACE_1))
                     .on_click(cx.listener(move |this, _, _, cx| this.activate_tab(ix, cx)))
                     .child(icon(
-                        IconName::Database,
+                        match tab.kind {
+                            TabKind::Query => IconName::Database,
+                            TabKind::Data => IconName::Table,
+                            TabKind::Script => IconName::FileCode,
+                        },
                         14.,
                         if active {
                             theme.primary
@@ -1317,24 +1544,16 @@ impl Workbench {
         );
         panel = panel.child(header);
         panel = panel.child(self.render_session_card(theme, cx));
-        panel = panel.child(self.render_profile_list(theme, cx));
+        // Navicat-style: the saved connections stay listed while
+        // disconnected; once connected the panel belongs to the explorer
+        // and "+" brings the list and form back.
         if self.session.is_none() || self.show_connection_form {
+            panel = panel.child(self.render_profile_list(theme, cx));
             panel = panel.child(self.render_connection_form(theme, cx));
         }
-        panel = panel.child(
-            div()
-                .px(px(SPACE_3))
-                .pb(px(SPACE_2))
-                .child(Input::new(&self.search_input).w_full()),
-        );
-        panel = panel.child(
-            div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .px(px(SPACE_2))
-                .child(self.render_tree_area(theme, cx)),
-        );
+        if self.session.is_some() {
+            panel = panel.child(self.render_explorer(theme, cx));
+        }
         panel
     }
 
@@ -1564,20 +1783,96 @@ impl Workbench {
         ))
     }
 
-    fn render_tree_area(
+    /// Toad-style object browser: schema dropdown, category tabs, filter
+    /// box, and a flat virtualized list of objects with a context menu.
+    fn render_explorer(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        if self.objects.is_empty() {
-            let message = if self.session.is_none() {
-                "Connect to load schema objects."
-            } else if self.tree_filter.is_empty() {
-                "No objects found in this schema."
+        let view = cx.entity();
+        let schemas = self.schemas.clone();
+        let current = self.current_schema.clone();
+        let schema_button = Button::new("schema-select")
+            .label(current.clone().unwrap_or_else(|| "(schema)".to_string()))
+            .icon(IconName::ChevronsUpDown)
+            .w_full()
+            .disabled(self.schemas.is_empty())
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu.scrollable(true).max_h(px(360.)).min_w(px(220.));
+                for schema in &schemas {
+                    let pick = schema.clone();
+                    let view = view.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(schema.clone())
+                            .checked(current.as_deref() == Some(schema.as_str()))
+                            .on_click(move |_, _, cx: &mut App| {
+                                let pick = pick.clone();
+                                view.update(cx, |this, cx| this.select_schema(pick, cx));
+                            }),
+                    );
+                }
+                menu
+            });
+
+        let mut chips = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap(px(SPACE_1))
+            .px(px(SPACE_3));
+        for category in ObjectCategory::ALL {
+            let active = self.category == category;
+            let count = schema::count_in(&self.objects, category);
+            let mut chip = div()
+                .id(format!("category-{}", category.label()))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(SPACE_1))
+                .h(px(24.))
+                .px(px(SPACE_2))
+                .rounded(px(RADIUS_SM))
+                .border_1()
+                .text_size(px(FONT_CAPTION))
+                .line_height(px(LEADING_CAPTION))
+                .font_weight(FontWeight::MEDIUM)
+                .on_click(cx.listener(move |this, _, _, cx| this.select_category(category, cx)));
+            if active {
+                chip = chip
+                    .bg(theme.primary)
+                    .border_color(theme.primary)
+                    .text_color(theme.primary_foreground);
             } else {
-                "No objects match the filter."
+                chip = chip
+                    .border_color(theme.border)
+                    .text_color(theme.muted_foreground)
+                    .hover(|this| this.bg(theme.secondary));
+            }
+            chips = chips.child(
+                chip.child(category.label())
+                    .child(div().opacity(0.75).child(count.to_string())),
+            );
+        }
+
+        let visible: Vec<ObjectRef> =
+            schema::objects_in(&self.objects, self.category, &self.tree_filter)
+                .into_iter()
+                .map(|o| ObjectRef {
+                    owner: o.owner.clone(),
+                    name: o.name.clone(),
+                    kind: o.kind.clone(),
+                })
+                .collect();
+        let list = if visible.is_empty() {
+            let message = if self.busy && self.objects.is_empty() {
+                "Memuat objek..."
+            } else if self.tree_filter.is_empty() {
+                "Tidak ada objek di kategori ini."
+            } else {
+                "Tidak ada objek yang cocok dengan filter."
             };
-            return div()
+            div()
                 .flex_1()
                 .flex()
                 .flex_col()
@@ -1585,33 +1880,58 @@ impl Workbench {
                 .justify_center()
                 .p(px(SPACE_4))
                 .child(empty_state_text(message.to_string(), theme))
-                .into_any_element();
-        }
+                .into_any_element()
+        } else {
+            let count = visible.len();
+            let selected = self.selected_object.clone();
+            let theme = theme.clone();
+            div()
+                .flex_1()
+                .px(px(SPACE_2))
+                .child(
+                    uniform_list(
+                        "explorer-objects",
+                        count,
+                        cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
+                            range
+                                .map(|ix| {
+                                    let object = visible[ix].clone();
+                                    let is_selected =
+                                        selected.as_deref() == Some(object.name.as_str());
+                                    render_object_row(ix, object, is_selected, &theme, cx)
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .track_scroll(&self.object_scroll)
+                    .size_full(),
+                )
+                .into_any_element()
+        };
+
         div()
             .flex_1()
-            .child(self.render_tree(cx))
-            .into_any_element()
-    }
-
-    fn render_tree(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        tree(&self.tree_state, {
-            let view = cx.entity();
-            move |ix, entry, selected, _window, cx| {
-                view.update(cx, |_, cx| {
-                    let item = entry.item();
-                    let item_id = item.id.clone();
-                    ListItem::new(ix)
-                        .selected(selected)
-                        .h(px(TREE_ROW_HEIGHT))
-                        .text_size(px(FONT_LABEL))
-                        .pl(px(12. + 16. * entry.depth() as f32))
-                        .child(item.label.clone())
-                        .on_click(cx.listener(move |this, event, window, cx| {
-                            this.on_tree_click(item_id.clone(), event, window, cx);
-                        }))
-                })
-            }
-        })
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_2))
+            .pt(px(SPACE_3))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .px(px(SPACE_3))
+                    .child(form_label("Schema", theme))
+                    .child(div().flex_1().child(schema_button)),
+            )
+            .child(chips)
+            .child(
+                div()
+                    .px(px(SPACE_3))
+                    .child(Input::new(&self.search_input).w_full()),
+            )
+            .child(list)
     }
 
     fn render_history_panel(
@@ -1833,7 +2153,17 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut main = div().flex().flex_col().flex_1().bg(theme.background);
+        // `min_w(0)` + clip: without them a wide result grid's min-content
+        // width pushes the column past the window edge, hiding the
+        // toolbar's right side and the plan panel.
+        let mut main = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .size_full()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .bg(theme.background);
         // The tab strip lives at the top of the main column only (right of
         // the sidebar), above the toolbar — as in the design. No spacer
         // above the rail/sidebar: the design shares the top row between
@@ -1989,7 +2319,13 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut col = div().flex().flex_col().size_full().bg(theme.background);
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .bg(theme.background);
         col = col.child(self.render_sub_tab_bar(theme, cx));
         // The content wrapper must be a flex container: the results content
         // is a `flex_1` div, and as a plain block child its flex sizing is
@@ -2482,103 +2818,142 @@ impl Workbench {
             .child(content)
     }
 
+    /// Navicat-style start page: one tile per connection, plus the demo
+    /// database and a "New connection" tile.
     fn render_home_connections(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut section = div().flex().flex_col().gap(px(SPACE_2)).child(
+        let section = div().flex().flex_col().gap(px(SPACE_2)).child(
             div()
                 .text_size(px(FONT_HEADING_MD))
                 .line_height(px(LEADING_HEADING_MD))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.foreground)
-                .child("Saved connections"),
+                .child("Connections"),
         );
-        section = section.child(
+        let tile = |id: String| {
             div()
+                .id(id)
                 .flex()
                 .flex_col()
-                .gap(px(SPACE_1))
+                .gap(px(SPACE_2))
+                .w(px(232.))
                 .p(px(SPACE_3))
                 .rounded(px(RADIUS_MD))
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.popover)
+                .hover(|this| this.border_color(theme.primary))
+        };
+        let tile_title = |icon_name: IconName, title: String, subtitle: String| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(SPACE_2))
                 .child(
                     div()
-                        .text_size(px(FONT_BODY))
-                        .line_height(px(LEADING_BODY))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.foreground)
-                        .child("Demo mode"),
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(32.))
+                        .rounded(px(RADIUS_MD))
+                        .bg(theme.accent)
+                        .child(icon(icon_name, 18., theme.primary)),
                 )
-                .child(caption_text(
-                    "Try the full UI with a built-in fake database. No Oracle needed.".to_string(),
-                    theme,
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .text_size(px(FONT_BODY))
+                                .line_height(px(LEADING_BODY))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.foreground)
+                                .truncate()
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(FONT_CAPTION))
+                                .line_height(px(LEADING_CAPTION))
+                                .text_color(theme.muted_foreground)
+                                .truncate()
+                                .child(subtitle),
+                        ),
+                )
+        };
+        let mut grid = div().flex().flex_row().flex_wrap().gap(px(SPACE_3));
+        let demo_connected = self.demo_mode && self.session.is_some();
+        grid = grid.child(
+            tile("home-demo-tile".to_string())
+                .child(tile_title(
+                    IconName::Database,
+                    "Demo database".to_string(),
+                    "Built-in, no Oracle needed".to_string(),
                 ))
                 .child(
-                    div().pt(px(SPACE_1)).child(
-                        Button::new("home-demo")
-                            .label("Connect to demo")
-                            .icon(IconName::Play)
-                            .primary()
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
-                    ),
+                    Button::new("home-demo")
+                        .label(if demo_connected {
+                            "Connected"
+                        } else {
+                            "Connect"
+                        })
+                        .icon(IconName::Play)
+                        .primary()
+                        .disabled(self.busy || demo_connected)
+                        .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
                 ),
         );
         for (ix, profile) in self.profiles.iter().enumerate() {
             let profile = profile.clone();
-            section = section.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(SPACE_2))
-                    .p(px(SPACE_3))
-                    .rounded(px(RADIUS_MD))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.popover)
-                    .child(icon(IconName::Database, 18., theme.primary))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .child(
-                                div()
-                                    .text_size(px(FONT_BODY))
-                                    .line_height(px(LEADING_BODY))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.foreground)
-                                    .child(profile.name.clone()),
-                            )
-                            .child(caption_text(
-                                format!("{}@{}", profile.username, profile.connect_string),
-                                theme,
-                            )),
-                    )
+            grid = grid.child(
+                tile(format!("home-profile-{ix}"))
+                    .child(tile_title(
+                        IconName::Database,
+                        profile.name.clone(),
+                        format!("{}@{}", profile.username, profile.connect_string),
+                    ))
                     .child(
                         Button::new(format!("home-use-{ix}"))
-                            .label("Use connection")
+                            .label("Open")
+                            .icon(IconName::LogIn)
                             .on_click(cx.listener(move |this, _, window, cx| {
+                                // Passwords are never stored: open the
+                                // filled form so the user types it.
                                 this.rail = RailPanel::Connections;
                                 this.editing_profile = Some(ix);
+                                this.show_connection_form = true;
                                 this.fill_form(&profile, window, cx);
                                 cx.notify();
                             })),
                     ),
             );
         }
-        if self.profiles.is_empty() {
-            section = section.child(caption_text(
-                "No saved connections yet. Add one from the Connections panel.".to_string(),
-                theme,
-            ));
-        }
-        section
+        grid = grid.child(
+            tile("home-new-tile".to_string())
+                .child(tile_title(
+                    IconName::Plus,
+                    "New connection".to_string(),
+                    "Oracle (Easy Connect / TNS)".to_string(),
+                ))
+                .child(
+                    Button::new("home-new")
+                        .label("Create")
+                        .icon(IconName::Plus)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.rail = RailPanel::Connections;
+                            this.show_connection_form = true;
+                            this.new_profile_form(window, cx);
+                        })),
+                ),
+        );
+        section.child(grid)
     }
 
     fn render_home_recent(
@@ -2737,6 +3112,114 @@ impl Render for Workbench {
             )
             .child(self.render_status_bar(&theme))
     }
+}
+
+/// One explorer row: icon + name. Double click opens data (tables/views)
+/// or the script (everything else); right click opens the Toad-style
+/// object menu.
+fn render_object_row(
+    ix: usize,
+    object: ObjectRef,
+    selected: bool,
+    theme: &gpui_kit::component::Theme,
+    cx: &mut Context<Workbench>,
+) -> impl IntoElement {
+    let icon_name = match object.kind {
+        ObjectKind::Table => IconName::Table,
+        ObjectKind::View => IconName::Eye,
+        ObjectKind::Index => IconName::ListOrdered,
+        ObjectKind::Sequence => IconName::Hash,
+        ObjectKind::Procedure | ObjectKind::Function => IconName::SquareFunction,
+        ObjectKind::Package => IconName::Braces,
+        ObjectKind::Trigger => IconName::Zap,
+        ObjectKind::Synonym => IconName::Link,
+        ObjectKind::Other(_) => IconName::FileText,
+    };
+    let click_object = object.clone();
+    let mut row = div()
+        .id(("explorer-row", ix))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(SPACE_2))
+        .h(px(TREE_ROW_HEIGHT))
+        .px(px(SPACE_2))
+        .rounded(px(RADIUS_SM))
+        .text_size(px(FONT_LABEL))
+        .line_height(px(LEADING_LABEL))
+        .on_click(cx.listener(move |this, event, window, cx| {
+            this.on_object_click(click_object.clone(), event, window, cx);
+        }));
+    if selected {
+        row = row.bg(theme.accent).text_color(theme.accent_foreground);
+    } else {
+        row = row
+            .text_color(theme.foreground)
+            .hover(|this| this.bg(theme.secondary));
+    }
+    let view = cx.entity();
+    row.child(icon(icon_name, 14., theme.muted_foreground))
+        .child(div().flex_1().truncate().child(object.name.clone()))
+        .context_menu(move |menu, _, _| object_menu(menu, &view, &object))
+}
+
+/// The right-click menu for an explorer object.
+fn object_menu(menu: PopupMenu, view: &Entity<Workbench>, object: &ObjectRef) -> PopupMenu {
+    let has_data = schema::has_data(&object.kind);
+    let is_table = object.kind == ObjectKind::Table;
+    let item =
+        |label: &str,
+         icon_name: IconName,
+         enabled: bool,
+         f: fn(&mut Workbench, ObjectRef, &mut Window, &mut Context<Workbench>)| {
+            let view = view.clone();
+            let object = object.clone();
+            PopupMenuItem::new(label.to_string())
+                .icon(Icon::new(icon_name))
+                .disabled(!enabled)
+                .on_click(move |_, window, cx: &mut App| {
+                    let object = object.clone();
+                    view.update(cx, |this, cx| f(this, object, window, cx));
+                })
+        };
+    menu.min_w(px(220.))
+        .item(item(
+            "Open Data",
+            IconName::Table,
+            has_data,
+            |this, o, window, cx| this.open_table_data(&o.owner, &o.name, window, cx),
+        ))
+        .item(item(
+            "Describe",
+            IconName::Columns3,
+            has_data,
+            |this, o, _, cx| this.describe_object(o, cx),
+        ))
+        .item(item(
+            "View Script",
+            IconName::FileCode,
+            true,
+            |this, o, _, cx| this.view_script(o, cx),
+        ))
+        .separator()
+        .item(item(
+            "Export Data (CSV)",
+            IconName::Download,
+            has_data,
+            |this, o, _, cx| this.export_table(o, ExportFormat::Csv, cx),
+        ))
+        .item(item(
+            "Export Data (XLSX)",
+            IconName::FileSpreadsheet,
+            has_data,
+            |this, o, _, cx| this.export_table(o, ExportFormat::Xlsx, cx),
+        ))
+        .item(item(
+            "Import Data (CSV)",
+            IconName::Upload,
+            is_table,
+            |this, o, _, cx| this.import_table(o, cx),
+        ))
 }
 
 // ----- small shared pieces -----

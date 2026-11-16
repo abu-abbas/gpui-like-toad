@@ -146,6 +146,22 @@ impl ObjectKind {
         }
     }
 
+    /// `OBJECT_TYPE` spelling, as used in DDL and by `DBMS_METADATA`.
+    pub fn oracle_type(&self) -> &str {
+        match self {
+            ObjectKind::Table => "TABLE",
+            ObjectKind::View => "VIEW",
+            ObjectKind::Index => "INDEX",
+            ObjectKind::Sequence => "SEQUENCE",
+            ObjectKind::Procedure => "PROCEDURE",
+            ObjectKind::Function => "FUNCTION",
+            ObjectKind::Package => "PACKAGE",
+            ObjectKind::Trigger => "TRIGGER",
+            ObjectKind::Synonym => "SYNONYM",
+            ObjectKind::Other(raw) => raw,
+        }
+    }
+
     /// True for objects the schema browser can describe column-by-column.
     pub fn is_describable(&self) -> bool {
         matches!(self, ObjectKind::Table | ObjectKind::View)
@@ -233,6 +249,9 @@ mod tests {
         assert_eq!(ObjectKind::Table.group_label(), "Tables");
         assert!(ObjectKind::Table.is_describable());
         assert!(!ObjectKind::Sequence.is_describable());
+        for raw in ["TABLE", "VIEW", "PACKAGE", "SYNONYM", "MATERIALIZED VIEW"] {
+            assert_eq!(ObjectKind::from_oracle_type(raw).oracle_type(), raw);
+        }
         assert_eq!(
             ObjectKind::from_oracle_type("MATERIALIZED VIEW"),
             ObjectKind::Other("MATERIALIZED VIEW".into())

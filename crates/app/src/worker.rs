@@ -7,14 +7,33 @@
 //! busy flag so results never interleave.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use ora_core::demo::DemoClient;
+use ora_core::export::{to_csv, to_xlsx};
+use ora_core::import::{map_columns, parse_csv, quote_ident};
 use ora_core::sql::statement_kind;
 use ora_core::{
-    ColumnDef, ConnectionProfile, DbClient, DbInfo, PlanNode, QueryResult, SchemaObject,
-    DEFAULT_MAX_ROWS,
+    ColumnDef, ConnectionProfile, DbClient, DbError, DbInfo, ObjectKind, PlanNode, QueryResult,
+    SchemaObject, DEFAULT_MAX_ROWS, EXPORT_MAX_ROWS,
 };
+
+/// File format for "Export Data" on a whole table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportFormat {
+    Csv,
+    Xlsx,
+}
+
+impl ExportFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportFormat::Csv => "csv",
+            ExportFormat::Xlsx => "xlsx",
+        }
+    }
+}
 use ora_driver::ThinClient;
 
 pub enum Job {
@@ -37,8 +56,30 @@ pub enum Job {
     },
     Commit,
     Rollback,
+    ListSchemas,
     ListObjects {
         owner: String,
+    },
+    /// DDL script for the explorer's "View Script".
+    Ddl {
+        owner: String,
+        name: String,
+        kind: ObjectKind,
+    },
+    /// Explorer "Export Data": fetch the whole table (capped at
+    /// [`EXPORT_MAX_ROWS`]) and write it to `path`.
+    ExportTable {
+        owner: String,
+        name: String,
+        path: PathBuf,
+        format: ExportFormat,
+    },
+    /// Explorer "Import Data": insert every row of a CSV file whose header
+    /// names match the table's columns. Not committed.
+    ImportCsv {
+        owner: String,
+        name: String,
+        path: PathBuf,
     },
     Describe {
         owner: String,
@@ -57,7 +98,15 @@ pub enum Response {
     Executed(u64),
     Committed,
     RolledBack,
+    Schemas(Vec<String>),
     Objects(Vec<SchemaObject>),
+    Ddl(String),
+    Exported {
+        path: PathBuf,
+        rows: usize,
+        truncated: bool,
+    },
+    Imported(u64),
     Described(Vec<ColumnDef>),
     Plan(Vec<String>),
     /// Structured plan nodes for the tree panel, plus the DBMS_XPLAN text
@@ -182,6 +231,43 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             },
             None => Response::Failed("not connected".to_string()),
         },
+        Job::ListSchemas => match client.as_mut() {
+            Some(client) => match client.list_schemas() {
+                Ok(schemas) => Response::Schemas(schemas),
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
+        Job::Ddl { owner, name, kind } => match client.as_mut() {
+            Some(client) => match client.object_ddl(&owner, &name, &kind) {
+                Ok(ddl) => Response::Ddl(ddl),
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
+        Job::ExportTable {
+            owner,
+            name,
+            path,
+            format,
+        } => match client.as_mut() {
+            Some(client) => match export_table(client.as_mut(), &owner, &name, &path, format) {
+                Ok((rows, truncated)) => Response::Exported {
+                    path,
+                    rows,
+                    truncated,
+                },
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
+        Job::ImportCsv { owner, name, path } => match client.as_mut() {
+            Some(client) => match import_csv(client.as_mut(), &owner, &name, &path) {
+                Ok(rows) => Response::Imported(rows),
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
         Job::ListObjects { owner } => match client.as_mut() {
             Some(client) => match client.list_objects(&owner) {
                 Ok(objects) => Response::Objects(objects),
@@ -215,5 +301,83 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             }
             None => Response::Failed("not connected".to_string()),
         },
+    }
+}
+
+fn export_table(
+    client: &mut dyn DbClient,
+    owner: &str,
+    name: &str,
+    path: &std::path::Path,
+    format: ExportFormat,
+) -> Result<(usize, bool), DbError> {
+    let sql = format!("SELECT * FROM {}.{}", quote_ident(owner), quote_ident(name));
+    let result = client.query(&sql, EXPORT_MAX_ROWS)?;
+    let bytes = match format {
+        ExportFormat::Csv => to_csv(&result).into_bytes(),
+        ExportFormat::Xlsx => to_xlsx(&result).map_err(DbError::new)?,
+    };
+    std::fs::write(path, bytes)
+        .map_err(|e| DbError::new(format!("gagal menulis {}: {e}", path.display())))?;
+    Ok((result.row_count(), result.truncated))
+}
+
+fn import_csv(
+    client: &mut dyn DbClient,
+    owner: &str,
+    name: &str,
+    path: &std::path::Path,
+) -> Result<u64, DbError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| DbError::new(format!("gagal membaca {}: {e}", path.display())))?;
+    let csv = parse_csv(&text).map_err(DbError::new)?;
+    let table_columns = client.describe_table(owner, name)?;
+    let columns = map_columns(&csv.headers, &table_columns).map_err(DbError::new)?;
+    client.insert_rows(owner, name, &columns, &csv.rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn demo() -> DemoClient {
+        let mut client = DemoClient::new();
+        client
+            .connect(
+                &ConnectionProfile {
+                    name: "demo".into(),
+                    username: "hr".into(),
+                    connect_string: "demo".into(),
+                },
+                "",
+            )
+            .unwrap();
+        client
+    }
+
+    #[test]
+    fn export_then_import_round_trips_through_a_file() {
+        let dir = std::env::temp_dir().join(format!("gpui-like-toad-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("departments.csv");
+        let mut client = demo();
+        let (rows, truncated) =
+            export_table(&mut client, "HR", "DEPARTMENTS", &path, ExportFormat::Csv).unwrap();
+        assert_eq!(rows, 4);
+        assert!(!truncated);
+        let inserted = import_csv(&mut client, "HR", "DEPARTMENTS", &path).unwrap();
+        assert_eq!(inserted, 4);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn import_rejects_unknown_columns() {
+        let dir = std::env::temp_dir().join(format!("gpui-like-toad-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad.csv");
+        std::fs::write(&path, "DEPARTMENT_ID,NOPE\n1,2\n").unwrap();
+        let err = import_csv(&mut demo(), "HR", "DEPARTMENTS", &path).unwrap_err();
+        assert!(err.to_string().contains("NOPE"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
