@@ -107,15 +107,9 @@ CI (`ci.yml`) meniru pola Sistem Akademis: deteksi perubahan, cek judul PR (Conv
 
 ## Rilis
 
-Pola rilis meniru Sistem Akademis: setiap push ke `main` yang menyentuh kode (atau manual via workflow_dispatch) membangun biner rilis Linux + Windows + macOS (ARM), lalu menerbitkannya sebagai GitHub Release di repo publik terpisah **`abu-abbas/gpui-like-toad-releases`**, versi `0.1.<run_number>`, 5 rilis terakhir dipertahankan. Setiap biner di-smoke-test dulu (`--version` harus mencetak versi yang sama dengan nomor rilis).
+Setiap push ke `main` yang menyentuh kode (atau manual via workflow_dispatch) membangun biner rilis Linux + Windows + macOS (ARM), lalu menerbitkannya sebagai GitHub Release di repo ini sendiri — repo sudah publik, jadi tidak perlu repo cermin seperti Sistem Akademis. Versi `0.1.<run_number>`, 5 rilis terakhir dipertahankan, dan tidak perlu setup secret apa pun (workflow memakai `GITHUB_TOKEN` bawaan). Setiap biner di-smoke-test dulu (`--version` harus mencetak versi yang sama dengan nomor rilis).
 
-Setup sekali (oleh pemilik repo):
-
-1. Buat repo publik `abu-abbas/gpui-like-toad-releases` (kosong, tanpa README).
-2. Buat fine-grained PAT dengan akses **Contents: Read and write** ke repo rilis tersebut saja.
-3. Tambahkan sebagai secret `RELEASES_TOKEN` di repo `gpui-like-toad` (Settings → Secrets and variables → Actions).
-
-Kalau secret belum diisi, workflow rilis hanya memberi warning dan dilewati — tidak merah. Biner belum ditandatangani; code signing menyusul.
+Biner belum ditandatangani; code signing menyusul.
 
 ## Roadmap (follow-up)
 
