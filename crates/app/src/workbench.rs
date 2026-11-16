@@ -32,8 +32,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::*;
 use gpui_kit::{
     div, px, relative, uniform_list, AnyWindowHandle, App, ClickEvent, Context, Entity,
-    Focusable as _, FontWeight, Hsla, IntoElement, PathPromptOptions, Render, Subscription,
-    UniformListScrollHandle, Window,
+    Focusable as _, FontWeight, Hsla, IntoElement, PathPromptOptions, Render, ScrollHandle,
+    Subscription, UniformListScrollHandle, Window,
 };
 use ora_core::completion::Catalog;
 use ora_core::credentials::{PasswordAction, SecretString};
@@ -241,6 +241,14 @@ pub struct Workbench {
     theme_pref: ThemePreference,
     tabs: Vec<QueryTab>,
     active_tab: usize,
+    /// Stand-in used while every tab is closed (only Home is left), so
+    /// `active_tab()` never indexes an empty `tabs`. Never shown.
+    scratch_tab: QueryTab,
+    /// Horizontal scroll of the tab strip, so tabs past the right edge
+    /// stay reachable and a newly opened/activated tab scrolls into view.
+    tab_scroll: ScrollHandle,
+    /// Messages tab scroll; follows the newest message.
+    messages_scroll: ScrollHandle,
     show_home: bool,
     next_tab_id: u64,
     db: Option<DbHandle>,
@@ -317,6 +325,7 @@ impl Workbench {
             window,
             cx,
         );
+        let scratch_tab = QueryTab::new(0, String::new(), "", &completion, window, cx);
 
         // Rebuild the tree on every keystroke in the search box.
         let search_sub = cx.subscribe(&search_input, |this, _, event: &InputEvent, cx| {
@@ -348,6 +357,9 @@ impl Workbench {
             theme_pref: theme::preference(cx),
             tabs: vec![first_tab],
             active_tab: 0,
+            scratch_tab,
+            tab_scroll: ScrollHandle::new(),
+            messages_scroll: ScrollHandle::new(),
             // Start on the Navicat-style Home page.
             show_home: true,
             next_tab_id: 1,
@@ -388,6 +400,7 @@ impl Workbench {
             let excess = self.messages.len() - MAX_MESSAGES;
             self.messages.drain(..excess);
         }
+        self.messages_scroll.scroll_to_bottom();
     }
 
     fn input_text(entity: &Entity<InputState>, cx: &App) -> String {
@@ -466,11 +479,15 @@ impl Workbench {
     }
 
     fn active_tab(&self) -> &QueryTab {
-        &self.tabs[self.active_tab]
+        self.tabs.get(self.active_tab).unwrap_or(&self.scratch_tab)
     }
 
     fn active_tab_mut(&mut self) -> &mut QueryTab {
-        &mut self.tabs[self.active_tab]
+        if self.active_tab < self.tabs.len() {
+            &mut self.tabs[self.active_tab]
+        } else {
+            &mut self.scratch_tab
+        }
     }
 
     fn editor_text(&self, cx: &App) -> String {
@@ -479,15 +496,20 @@ impl Workbench {
 
     /// Index of the tab the finished operation belongs to: the tab it was
     /// started from if it still exists, else the active tab.
-    fn target_ix(&self) -> usize {
-        self.pending_tab
-            .and_then(|id| self.tabs.iter().position(|t| t.id == id))
-            .unwrap_or(self.active_tab)
+    /// Index of the tab the running operation belongs to. `None` when that
+    /// tab was closed while the operation ran.
+    fn target_ix(&self) -> Option<usize> {
+        match self.pending_tab {
+            Some(id) => self.tabs.iter().position(|t| t.id == id),
+            None => (self.active_tab < self.tabs.len()).then_some(self.active_tab),
+        }
     }
 
     fn target_tab_mut(&mut self) -> &mut QueryTab {
-        let ix = self.target_ix();
-        &mut self.tabs[ix]
+        match self.target_ix() {
+            Some(ix) => &mut self.tabs[ix],
+            None => &mut self.scratch_tab,
+        }
     }
 
     fn set_grid_result(&mut self, result: QueryResult, cx: &mut Context<Self>) {
@@ -1015,15 +1037,21 @@ impl Workbench {
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         self.show_home = false;
+        self.tab_scroll.scroll_to_item(self.active_tab);
         cx.notify();
     }
 
+    /// Every tab can be closed; only Home stays. Closing the last one
+    /// goes back to Home.
     fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if self.tabs.len() <= 1 || ix >= self.tabs.len() {
+        if ix >= self.tabs.len() {
             return;
         }
         self.tabs.remove(ix);
-        if self.active_tab >= self.tabs.len() {
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+            self.show_home = true;
+        } else if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
         } else if ix < self.active_tab {
             self.active_tab -= 1;
@@ -1037,6 +1065,7 @@ impl Workbench {
         }
         self.active_tab = ix;
         self.show_home = false;
+        self.tab_scroll.scroll_to_item(ix);
         cx.notify();
     }
 
@@ -1766,35 +1795,53 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut bar = div()
+        // Home stays pinned on the left and "+" on the right; the tabs in
+        // between scroll sideways (mouse wheel or trackpad) when they no
+        // longer fit. `flex_none` keeps the bar at its full height: as a
+        // flex child it used to shrink when the content below was tall.
+        let mut strip = div()
+            .id("tab-strip")
             .flex()
             .flex_row()
+            .items_center()
+            .flex_shrink(1.)
+            .min_w(px(0.))
+            .h_full()
+            .gap(px(SPACE_1))
+            .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll);
+        for (ix, tab) in self.tabs.iter().enumerate() {
+            let active = !self.show_home && ix == self.active_tab;
+            strip = strip.child(self.render_query_tab(ix, tab, active, theme, cx));
+        }
+        div()
+            .flex()
+            .flex_row()
+            .flex_none()
             .items_center()
             .h(px(TAB_BAR_HEIGHT))
             .gap(px(SPACE_1))
             .px(px(SPACE_2))
             .bg(theme.tab_bar)
             .border_b_1()
-            .border_color(theme.border);
-        bar = bar.child(self.render_home_tab(theme, cx));
-        for (ix, tab) in self.tabs.iter().enumerate() {
-            let active = !self.show_home && ix == self.active_tab;
-            bar = bar.child(self.render_query_tab(ix, tab, active, theme, cx));
-        }
-        bar.child(
-            div()
-                .id("tab-add")
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .h(px(28.))
-                .w(px(28.))
-                .rounded(px(RADIUS_MD))
-                .hover(|this| this.bg(theme.secondary))
-                .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
-                .child(icon(IconName::Plus, 16., theme.muted_foreground)),
-        )
+            .border_color(theme.border)
+            .child(self.render_home_tab(theme, cx))
+            .child(strip)
+            .child(
+                div()
+                    .id("tab-add")
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .h(px(28.))
+                    .w(px(28.))
+                    .rounded(px(RADIUS_MD))
+                    .hover(|this| this.bg(theme.secondary))
+                    .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
+                    .child(icon(IconName::Plus, 16., theme.muted_foreground)),
+            )
     }
 
     fn render_home_tab(
@@ -1807,6 +1854,7 @@ impl Workbench {
             .id("tab-home")
             .flex()
             .flex_row()
+            .flex_none()
             .items_center()
             .h(px(28.))
             .gap(px(SPACE_1))
@@ -1858,6 +1906,7 @@ impl Workbench {
         let mut container = div()
             .flex()
             .flex_row()
+            .flex_none()
             .items_center()
             .h(px(28.))
             .rounded(px(RADIUS_MD));
@@ -2197,7 +2246,10 @@ impl Workbench {
                     .item(
                         PopupMenuItem::new("Edit connection")
                             .icon(Icon::new(IconName::SquarePen))
-                            .disabled(demo)
+                            // Only while disconnected: editing the profile a
+                            // live session uses would not change that session.
+                            // Demo has no host/user to edit.
+                            .disabled(connected || busy || demo)
                             .on_click(move |_, window, cx: &mut App| {
                                 edit_view
                                     .update(cx, |this, cx| this.edit_last_connection(window, cx));
@@ -2959,6 +3011,9 @@ impl Workbench {
         // the first rail item, the sidebar header, and the tab strip.
         main = main.child(self.render_tab_bar(theme, cx));
         main = main.child(self.render_toolbar(theme, cx));
+        // The split wrappers below take `min_h(0)`: as flex items they
+        // otherwise grow to their content (e.g. a long Messages list),
+        // pushing the bottom panel past the window instead of scrolling.
         if self.show_home {
             main = main.child(self.render_home(theme, cx));
         } else if self.active_tab().kind != TabKind::Query {
@@ -2970,7 +3025,7 @@ impl Workbench {
                 self.render_editor(cx).into_any_element()
             };
             main = main.child(
-                div().flex_1().child(
+                div().flex_1().min_h(px(0.)).child(
                     v_resizable("object-split")
                         .child(resizable_panel().child(top))
                         .child(
@@ -2983,7 +3038,7 @@ impl Workbench {
             );
         } else {
             main = main.child(
-                div().flex_1().child(
+                div().flex_1().min_h(px(0.)).child(
                     v_resizable("editor-split")
                         .child(resizable_panel().child(self.render_editor(cx)))
                         .child(
@@ -3008,6 +3063,7 @@ impl Workbench {
         let mut bar = div()
             .flex()
             .flex_row()
+            .flex_none()
             .items_center()
             .h(px(TOOLBAR_HEIGHT))
             .gap(px(SPACE_2))
@@ -3021,14 +3077,17 @@ impl Workbench {
             // fresh SQL editor tab, from any tab including Home.
             .child(
                 Button::new("new-sql")
+                    .small()
                     .label("New SQL")
                     .icon(IconName::SquarePen)
+                    .disabled(no_session)
                     .tooltip("Buka tab SQL editor baru")
                     .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx))),
             )
             .child(div().w(px(1.)).h(px(20.)).bg(theme.border))
             .child(
                 Button::new("run")
+                    .small()
                     .label(if data_tab { "Refresh" } else { "Run" })
                     .icon(if data_tab {
                         IconName::RefreshCw
@@ -3044,6 +3103,7 @@ impl Workbench {
             .when(!data_tab, |bar| {
                 bar.child(
                     Button::new("explain")
+                        .small()
                         .label("Explain")
                         .icon(IconName::ChartColumn)
                         .disabled(on_home || no_session || self.busy)
@@ -3053,9 +3113,10 @@ impl Workbench {
             .when(!data_tab, |bar| {
                 bar.child(
                     Button::new("format")
+                        .small()
                         .label("Format")
                         .icon(IconName::WandSparkles)
-                        .disabled(on_home)
+                        .disabled(on_home || no_session)
                         .on_click(
                             cx.listener(|this, _, window, cx| this.format_editor(window, cx)),
                         ),
@@ -3063,13 +3124,15 @@ impl Workbench {
             })
             .child(
                 Button::new("stop")
+                    .small()
                     .label("Stop")
                     .icon(IconName::Square)
-                    .disabled(!self.busy)
+                    .disabled(no_session || !self.busy)
                     .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
             )
             .child(
                 Button::new("commit")
+                    .small()
                     .label("Commit")
                     .icon(IconName::Check)
                     .ghost()
@@ -3078,6 +3141,7 @@ impl Workbench {
             )
             .child(
                 Button::new("rollback")
+                    .small()
                     .label("Rollback")
                     .icon(IconName::Undo2)
                     .ghost()
@@ -3097,7 +3161,7 @@ impl Workbench {
                 .flex()
                 .flex_row()
                 .items_center()
-                .h(px(28.))
+                .h(px(24.))
                 .gap(px(SPACE_2))
                 .px(px(SPACE_2))
                 .rounded(px(RADIUS_MD))
@@ -3261,6 +3325,7 @@ impl Workbench {
             .child(
                 div()
                     .flex_1()
+                    .min_h(px(0.))
                     .id("info-messages")
                     .overflow_y_scroll()
                     .px(px(SPACE_3))
@@ -3348,10 +3413,13 @@ impl Workbench {
         // its explicit height, showed). As a flex item the content gets a
         // definite flex-computed height and the rows render.
         col = col.child(
+            // `min_h(0)`: without it the wrapper grows to fit a long
+            // Messages list instead of letting it scroll.
             div()
                 .flex()
                 .flex_col()
                 .flex_1()
+                .min_h(px(0.))
                 .child(self.render_results_content(theme, cx)),
         );
         if self.active_tab().results_tab == ResultsTab::Results {
@@ -3546,8 +3614,10 @@ impl Workbench {
                     let start = self.messages.len().saturating_sub(MAX_MESSAGES_SHOWN);
                     div()
                         .flex_1()
+                        .min_h(px(0.))
                         .id("messages-scroll")
                         .overflow_y_scroll()
+                        .track_scroll(&self.messages_scroll)
                         .p(px(SPACE_3))
                         .child(div().flex().flex_col().gap(px(SPACE_1)).children(
                             self.messages[start..].iter().map(|m| {

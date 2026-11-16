@@ -124,7 +124,12 @@ CI (`ci.yml`) meniru pola Sistem Akademis: deteksi perubahan, cek judul PR (Conv
 
 ## Rilis
 
-Setiap push ke `main` yang menyentuh kode (atau manual via workflow_dispatch) membangun biner rilis Linux + Windows + macOS (ARM), lalu menerbitkannya sebagai GitHub Release di repo ini sendiri — repo sudah publik, jadi tidak perlu repo cermin seperti Sistem Akademis. Versi `0.1.<run_number>`, 5 rilis terakhir dipertahankan, dan tidak perlu setup secret apa pun (workflow memakai `GITHUB_TOKEN` bawaan). Setiap biner di-smoke-test dulu (`--version` harus mencetak versi yang sama dengan nomor rilis).
+Rilis **tidak** otomatis di setiap merge ke `main`; CI biasa tetap jalan di PR dan `main`. Cara bikin rilis, pilih salah satu:
+
+- Push tag versi: `git tag v0.2.0 && git push origin v0.2.0` (versi rilis = `0.2.0`).
+- Manual: tab **Actions → Release → Run workflow**, isi versi (mis. `0.2.0`) atau kosongkan untuk `0.1.<run_number>`.
+
+Workflow lalu membangun biner rilis Linux + Windows + macOS (ARM), lalu menerbitkannya sebagai GitHub Release di repo ini sendiri — repo sudah publik, jadi tidak perlu repo cermin seperti Sistem Akademis. 5 rilis terakhir dipertahankan, dan tidak perlu setup secret apa pun (workflow memakai `GITHUB_TOKEN` bawaan). Setiap biner di-smoke-test dulu (`--version` harus mencetak versi yang sama dengan nomor rilis).
 
 Biner belum ditandatangani; code signing menyusul.
 
