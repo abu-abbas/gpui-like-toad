@@ -35,6 +35,9 @@ jobs:
           - os: windows-latest
             suffix: windows-x86_64
             ext: ".exe"
+          - os: macos-latest
+            suffix: macos-arm64
+            ext: ""
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
@@ -75,10 +78,15 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-
       - if: steps.gate.outputs.ready == 'true'
         name: Sematkan nomor versi
-        shell: bash
+        shell: python
         run: |
-          sed -i '0,/^version = "0.1.0"/s//version = "'"$VERSION"'"/' crates/app/Cargo.toml
-          grep '^version' crates/app/Cargo.toml
+          import pathlib
+          p = pathlib.Path("crates/app/Cargo.toml")
+          s = p.read_text()
+          updated = s.replace('version = "0.1.0"', 'version = "${{ env.VERSION }}"', 1)
+          assert updated != s, "version line not found"
+          p.write_text(updated)
+          print([line for line in updated.splitlines() if line.startswith("version")])
       - if: steps.gate.outputs.ready == 'true'
         name: Build biner rilis
         run: cargo build --locked --release -p gpui-like-toad
@@ -132,7 +140,7 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         run: |
           ls -la out/
-          test "$(ls out/* | wc -l)" -eq 2
+          test "$(ls out/* | wc -l)" -eq 3
           notes=$(git log -n 15 --no-merges --pretty='- %s' -- crates | head -15)
           gh release create "v$VERSION" out/* \
             --repo "$RELEASES_REPO" --title "gpui-like-toad $VERSION" \
