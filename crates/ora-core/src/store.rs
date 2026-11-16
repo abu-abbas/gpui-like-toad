@@ -613,6 +613,8 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
+        // Test-only scratch dir, unique per process id and test name.
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let dir = env::temp_dir().join(format!(
             "gpui-like-toad-store-test-{}-{name}",
             std::process::id()

@@ -185,6 +185,8 @@ mod tests {
     #[test]
     fn xlsx_round_trips_through_a_file() {
         let bytes = to_xlsx(&sample()).unwrap();
+        // Test-only scratch file, unique per process id; no secrets involved.
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let path = std::env::temp_dir().join(format!(
             "gpui-like-toad-xlsx-test-{}.xlsx",
             std::process::id()
