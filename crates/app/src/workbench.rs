@@ -815,8 +815,7 @@ impl Workbench {
         // on the mouse-down event, so a double-click arrives as a second
         // click with `click_count >= 2`. The first click still runs the
         // single-click describe below; the data query supersedes it.
-        let double_click =
-            matches!(event, ClickEvent::Mouse(m) if m.down.click_count >= 2);
+        let double_click = matches!(event, ClickEvent::Mouse(m) if m.down.click_count >= 2);
         if double_click && schema::is_describable_group(group) {
             self.open_table_data(owner, name, window, cx);
             return;
@@ -1023,11 +1022,7 @@ impl Workbench {
                 "lihat Messages".to_string(),
             );
         }
-        (
-            theme.muted_foreground,
-            "Disconnected",
-            String::new(),
-        )
+        (theme.muted_foreground, "Disconnected", String::new())
     }
 
     // ----- rendering: chrome -----
@@ -1315,7 +1310,9 @@ impl Workbench {
                 .w(px(28.))
                 .rounded(px(RADIUS_MD))
                 .hover(|this| this.bg(theme.secondary))
-                .on_click(cx.listener(|this, _, window, cx| this.toggle_connection_form(window, cx)))
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.toggle_connection_form(window, cx)),
+                )
                 .child(icon(IconName::Plus, 16., theme.muted_foreground)),
         );
         panel = panel.child(header);
@@ -2087,10 +2084,7 @@ impl Workbench {
     /// One Export dropdown (CSV/XLSX) via the component `DropdownMenu`
     /// API. The trigger shows no chevron glyph: `Button` renders none
     /// automatically and a unicode chevron is not allowed in this UI.
-    fn render_export_dropdown(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_export_dropdown(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let has_result = self.active_tab().last_result.is_some();
         let view = cx.entity();
         Button::new("export")
@@ -2870,7 +2864,15 @@ mod tests {
         assert_eq!(page_items(0, 3), vec![Page(0), Page(1), Page(2)]);
         assert_eq!(
             page_items(0, 7),
-            vec![Page(0), Page(1), Page(2), Page(3), Page(4), Page(5), Page(6)]
+            vec![
+                Page(0),
+                Page(1),
+                Page(2),
+                Page(3),
+                Page(4),
+                Page(5),
+                Page(6)
+            ]
         );
         assert_eq!(
             page_items(0, 9),
