@@ -1,6 +1,8 @@
-# gpui-like-toad
+# Ora The Explorer
 
-Semacam Toad for Oracle, tapi ditulis ulang di Rust dengan [gpui-kit](https://gpui-kit.com) — ringan, satu binary, tanpa install Oracle Client.
+Semacam Toad for Oracle (namanya plesetan dari *Dora The Explorer*), tapi ditulis ulang di Rust dengan [gpui-kit](https://gpui-kit.com) — ringan, satu binary, tanpa install Oracle Client.
+
+Nama tampilan app adalah **Ora The Explorer** (judul window, menu macOS, nama `.app`, file rilis). Nama crate/biner, folder config (`gpui-like-toad`), bundle identifier macOS, dan service keychain sengaja tetap `gpui-like-toad` supaya koneksi dan password yang sudah tersimpan tidak hilang.
 
 > Status: MVP. Home ala Navicat, explorer ala Toad (dropdown schema, double klik buka data, klik kanan View Script / Export / Import), SQL editor, result grid, export, dan explain plan sudah ada.
 
@@ -69,7 +71,7 @@ Isi username, connect string, dan password, lalu **Connect**. Connect string bis
 - Connect descriptor penuh: `(DESCRIPTION=(ADDRESS=...)(CONNECT_DATA=(SERVICE_NAME=...)))`
 - Alias `tnsnames.ora` (driver membaca file konfigurasinya)
 
-Password tidak pernah disimpan ke disk — hanya hidup di memori selama sesi berjalan. Tidak ada penyimpanan profil di MVP ini; itu follow-up (rencananya pakai keychain OS, bukan file plaintext).
+Password tidak pernah ditulis ke file profil (`connections.json`). Kalau centang **Save password** di dialog koneksi, password disimpan di keychain OS (macOS Keychain, Windows Credential Manager, Secret Service/GNOME Keyring di Linux) dengan service `gpui-like-toad` dan account = id profil, lalu **Open**/**Connect** langsung jalan tanpa dialog. Lepas centangnya atau hapus profilnya, entri keychain ikut dihapus. Di macOS, build yang belum di-sign bisa minta izin Keychain lagi tiap habis build ulang.
 
 Catatan: statement tidak boleh diakhiri `;` atau `/` saat dikirim ke driver — aplikasi otomatis membersihkannya sebelum eksekusi.
 

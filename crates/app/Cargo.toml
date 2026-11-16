@@ -1,7 +1,7 @@
 [package]
 name = "gpui-like-toad"
 version = "0.1.0"
-description = "Toad-for-Oracle-like desktop workbench in Rust + gpui-kit"
+description = "Ora The Explorer: Toad-like Oracle desktop workbench in Rust + gpui-kit"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -12,3 +12,7 @@ ora-driver = { path = "../ora-driver" }
 # `syntect` enables SQL syntax highlighting in the editor with a small
 # footprint (no Tree-sitter grammars bundled).
 gpui-kit = { version = "0.9.1", features = ["syntect"] }
+# Saved connection passwords live in the OS credential store: macOS
+# Keychain, Windows Credential Manager, Secret Service on Linux (pure-Rust
+# D-Bus via zbus, so no libdbus needed at build time).
+keyring = "4.2"

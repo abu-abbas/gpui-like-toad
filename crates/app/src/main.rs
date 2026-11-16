@@ -1,3 +1,15 @@
+/// Display name shown to people: window title, macOS app menu, Home and
+/// About. A macro (not a const) so it can be used inside `concat!`.
+/// Crate/binary name, config directory, bundle identifier and keychain
+/// service intentionally stay `gpui-like-toad` so existing profiles and
+/// saved passwords keep working.
+macro_rules! app_name {
+    () => {
+        "Ora The Explorer"
+    };
+}
+
+mod keychain;
 mod plan;
 mod results;
 mod schema;
@@ -38,7 +50,7 @@ fn main() {
     // Checking for --version/-V is not a security operation: argv[0] is never read.
     // nosemgrep: rust.lang.security.args.args
     if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
-        println!("gpui-like-toad {}", env!("CARGO_PKG_VERSION"));
+        println!(concat!(app_name!(), " {}"), env!("CARGO_PKG_VERSION"));
         return;
     }
     let app = application()
@@ -101,14 +113,14 @@ fn install_menus(cx: &mut App) {
     cx.on_action(|_: &ToggleFullScreen, cx| with_active_window(cx, |w| w.toggle_fullscreen()));
 
     cx.set_menus([
-        Menu::new("DB Explorer").items([
+        Menu::new(app_name!()).items([
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Hide DB Explorer", Hide),
+            MenuItem::action(concat!("Hide ", app_name!()), Hide),
             MenuItem::action("Hide Others", HideOthers),
             MenuItem::action("Show All", ShowAll),
             MenuItem::separator(),
-            MenuItem::action("Quit DB Explorer", Quit),
+            MenuItem::action(concat!("Quit ", app_name!()), Quit),
         ]),
         Menu::new("File").items([MenuItem::action("New Window", NewWindow)]),
         Menu::new("Edit").items([
@@ -147,7 +159,7 @@ fn open_main_window(cx: &mut App) {
         },
     )));
     options.titlebar = Some(TitlebarOptions {
-        title: Some("DB Explorer".into()),
+        title: Some(app_name!().into()),
         appears_transparent: false,
         traffic_light_position: None,
     });

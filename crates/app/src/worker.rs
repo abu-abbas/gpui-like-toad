@@ -10,6 +10,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 
+use ora_core::credentials::{CredentialStore as _, ExposeSecret as _, SecretString};
 use ora_core::demo::DemoClient;
 use ora_core::export::{to_csv, to_xlsx};
 use ora_core::import::{map_columns, parse_csv, quote_ident};
@@ -36,10 +37,36 @@ impl ExportFormat {
 }
 use ora_driver::ThinClient;
 
+/// Where a connect gets its password. `Saved` is read from the OS keychain
+/// here on the worker thread, so a keychain prompt never blocks the UI and
+/// the password never passes through UI state.
+pub enum Password {
+    Typed(SecretString),
+    Saved { profile_id: String },
+}
+
+/// Message for a profile marked "Save password" whose keychain entry is
+/// gone (removed by hand, or saved on another machine).
+pub const NO_SAVED_PASSWORD: &str =
+    "Password tersimpan tidak ditemukan di keychain. Isi password lalu Connect.";
+
+impl Password {
+    fn resolve(self) -> Result<SecretString, String> {
+        match self {
+            Password::Typed(pw) => Ok(pw),
+            Password::Saved { profile_id } => match crate::keychain::store().get(&profile_id) {
+                Ok(Some(pw)) => Ok(pw),
+                Ok(None) => Err(NO_SAVED_PASSWORD.to_string()),
+                Err(err) => Err(err.to_string()),
+            },
+        }
+    }
+}
+
 pub enum Job {
     Connect {
         profile: ConnectionProfile,
-        password: String,
+        password: Password,
         demo: bool,
     },
     /// Open a throwaway session with the given profile and close it again,
@@ -47,7 +74,7 @@ pub enum Job {
     /// connection manager's Test button.
     TestConnect {
         profile: ConnectionProfile,
-        password: String,
+        password: Password,
     },
     /// Run the editor text: SELECT goes to `query()`, anything else to
     /// `execute()`. Decided here so the UI has one code path.
@@ -173,12 +200,17 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             password,
             demo,
         } => {
+            let password = match password.resolve() {
+                Ok(pw) => pw,
+                Err(message) => return Response::Failed(message),
+            };
             let mut new_client: Box<dyn DbClient> = if demo {
                 Box::new(DemoClient::new())
             } else {
                 Box::new(ThinClient::new())
             };
-            match new_client.connect(&profile, &password) {
+            // `password` is zeroed when it drops at the end of this arm.
+            match new_client.connect(&profile, password.expose_secret()) {
                 Ok(info) => {
                     if let Some(mut old) = client.replace(new_client) {
                         old.disconnect();
@@ -197,9 +229,13 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
         Job::TestConnect { profile, password } => {
             // A separate throwaway client: testing must never disturb the
             // live session (or log it out).
+            let password = match password.resolve() {
+                Ok(pw) => pw,
+                Err(message) => return Response::Tested(Err(message)),
+            };
             let mut probe = ThinClient::new();
             let outcome = probe
-                .connect(&profile, &password)
+                .connect(&profile, password.expose_secret())
                 .map_err(|e| e.to_string());
             probe.disconnect();
             Response::Tested(outcome)
