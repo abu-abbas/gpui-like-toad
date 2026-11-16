@@ -3,8 +3,8 @@ use std::time::Instant;
 use crate::client::{DbClient, DbError, DbInfo};
 use crate::filter::TableFilter;
 use crate::model::{
-    ColumnDef, ColumnInfo, ConnectionProfile, ObjectKind, PlanNode, QueryResult, SchemaObject,
-    Value,
+    ColumnDef, ColumnInfo, ConnectionProfile, IndexDef, ObjectKind, PlanNode, QueryResult,
+    SchemaObject, Value,
 };
 
 /// In-memory fake Oracle used by Demo mode and by tests.
@@ -418,6 +418,26 @@ impl DbClient for DemoClient {
             .collect())
     }
 
+    fn list_indexes(&mut self, _owner: &str, table: &str) -> Result<Vec<IndexDef>, DbError> {
+        self.require_connected()?;
+        let index = |name: &str, unique: bool, columns: &[&str]| IndexDef {
+            name: name.to_string(),
+            unique,
+            index_type: "NORMAL".to_string(),
+            columns: columns.iter().map(|c| c.to_string()).collect(),
+            status: "VALID".to_string(),
+        };
+        Ok(match table.trim().to_ascii_uppercase().as_str() {
+            "EMPLOYEES" => vec![
+                index("EMP_EMAIL_UK", true, &["EMAIL"]),
+                index("EMP_EMP_ID_PK", true, &["EMPLOYEE_ID"]),
+                index("EMP_NAME_IX", false, &["LAST_NAME", "FIRST_NAME"]),
+            ],
+            "DEPARTMENTS" => vec![index("DEPT_LOCATION_IX", false, &["LOCATION_ID"])],
+            _ => Vec::new(),
+        })
+    }
+
     fn explain_plan(&mut self, sql: &str) -> Result<Vec<String>, DbError> {
         self.require_connected()?;
         let _ = sql;
@@ -595,6 +615,19 @@ mod tests {
         assert!(client
             .query_binds("SELECT * FROM employees WHERE x = :1", &["1".into()], 10)
             .is_err());
+    }
+
+    #[test]
+    fn demo_lists_indexes_per_table() {
+        let mut client = connected();
+        let indexes = client.list_indexes("HR", "employees").unwrap();
+        assert_eq!(indexes.len(), 3);
+        assert!(indexes[0].unique);
+        assert_eq!(indexes[2].columns, vec!["LAST_NAME", "FIRST_NAME"]);
+        assert!(client
+            .list_indexes("HR", "EMP_DETAILS_VIEW")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

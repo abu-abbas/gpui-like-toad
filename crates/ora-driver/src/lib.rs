@@ -12,8 +12,8 @@ use std::time::Instant;
 use ora_core::completion::CatalogObject;
 use ora_core::sql::clean_statement;
 use ora_core::{
-    ColumnDef, ColumnInfo, ConnectionProfile, DbClient, DbError, DbInfo, ObjectKind, PlanNode,
-    QueryResult, SchemaObject, Value,
+    ColumnDef, ColumnInfo, ConnectionProfile, DbClient, DbError, DbInfo, IndexDef, ObjectKind,
+    PlanNode, QueryResult, SchemaObject, Value,
 };
 
 /// Blocking Oracle client. Owned exclusively by the GUI's background DB
@@ -388,6 +388,49 @@ impl DbClient for ThinClient {
                 kind: object.kind,
             })
             .collect())
+    }
+
+    fn list_indexes(&mut self, owner: &str, table: &str) -> Result<Vec<IndexDef>, DbError> {
+        let conn = self.conn()?;
+        let owner_upper = owner.trim().to_ascii_uppercase();
+        let table_upper = table.trim().to_ascii_uppercase();
+        let owner_param: &str = &owner_upper;
+        let table_param: &str = &table_upper;
+        // One row per index column, in key order; grouped below. (No
+        // LISTAGG: it raises ORA-01489 on very wide keys.)
+        let cursor = conn
+            .query(
+                "SELECT i.index_name, i.uniqueness, i.index_type, i.status, c.column_name \
+                 FROM all_indexes i \
+                 LEFT JOIN all_ind_columns c \
+                   ON c.index_owner = i.owner AND c.index_name = i.index_name \
+                 WHERE i.table_owner = :1 AND i.table_name = :2 \
+                 ORDER BY i.index_name, c.column_position",
+                &[&owner_param, &table_param],
+            )
+            .map_err(db_err)?;
+        let mut indexes: Vec<IndexDef> = Vec::new();
+        for row in cursor {
+            let row = row.map_err(db_err)?;
+            let name: String = row.get(0).map_err(db_err)?;
+            let uniqueness: Option<String> = row.get(1).map_err(db_err)?;
+            let index_type: Option<String> = row.get(2).map_err(db_err)?;
+            let status: Option<String> = row.get(3).map_err(db_err)?;
+            let column: Option<String> = row.get(4).map_err(db_err)?;
+            if indexes.last().map(|i| i.name.as_str()) != Some(name.as_str()) {
+                indexes.push(IndexDef {
+                    name,
+                    unique: uniqueness.as_deref() == Some("UNIQUE"),
+                    index_type: index_type.unwrap_or_default(),
+                    columns: Vec::new(),
+                    status: status.unwrap_or_default(),
+                });
+            }
+            if let (Some(index), Some(column)) = (indexes.last_mut(), column) {
+                index.columns.push(column);
+            }
+        }
+        Ok(indexes)
     }
 
     fn explain_plan(&mut self, sql: &str) -> Result<Vec<String>, DbError> {
