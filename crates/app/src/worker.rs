@@ -17,8 +17,8 @@ use ora_core::export::{to_csv, to_xlsx};
 use ora_core::import::{map_columns, parse_csv, quote_ident};
 use ora_core::sql::statement_kind;
 use ora_core::{
-    ColumnDef, ConnectionProfile, DbClient, DbError, DbInfo, ObjectKind, PlanNode, QueryResult,
-    SchemaObject, TableFilter, DEFAULT_MAX_ROWS, EXPORT_MAX_ROWS,
+    ColumnDef, ConnectionProfile, DbClient, DbError, DbInfo, IndexDef, ObjectKind, PlanNode,
+    QueryResult, SchemaObject, TableFilter, DEFAULT_MAX_ROWS, EXPORT_MAX_ROWS,
 };
 
 /// File format for "Export Data" on a whole table.
@@ -120,6 +120,11 @@ pub enum Job {
         owner: String,
         name: String,
     },
+    /// Indexes of one table, for the data tab's Index view.
+    Indexes {
+        owner: String,
+        name: String,
+    },
     Explain {
         sql: String,
     },
@@ -147,6 +152,7 @@ pub enum Response {
     },
     Imported(u64),
     Described(Vec<ColumnDef>),
+    Indexes(Vec<IndexDef>),
     Plan(Vec<String>),
     /// Structured plan nodes for the tree panel, plus the DBMS_XPLAN text
     /// lines for the Explain Plan sub-tab (empty when the text path failed).
@@ -345,6 +351,13 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
         Job::Describe { owner, name } => match client.as_mut() {
             Some(client) => match client.describe_table(&owner, &name) {
                 Ok(defs) => Response::Described(defs),
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
+        Job::Indexes { owner, name } => match client.as_mut() {
+            Some(client) => match client.list_indexes(&owner, &name) {
+                Ok(indexes) => Response::Indexes(indexes),
                 Err(err) => Response::Failed(err.to_string()),
             },
             None => Response::Failed("not connected".to_string()),

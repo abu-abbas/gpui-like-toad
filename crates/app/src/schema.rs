@@ -2,7 +2,7 @@
 //! one tab per object category, and a flat, filterable object list under
 //! it. Also turns a `DESCRIBE` into a grid-ready [`QueryResult`].
 
-use ora_core::{ColumnDef, ColumnInfo, ObjectKind, QueryResult, SchemaObject, Value};
+use ora_core::{ColumnDef, ColumnInfo, IndexDef, ObjectKind, QueryResult, SchemaObject, Value};
 
 /// One tab of the object browser. "Procs" groups procedures, functions and
 /// packages, as Toad does.
@@ -114,6 +114,37 @@ pub fn describe_to_result(defs: &[ColumnDef]) -> QueryResult {
                     Value::Text(d.data_type.clone()),
                     Value::Text(if d.nullable { "YES" } else { "NO" }.to_string()),
                     d.default.clone().map_or(Value::Null, Value::Text),
+                ]
+            })
+            .collect(),
+        truncated: false,
+        elapsed: Default::default(),
+    }
+}
+
+/// Render a table's indexes as a grid result for the Index view.
+pub fn indexes_to_result(indexes: &[IndexDef]) -> QueryResult {
+    let column = |name: &str| ColumnInfo {
+        name: name.to_string(),
+        data_type: "VARCHAR2".to_string(),
+    };
+    QueryResult {
+        columns: vec![
+            column("INDEX_NAME"),
+            column("UNIQUE"),
+            column("COLUMNS"),
+            column("TYPE"),
+            column("STATUS"),
+        ],
+        rows: indexes
+            .iter()
+            .map(|i| {
+                vec![
+                    Value::Text(i.name.clone()),
+                    Value::Text(if i.unique { "YES" } else { "NO" }.to_string()),
+                    Value::Text(i.columns.join(", ")),
+                    Value::Text(i.index_type.clone()),
+                    Value::Text(i.status.clone()),
                 ]
             })
             .collect(),

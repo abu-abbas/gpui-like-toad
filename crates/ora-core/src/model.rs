@@ -187,6 +187,19 @@ pub struct ColumnDef {
     pub default: Option<String>,
 }
 
+/// One index on a table, from `ALL_INDEXES` + `ALL_IND_COLUMNS`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexDef {
+    pub name: String,
+    pub unique: bool,
+    /// e.g. "NORMAL", "BITMAP", "FUNCTION-BASED NORMAL".
+    pub index_type: String,
+    /// Indexed columns in key order.
+    pub columns: Vec<String>,
+    /// e.g. "VALID", "UNUSABLE".
+    pub status: String,
+}
+
 /// One row of an execution plan, as read from `PLAN_TABLE` after
 /// `EXPLAIN PLAN`. The flat list forms a tree through `parent_id`: the
 /// root (`SELECT STATEMENT`) has `parent_id == None` (PLAN_TABLE id 0).
