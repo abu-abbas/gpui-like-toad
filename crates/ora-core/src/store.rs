@@ -8,22 +8,44 @@
 //! file can never break startup. Saves return `io::Result` so the UI can
 //! report a failure once, in the messages area.
 //!
-//! Passwords are NEVER persisted here. [`SavedProfile`] holds only the
-//! name, username, and connect string; the password is entered per
-//! connect and lives only in the editor widget.
+//! Passwords are NEVER written to these files. [`SavedProfile`] holds
+//! only an id, the name, username, connect string, and a `save_password`
+//! flag. When that flag is set the password lives in the OS keychain
+//! under the profile id (see [`crate::credentials`]), never on disk here.
 
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// A saved connection profile. No password field by design.
+/// A saved connection profile. No password field by design: when
+/// `save_password` is set, the password is in the OS keychain keyed by
+/// `id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedProfile {
+    /// Stable id, the keychain account name for this profile's password.
+    /// Unlike the name it never changes when the profile is edited.
+    pub id: String,
     pub name: String,
     pub username: String,
     pub connect_string: String,
+    /// The user ticked "Save password": connect without asking.
+    pub save_password: bool,
+}
+
+/// A new, unique profile id: wall-clock nanoseconds, process id, and a
+/// per-process counter, in hex. Not a secret, only needs to be unique
+/// within one user's profile list.
+pub fn new_profile_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("p{nanos:x}-{:x}-{n:x}", std::process::id())
 }
 
 /// One executed statement in the history list. Newest first.
@@ -477,28 +499,58 @@ fn write_json_file(dir: &Path, file: &str, value: &Json) -> std::io::Result<()> 
 
 fn profile_to_json(p: &SavedProfile) -> Json {
     Json::Obj(vec![
+        ("id".to_string(), Json::Str(p.id.clone())),
         ("name".to_string(), Json::Str(p.name.clone())),
         ("username".to_string(), Json::Str(p.username.clone())),
         (
             "connect_string".to_string(),
             Json::Str(p.connect_string.clone()),
         ),
+        ("save_password".to_string(), Json::Bool(p.save_password)),
     ])
 }
 
+/// Parse one profile. Files from before ids existed have no `id`; those
+/// get `None` here and a fresh id from the loader.
 fn profile_from_json(v: &Json) -> Option<SavedProfile> {
     Some(SavedProfile {
+        id: v
+            .get("id")
+            .and_then(Json::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_default(),
         name: v.get("name")?.as_str()?.to_string(),
         username: v.get("username")?.as_str()?.to_string(),
         connect_string: v.get("connect_string")?.as_str()?.to_string(),
+        save_password: v
+            .get("save_password")
+            .and_then(Json::as_bool)
+            .unwrap_or(false),
     })
 }
 
+/// Load saved profiles. Profiles without an id (older files) or with a
+/// duplicate id get a new one, and the file is rewritten best-effort so
+/// the id stays stable: it is the keychain key for a saved password.
 pub fn load_profiles_in(dir: &Path) -> Vec<SavedProfile> {
-    match read_json_file(&dir.join("connections.json")) {
+    let mut profiles: Vec<SavedProfile> = match read_json_file(&dir.join("connections.json")) {
         Some(Json::Arr(items)) => items.iter().filter_map(profile_from_json).collect(),
         _ => Vec::new(),
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut changed = false;
+    for p in &mut profiles {
+        if p.id.is_empty() || !seen.insert(p.id.clone()) {
+            p.id = new_profile_id();
+            seen.insert(p.id.clone());
+            changed = true;
+        }
     }
+    if changed {
+        let _ = save_profiles_in(dir, &profiles);
+    }
+    profiles
 }
 
 pub fn save_profiles_in(dir: &Path, profiles: &[SavedProfile]) -> std::io::Result<()> {
@@ -688,14 +740,18 @@ mod tests {
         assert!(load_profiles_in(&dir).is_empty());
         let profiles = vec![
             SavedProfile {
+                id: "p1".to_string(),
                 name: "HR Local".to_string(),
                 username: "hr".to_string(),
                 connect_string: "localhost:1521/FREEPDB1".to_string(),
+                save_password: true,
             },
             SavedProfile {
+                id: "p2".to_string(),
                 name: "Prod \"A\"".to_string(),
                 username: "app".to_string(),
                 connect_string: "db:1521/PROD".to_string(),
+                save_password: false,
             },
         ];
         save_profiles_in(&dir, &profiles).unwrap();
@@ -711,6 +767,50 @@ mod tests {
         .unwrap();
         assert_eq!(load_profiles_in(&dir).len(), 1);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profiles_file_never_holds_a_password() {
+        let dir = scratch("profiles-nopw");
+        let profiles = vec![SavedProfile {
+            id: "p1".to_string(),
+            name: "HR".to_string(),
+            username: "hr".to_string(),
+            connect_string: "db:1521/X".to_string(),
+            save_password: true,
+        }];
+        save_profiles_in(&dir, &profiles).unwrap();
+        let text = fs::read_to_string(dir.join("connections.json")).unwrap();
+        assert!(!text.contains("\"password\""), "{text}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_profiles_get_stable_ids() {
+        let dir = scratch("profiles-legacy");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("connections.json"),
+            r#"[{"name":"a","username":"u","connect_string":"c"},
+               {"id":"dup","name":"b","username":"u","connect_string":"c"},
+               {"id":"dup","name":"c","username":"u","connect_string":"c"}]"#,
+        )
+        .unwrap();
+        let first = load_profiles_in(&dir);
+        assert_eq!(first.len(), 3);
+        assert!(first.iter().all(|p| !p.id.is_empty() && !p.save_password));
+        assert_eq!(first[1].id, "dup");
+        assert_ne!(first[2].id, "dup");
+        assert_ne!(first[0].id, first[2].id);
+        // Ids were written back, so a second load sees the same ones.
+        assert_eq!(load_profiles_in(&dir), first);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profile_ids_are_unique() {
+        let ids: std::collections::HashSet<_> = (0..1000).map(|_| new_profile_id()).collect();
+        assert_eq!(ids.len(), 1000);
     }
 
     #[test]

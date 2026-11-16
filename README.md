@@ -69,7 +69,7 @@ Isi username, connect string, dan password, lalu **Connect**. Connect string bis
 - Connect descriptor penuh: `(DESCRIPTION=(ADDRESS=...)(CONNECT_DATA=(SERVICE_NAME=...)))`
 - Alias `tnsnames.ora` (driver membaca file konfigurasinya)
 
-Password tidak pernah disimpan ke disk — hanya hidup di memori selama sesi berjalan. Tidak ada penyimpanan profil di MVP ini; itu follow-up (rencananya pakai keychain OS, bukan file plaintext).
+Password tidak pernah ditulis ke file profil (`connections.json`). Kalau centang **Save password** di dialog koneksi, password disimpan di keychain OS (macOS Keychain, Windows Credential Manager, Secret Service/GNOME Keyring di Linux) dengan service `gpui-like-toad` dan account = id profil, lalu **Open**/**Connect** langsung jalan tanpa dialog. Lepas centangnya atau hapus profilnya, entri keychain ikut dihapus. Di macOS, build yang belum di-sign bisa minta izin Keychain lagi tiap habis build ulang.
 
 Catatan: statement tidak boleh diakhiri `;` atau `/` saat dikirim ke driver — aplikasi otomatis membersihkannya sebelum eksekusi.
 
