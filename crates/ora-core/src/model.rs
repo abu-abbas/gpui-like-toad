@@ -171,6 +171,41 @@ pub struct ColumnDef {
     pub default: Option<String>,
 }
 
+/// One row of an execution plan, as read from `PLAN_TABLE` after
+/// `EXPLAIN PLAN`. The flat list forms a tree through `parent_id`: the
+/// root (`SELECT STATEMENT`) has `parent_id == None` (PLAN_TABLE id 0).
+/// `cost` and `cardinality` are `None` when the optimizer did not report
+/// them for that step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanNode {
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    /// e.g. "TABLE ACCESS", "NESTED LOOPS", "SELECT STATEMENT".
+    pub operation: String,
+    /// e.g. "FULL", "BY INDEX ROWID", "UNIQUE SCAN". Empty when none.
+    pub options: String,
+    /// Object the step touches, e.g. "EMPLOYEES". Empty when none.
+    pub object_name: String,
+    pub cost: Option<i64>,
+    pub cardinality: Option<i64>,
+}
+
+impl PlanNode {
+    /// One-line label for the tree row: operation, options, and object.
+    pub fn label(&self) -> String {
+        let mut label = self.operation.clone();
+        if !self.options.is_empty() {
+            label.push(' ');
+            label.push_str(&self.options);
+        }
+        if !self.object_name.is_empty() {
+            label.push(' ');
+            label.push_str(&self.object_name);
+        }
+        label
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

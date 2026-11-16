@@ -13,10 +13,12 @@ pub mod demo;
 pub mod export;
 pub mod model;
 pub mod sql;
+pub mod store;
 
 pub use client::{DbClient, DbError, DbInfo};
 pub use model::{
-    ColumnDef, ColumnInfo, ConnectionProfile, ObjectKind, QueryResult, SchemaObject, Value,
+    ColumnDef, ColumnInfo, ConnectionProfile, ObjectKind, PlanNode, QueryResult, SchemaObject,
+    Value,
 };
 
 /// Default cap for rows fetched into the grid. Queries that hit the cap set
