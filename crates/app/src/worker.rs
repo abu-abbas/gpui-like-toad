@@ -357,6 +357,9 @@ mod tests {
 
     #[test]
     fn export_then_import_round_trips_through_a_file() {
+        // Test-only scratch dir, removed at the end; no security decision
+        // depends on it.
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join(format!("gpui-like-toad-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("departments.csv");
@@ -372,6 +375,9 @@ mod tests {
 
     #[test]
     fn import_rejects_unknown_columns() {
+        // Test-only scratch dir, removed at the end; no security decision
+        // depends on it.
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join(format!("gpui-like-toad-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bad.csv");
