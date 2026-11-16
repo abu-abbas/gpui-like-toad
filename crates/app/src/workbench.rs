@@ -104,6 +104,16 @@ enum TabKind {
     Script,
 }
 
+/// The connection last opened from this window, kept after disconnect so
+/// the sidebar can still show it (red) and offer Connect / Edit.
+#[derive(Clone)]
+struct LastConnection {
+    profile: ConnectionProfile,
+    demo: bool,
+    /// Index into the saved profiles, when it was opened from one.
+    profile_ix: Option<usize>,
+}
+
 /// The explorer object a context-menu action applies to.
 #[derive(Clone)]
 struct ObjectRef {
@@ -193,6 +203,7 @@ pub struct Workbench {
     pending_sql: Option<String>,
     op_generation: u64,
     connect_error: Option<String>,
+    last_connection: Option<LastConnection>,
     /// Tab (by id) that the in-flight operation writes its result into, so
     /// switching tabs mid-query never lands the result in the wrong tab.
     pending_tab: Option<u64>,
@@ -270,6 +281,7 @@ impl Workbench {
             pending_sql: None,
             op_generation: 0,
             connect_error: None,
+            last_connection: None,
             pending_tab: None,
             window_handle: window.window_handle(),
             schemas: Vec::new(),
@@ -416,7 +428,7 @@ impl Workbench {
         let (profile, password) = if demo {
             (
                 ConnectionProfile {
-                    name: "Demo".to_string(),
+                    name: "Demo database".to_string(),
                     username: "DEMO".to_string(),
                     connect_string: "demo".to_string(),
                 },
@@ -449,6 +461,11 @@ impl Workbench {
         }
         self.demo_mode = demo;
         self.connect_error = None;
+        self.last_connection = Some(LastConnection {
+            profile: profile.clone(),
+            demo,
+            profile_ix: if demo { None } else { self.editing_profile },
+        });
         self.status = "Menghubungkan...".to_string();
         self.spawn_db(
             Job::Connect {
@@ -886,6 +903,13 @@ impl Workbench {
             return;
         }
         let removed = self.profiles.remove(ix);
+        if let Some(last) = &mut self.last_connection {
+            last.profile_ix = match last.profile_ix {
+                Some(i) if i == ix => None,
+                Some(i) if i > ix => Some(i - 1),
+                other => other,
+            };
+        }
         if self.editing_profile == Some(ix) {
             self.editing_profile = None;
         } else if let Some(editing) = self.editing_profile {
@@ -1652,12 +1676,52 @@ impl Workbench {
         panel
     }
 
+    /// Connect again to the last connection: demo reconnects directly;
+    /// a real database opens its dialog, since passwords are never kept.
+    fn reconnect_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(last) = self.last_connection.clone() else {
+            return;
+        };
+        if last.demo {
+            self.connect(true, cx);
+        } else {
+            self.edit_last_connection(window, cx);
+        }
+    }
+
+    fn edit_last_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(last) = self.last_connection.clone() else {
+            return;
+        };
+        if last.demo {
+            return;
+        }
+        match last.profile_ix.filter(|ix| *ix < self.profiles.len()) {
+            Some(ix) => self.edit_profile(ix, window, cx),
+            None => {
+                let profile = SavedProfile {
+                    name: last.profile.name.clone(),
+                    username: last.profile.username.clone(),
+                    connect_string: last.profile.connect_string.clone(),
+                };
+                self.editing_profile = None;
+                self.fill_form(&profile, window, cx);
+                self.form_notice = None;
+                self.show_connection_form = true;
+                cx.notify();
+            }
+        }
+    }
+
+    /// Minimal connection row: status dot (green connected, red not),
+    /// connection name, and a ⋮ menu with Refresh, Connect/Disconnect,
+    /// and Edit connection.
     fn render_session_card(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let Some(session) = &self.session else {
+        let Some(last) = self.last_connection.clone() else {
             return div()
                 .px(px(SPACE_3))
                 .pt(px(SPACE_3))
@@ -1667,62 +1731,88 @@ impl Workbench {
                 ))
                 .into_any_element();
         };
-        let mode = if self.demo_mode { "Demo" } else { "Oracle" };
+        let connected = self.session.is_some();
+        let connecting = self.busy && matches!(self.pending_op, Some(PendingOp::Connect));
+        let dot = if connecting {
+            theme.warning
+        } else if connected {
+            theme.success
+        } else {
+            theme.danger
+        };
+        let view = cx.entity();
+        let busy = self.busy;
+        let demo = last.demo;
+        let menu_button = Button::new("connection-actions")
+            .icon(IconName::EllipsisVertical)
+            .ghost()
+            .small()
+            .dropdown_menu(move |menu, _, _| {
+                let refresh_view = view.clone();
+                let toggle_view = view.clone();
+                let edit_view = view.clone();
+                menu.min_w(px(200.))
+                    .item(
+                        PopupMenuItem::new("Refresh")
+                            .icon(Icon::new(IconName::RefreshCw))
+                            .disabled(!connected || busy)
+                            .on_click(move |_, _, cx: &mut App| {
+                                refresh_view.update(cx, |this, cx| this.refresh_schema(cx));
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(if connected { "Disconnect" } else { "Connect" })
+                            .icon(Icon::new(if connected {
+                                IconName::LogOut
+                            } else {
+                                IconName::LogIn
+                            }))
+                            .disabled(busy)
+                            .on_click(move |_, window, cx: &mut App| {
+                                toggle_view.update(cx, |this, cx| {
+                                    if this.session.is_some() {
+                                        this.disconnect(cx);
+                                    } else {
+                                        this.reconnect_last(window, cx);
+                                    }
+                                });
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Edit connection")
+                            .icon(Icon::new(IconName::SquarePen))
+                            .disabled(demo)
+                            .on_click(move |_, window, cx: &mut App| {
+                                edit_view
+                                    .update(cx, |this, cx| this.edit_last_connection(window, cx));
+                            }),
+                    )
+            });
         div()
-            .px(px(SPACE_3))
-            .pt(px(SPACE_3))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(SPACE_2))
+            .mx(px(SPACE_3))
+            .mt(px(SPACE_2))
+            .pl(px(SPACE_2))
+            .h(px(TOOLBAR_HEIGHT))
+            .rounded(px(RADIUS_MD))
+            .border_1()
+            .border_color(theme.border)
+            .child(status_dot(dot))
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(SPACE_1))
-                    .p(px(SPACE_3))
-                    .rounded(px(RADIUS_MD))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.popover)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(SPACE_2))
-                            .child(status_dot(theme.success))
-                            .child(
-                                div()
-                                    .text_size(px(FONT_LABEL))
-                                    .line_height(px(LEADING_LABEL))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.foreground)
-                                    .child(format!("{} · {}", session.user, mode)),
-                            ),
-                    )
-                    .child(caption_text(
-                        format!("{} {}", session.database, session.version),
-                        theme,
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(SPACE_2))
-                            .pt(px(SPACE_1))
-                            .child(
-                                Button::new("disconnect")
-                                    .label("Disconnect")
-                                    .icon(IconName::LogOut)
-                                    .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx))),
-                            )
-                            .child(
-                                Button::new("refresh-schema")
-                                    .label("Refresh")
-                                    .icon(IconName::RefreshCw)
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.refresh_schema(cx)),
-                                    ),
-                            ),
-                    ),
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_size(px(FONT_LABEL))
+                    .line_height(px(LEADING_LABEL))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.foreground)
+                    .child(last.profile.name.clone()),
             )
+            .child(menu_button)
             .into_any_element()
     }
 
