@@ -3,7 +3,9 @@
 # Sistem Akademis). Versi: 0.1.<run_number>. Rilis lama dipangkas
 # (sisakan 5 terakhir). Biner belum ditandatangani (code signing menyusul);
 # Windows SmartScreen akan menampilkan peringatan saat pertama kali
-# menjalankan .exe-nya.
+# menjalankan .exe-nya, dan macOS Gatekeeper akan memblokir .app/.dmg
+# sampai dibuka sekali lewat klik-kanan -> Open. macOS juga menerbitkan
+# .dmg berisi .app + symlink Applications (tinggal drag-and-drop).
 name: Release
 
 on:
@@ -101,6 +103,48 @@ jobs:
           mkdir -p out
           cp "$bin" "out/$out"
           ls -la out/
+      - if: runner.os == 'macOS'
+        name: Bundel .app dan DMG
+        shell: bash
+        run: |
+          app="bundle/gpui-like-toad.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp "target/release/gpui-like-toad" "$app/Contents/MacOS/gpui-like-toad"
+          cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>gpui-like-toad</string>
+            <key>CFBundleDisplayName</key>
+            <string>gpui-like-toad</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.github.abu-abbas.gpui-like-toad</string>
+            <key>CFBundleVersion</key>
+            <string>$VERSION</string>
+            <key>CFBundleShortVersionString</key>
+            <string>$VERSION</string>
+            <key>CFBundleExecutable</key>
+            <string>gpui-like-toad</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+          # Smoke test biner di dalam bundel (bukan cuma biner mentahnya).
+          "$app/Contents/MacOS/gpui-like-toad" --version
+          test "$("$app/Contents/MacOS/gpui-like-toad" --version)" = "gpui-like-toad $VERSION"
+          # DMG: .app + symlink ke /Applications (drag-and-drop).
+          mkdir -p dmg-staging
+          cp -R "$app" dmg-staging/
+          ln -s /Applications dmg-staging/Applications
+          hdiutil create -volname "gpui-like-toad $VERSION" \
+            -srcfolder dmg-staging -ov -format UDZO \
+            "out/gpui-like-toad-$VERSION-macos-arm64.dmg"
+          ls -la out/
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: binary-${{ matrix.suffix }}
@@ -127,7 +171,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ls -la out/
-          test "$(ls out/* | wc -l)" -eq 3
+          test "$(ls out/* | wc -l)" -eq 4
           notes=$(git log -n 15 --no-merges --pretty='- %s' -- crates | head -15)
           gh release create "v$VERSION" out/* \
             --title "gpui-like-toad $VERSION" \
