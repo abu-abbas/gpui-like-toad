@@ -9,6 +9,7 @@
 //! can be swapped without touching any UI code.
 
 pub mod client;
+pub mod completion;
 pub mod demo;
 pub mod export;
 pub mod import;

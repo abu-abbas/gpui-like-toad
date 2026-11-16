@@ -18,6 +18,9 @@ Semacam Toad for Oracle, tapi ditulis ulang di Rust dengan [gpui-kit](https://gp
 - **Export hasil query** — CSV/XLSX dari grid ke working directory.
 - **Explain plan** — tree plan + teks `DBMS_XPLAN.DISPLAY`.
 - **Commit / Rollback** — eksplisit, tidak ada auto-commit.
+- **Autocomplete SQL** — popup di kursor saat mengetik (atau `Ctrl+Space`): tabel/view setelah `FROM`/`JOIN`, kolom setelah `alias.`, objek setelah `schema.`, plus keyword dan fungsi. Pencocokan fuzzy, `Tab`/`Enter` untuk pilih, `Esc` untuk tutup. Metadata diambil sekali per schema di thread worker.
+
+  ![Autocomplete](docs/screenshots/autocomplete/columns-after-alias.png)
 
 | Home | New connection | Tab data |
 |---|---|---|
@@ -27,7 +30,7 @@ Semacam Toad for Oracle, tapi ditulis ulang di Rust dengan [gpui-kit](https://gp
 
 Screenshot diambil dari mode Demo di Xvfb (Linux, render Vulkan software).
 
-Yang sengaja belum ada di MVP: dock layout yang bisa di-drag, shortcut F5/F9, save dialog native, autocomplete, session browser, PL/SQL debugger. Semuanya tercatat sebagai follow-up, bukan lupa.
+Yang sengaja belum ada di MVP: dock layout yang bisa di-drag, shortcut F5/F9, save dialog native, session browser, PL/SQL debugger. Semuanya tercatat sebagai follow-up, bukan lupa.
 
 ## Cara jalan
 
@@ -128,7 +131,6 @@ Biner belum ditandatangani; code signing menyusul.
 - Dock layout (panel bisa di-drag/tab) pakai komponen Dock gpui-kit.
 - Shortcut Run (F5) dan Explain.
 - Save dialog native untuk export CSV.
-- Autocomplete nama tabel/kolom di editor.
 - Penyimpanan profil koneksi terenkripsi (keychain OS).
 - Fetch JSON/VECTOR sebagai teks JSON (saat ini tampil format Debug).
 - Riwayat query.

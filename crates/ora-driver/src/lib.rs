@@ -6,8 +6,10 @@
 //! pinned revision); its API surface used here is small and covered by the
 //! driver's own guide, and the `DbClient` trait isolates the GUI from it.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
+use ora_core::completion::CatalogObject;
 use ora_core::sql::clean_statement;
 use ora_core::{
     ColumnDef, ColumnInfo, ConnectionProfile, DbClient, DbError, DbInfo, ObjectKind, PlanNode,
@@ -326,6 +328,53 @@ impl DbClient for ThinClient {
             )));
         }
         Ok(defs)
+    }
+
+    fn catalog_objects(&mut self, owner: &str) -> Result<Vec<CatalogObject>, DbError> {
+        // Two dictionary queries for the whole schema instead of one
+        // describe per table: a real schema can hold thousands of tables.
+        let objects = self.list_objects(owner)?;
+        let conn = self.conn()?;
+        let owner_upper = owner.trim().to_ascii_uppercase();
+        let owner_param: &str = &owner_upper;
+        let cursor = conn
+            .query(
+                "SELECT table_name, column_name, data_type, data_length, data_precision, \
+                 data_scale, nullable FROM all_tab_columns \
+                 WHERE owner = :1 ORDER BY table_name, column_id",
+                &[&owner_param],
+            )
+            .map_err(db_err)?;
+        let mut columns: HashMap<String, Vec<ColumnDef>> = HashMap::new();
+        for row in cursor {
+            let row = row.map_err(db_err)?;
+            let table: String = row.get(0).map_err(db_err)?;
+            let name: String = row.get(1).map_err(db_err)?;
+            let data_type: String = row.get(2).map_err(db_err)?;
+            let length: Option<oracledb::OracleNumber> = row.get(3).map_err(db_err)?;
+            let precision: Option<oracledb::OracleNumber> = row.get(4).map_err(db_err)?;
+            let scale: Option<oracledb::OracleNumber> = row.get(5).map_err(db_err)?;
+            let nullable_flag: String = row.get(6).map_err(db_err)?;
+            columns.entry(table).or_default().push(ColumnDef {
+                name,
+                data_type: describe_type(&data_type, length, precision, scale),
+                nullable: nullable_flag == "Y",
+                default: None,
+            });
+        }
+        Ok(objects
+            .into_iter()
+            .map(|object| CatalogObject {
+                columns: match object.kind {
+                    ObjectKind::Table | ObjectKind::View => {
+                        columns.remove(&object.name).unwrap_or_default()
+                    }
+                    _ => Vec::new(),
+                },
+                name: object.name,
+                kind: object.kind,
+            })
+            .collect())
     }
 
     fn explain_plan(&mut self, sql: &str) -> Result<Vec<String>, DbError> {

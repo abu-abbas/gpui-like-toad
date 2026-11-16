@@ -12,3 +12,7 @@ ora-driver = { path = "../ora-driver" }
 # `syntect` enables SQL syntax highlighting in the editor with a small
 # footprint (no Tree-sitter grammars bundled).
 gpui-kit = { version = "0.9.1", features = ["syntect"] }
+# Types of the editor's completion hook (`CompletionProvider`), which
+# gpui-kit does not re-export. Versions follow gpui-kit's own.
+lsp-types = "0.97"
+anyhow = "1"
