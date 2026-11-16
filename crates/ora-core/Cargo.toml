@@ -7,5 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# Intentionally dependency-free: this crate must stay fast to check and test
-# on any machine, including CI and low-memory VMs.
+# XLSX export only; everything else in this crate stays dependency-free so
+# it remains fast to check and test on any machine, including CI and
+# low-memory VMs.
+rust_xlsxwriter = "0.90"
