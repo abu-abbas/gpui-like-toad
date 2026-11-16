@@ -19,6 +19,7 @@ use std::sync::mpsc::{Receiver, RecvError};
 use gpui_kit::actions;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{
     highlight_characters, Editor, EditorState, Enter, IndentInline, Input, InputEvent, InputState,
 };
@@ -35,6 +36,7 @@ use gpui_kit::{
     UniformListScrollHandle, Window,
 };
 use ora_core::completion::Catalog;
+use ora_core::credentials::{PasswordAction, SecretString};
 use ora_core::export::{to_csv, to_xlsx};
 use ora_core::sql::{clean_statement, format_sql};
 use ora_core::store::{self, HistoryEntry, SavedProfile, ThemePreference};
@@ -54,7 +56,7 @@ use crate::theme::{
     RAIL_BUTTON_HEIGHT, RAIL_WIDTH, SIDE_PANEL_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6,
     STATUS_BAR_HEIGHT, SUB_TAB_HEIGHT, TAB_BAR_HEIGHT, TOOLBAR_HEIGHT, TREE_ROW_HEIGHT,
 };
-use crate::worker::{DbHandle, ExportFormat, Job, Response};
+use crate::worker::{DbHandle, ExportFormat, Job, Password, Response};
 
 actions!(db_explorer, [RunQuery]);
 
@@ -199,6 +201,9 @@ pub struct Workbench {
     /// Feedback shown inside the connection dialog: (is_error, text).
     form_notice: Option<(bool, String)>,
     password_input: Entity<InputState>,
+    /// "Save password" checkbox in the connection dialog. Off by default;
+    /// follows the profile when editing one.
+    save_password: bool,
     search_input: Entity<InputState>,
     rail: RailPanel,
     profiles: Vec<SavedProfile>,
@@ -307,6 +312,7 @@ impl Workbench {
             use_tns: false,
             form_notice: None,
             password_input,
+            save_password: false,
             search_input,
             rail: RailPanel::Connections,
             profiles: store::load_profiles(),
@@ -360,6 +366,68 @@ impl Workbench {
 
     fn input_text(entity: &Entity<InputState>, cx: &App) -> String {
         entity.read(cx).value().trim().to_string()
+    }
+
+    /// The typed password, untrimmed, wrapped so it is redacted in
+    /// `Debug` and zeroed on drop.
+    fn typed_password(&self, cx: &App) -> SecretString {
+        SecretString::from(self.password_input.read(cx).value().to_string())
+    }
+
+    /// Password for a connect/test from the dialog: what was typed, or the
+    /// keychain entry when the field is blank and the profile being edited
+    /// has a saved password.
+    fn dialog_password(&self, cx: &App) -> Password {
+        let typed = self.typed_password(cx);
+        if ora_core::credentials::ExposeSecret::expose_secret(&typed).is_empty() {
+            if let Some(profile) = self
+                .editing_profile
+                .and_then(|ix| self.profiles.get(ix))
+                .filter(|p| p.save_password && self.save_password)
+            {
+                return Password::Saved {
+                    profile_id: profile.id.clone(),
+                };
+            }
+        }
+        Password::Typed(typed)
+    }
+
+    /// Run a keychain write/delete off the UI thread; report failures in
+    /// Messages (and the dialog, if open).
+    fn apply_keychain(
+        &mut self,
+        profile_id: String,
+        action: PasswordAction,
+        cx: &mut Context<Self>,
+    ) {
+        let storing = matches!(action, PasswordAction::Store(_));
+        let id = profile_id.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { action.apply(crate::keychain::store(), &id) });
+        cx.spawn(async move |view, cx| {
+            if let Err(err) = task.await {
+                let _ = view.update(cx, |this, cx| {
+                    // Nothing was saved: untick the profile so Connect asks
+                    // for the password instead of failing on a missing entry.
+                    if storing {
+                        if let Some(ix) = this.profiles.iter().position(|p| p.id == profile_id) {
+                            this.profiles[ix].save_password = false;
+                            this.persist_profiles();
+                        }
+                        this.save_password = false;
+                    }
+                    let text = format!("Gagal menyimpan password ke keychain: {err}");
+                    this.push_message(text.clone());
+                    if this.show_connection_form {
+                        this.form_notice = Some((true, text));
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn set_input(
@@ -565,7 +633,7 @@ impl Workbench {
                     username: "DEMO".to_string(),
                     connect_string: "demo".to_string(),
                 },
-                String::new(),
+                Password::Typed(SecretString::from(String::new())),
             )
         } else {
             let username = Self::input_text(&self.user_input, cx);
@@ -574,6 +642,17 @@ impl Workbench {
                 self.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
                 cx.notify();
                 return;
+            }
+            // "Save password" ticked, or unticked on a profile that had
+            // one: Connect also saves the profile so the keychain matches
+            // the checkbox.
+            let had_saved = self
+                .editing_profile
+                .and_then(|ix| self.profiles.get(ix))
+                .is_some_and(|p| p.save_password);
+            let password = self.dialog_password(cx);
+            if self.save_password || had_saved {
+                self.save_profile_quiet(cx);
             }
             let name = Self::input_text(&self.name_input, cx);
             (
@@ -586,9 +665,52 @@ impl Workbench {
                     username,
                     connect_string,
                 },
-                Self::input_text(&self.password_input, cx),
+                password,
             )
         };
+        self.start_connect(
+            profile,
+            password,
+            demo,
+            if demo { None } else { self.editing_profile },
+            cx,
+        );
+    }
+
+    /// Connect straight to a saved profile when its password is in the
+    /// keychain; otherwise open its dialog so the user types one.
+    fn open_profile(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(saved) = self.profiles.get(ix).cloned() else {
+            return;
+        };
+        if !saved.save_password || self.busy {
+            self.edit_profile(ix, window, cx);
+            return;
+        }
+        let profile = ConnectionProfile {
+            name: saved.name.clone(),
+            username: saved.username.clone(),
+            connect_string: saved.connect_string.clone(),
+        };
+        self.start_connect(
+            profile,
+            Password::Saved {
+                profile_id: saved.id.clone(),
+            },
+            false,
+            Some(ix),
+            cx,
+        );
+    }
+
+    fn start_connect(
+        &mut self,
+        profile: ConnectionProfile,
+        password: Password,
+        demo: bool,
+        profile_ix: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
         if self.db.is_none() {
             self.db = Some(DbHandle::spawn());
         }
@@ -597,7 +719,7 @@ impl Workbench {
         self.last_connection = Some(LastConnection {
             profile: profile.clone(),
             demo,
-            profile_ix: if demo { None } else { self.editing_profile },
+            profile_ix,
         });
         self.status = "Menghubungkan...".to_string();
         self.spawn_db(
@@ -635,7 +757,7 @@ impl Workbench {
                     username,
                     connect_string,
                 },
-                password: Self::input_text(&self.password_input, cx),
+                password: self.dialog_password(cx),
             },
             PendingOp::TestConnect,
             cx,
@@ -959,8 +1081,10 @@ impl Workbench {
                 );
             }
         }
-        // Passwords are never stored: always start blank.
+        // A saved password is never loaded into the field: blank means
+        // "use the one in the keychain" (see `dialog_password`).
         Self::set_input(&self.password_input.clone(), String::new(), window, cx);
+        self.save_password = profile.save_password;
     }
 
     /// Open the connection dialog for a saved profile.
@@ -987,6 +1111,7 @@ impl Workbench {
         Self::set_input(&self.service_input.clone(), String::new(), window, cx);
         Self::set_input(&self.tns_input.clone(), String::new(), window, cx);
         Self::set_input(&self.password_input.clone(), String::new(), window, cx);
+        self.save_password = false;
         cx.notify();
     }
 
@@ -1003,15 +1128,41 @@ impl Workbench {
     }
 
     fn save_profile(&mut self, cx: &mut Context<Self>) {
+        if self.save_profile_quiet(cx) {
+            // A stale connect error would hide the "saved" notice.
+            self.connect_error = None;
+            let text = if self.save_password {
+                "Profil koneksi tersimpan, password di keychain."
+            } else {
+                "Profil koneksi tersimpan."
+            };
+            self.push_message(text.to_string());
+            self.form_notice = Some((false, text.to_string()));
+            cx.notify();
+        }
+    }
+
+    /// Save the dialog into its profile (new or edited) and bring the
+    /// keychain entry in line with "Save password". Returns false when
+    /// the form is incomplete.
+    fn save_profile_quiet(&mut self, cx: &mut Context<Self>) -> bool {
         let username = Self::input_text(&self.user_input, cx);
         let connect_string = self.form_connect_string(cx);
         if username.is_empty() || connect_string.is_empty() {
             self.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
             cx.notify();
-            return;
+            return false;
         }
         let name = Self::input_text(&self.name_input, cx);
+        let existing = self
+            .editing_profile
+            .and_then(|ix| self.profiles.get(ix))
+            .cloned();
         let profile = SavedProfile {
+            id: existing
+                .as_ref()
+                .map(|p| p.id.clone())
+                .unwrap_or_else(store::new_profile_id),
             name: if name.is_empty() {
                 format!("{username}@{connect_string}")
             } else {
@@ -1019,7 +1170,14 @@ impl Workbench {
             },
             username,
             connect_string,
+            save_password: self.save_password,
         };
+        let action = PasswordAction::decide(self.save_password, self.typed_password(cx));
+        // Skip the keychain entirely for a profile that never had a
+        // saved password and still does not want one.
+        let touch_keychain =
+            self.save_password || existing.as_ref().is_some_and(|p| p.save_password);
+        let profile_id = profile.id.clone();
         match self.editing_profile {
             Some(ix) if ix < self.profiles.len() => self.profiles[ix] = profile,
             _ => {
@@ -1028,9 +1186,10 @@ impl Workbench {
             }
         }
         self.persist_profiles();
-        self.push_message("Profil koneksi tersimpan.".to_string());
-        self.form_notice = Some((false, "Profil koneksi tersimpan.".to_string()));
-        cx.notify();
+        if touch_keychain && !matches!(action, PasswordAction::Keep) {
+            self.apply_keychain(profile_id, action, cx);
+        }
+        true
     }
 
     fn remove_profile(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -1038,6 +1197,9 @@ impl Workbench {
             return;
         }
         let removed = self.profiles.remove(ix);
+        if removed.save_password {
+            self.apply_keychain(removed.id.clone(), PasswordAction::Delete, cx);
+        }
         if let Some(last) = &mut self.last_connection {
             last.profile_ix = match last.profile_ix {
                 Some(i) if i == ix => None,
@@ -1312,6 +1474,18 @@ impl Workbench {
         };
         if let Response::Failed(message) = &resp {
             if matches!(pending, Some(PendingOp::Connect)) {
+                // A direct connect with a saved password failed (wrong or
+                // missing password): open the dialog so it can be fixed.
+                if !self.show_connection_form {
+                    if let Some(ix) = self
+                        .last_connection
+                        .as_ref()
+                        .filter(|l| !l.demo)
+                        .and_then(|l| l.profile_ix)
+                    {
+                        self.edit_profile(ix, window, cx);
+                    }
+                }
                 self.connect_error = Some(message.clone());
             }
             self.push_message(message.clone());
@@ -1825,14 +1999,16 @@ impl Workbench {
         panel
     }
 
-    /// Connect again to the last connection: demo reconnects directly;
-    /// a real database opens its dialog, since passwords are never kept.
+    /// Connect again to the last connection: demo and profiles with a
+    /// saved password reconnect directly; anything else opens its dialog.
     fn reconnect_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(last) = self.last_connection.clone() else {
             return;
         };
         if last.demo {
             self.connect(true, cx);
+        } else if let Some(ix) = last.profile_ix.filter(|ix| *ix < self.profiles.len()) {
+            self.open_profile(ix, window, cx);
         } else {
             self.edit_last_connection(window, cx);
         }
@@ -1849,9 +2025,11 @@ impl Workbench {
             Some(ix) => self.edit_profile(ix, window, cx),
             None => {
                 let profile = SavedProfile {
+                    id: String::new(),
                     name: last.profile.name.clone(),
                     username: last.profile.username.clone(),
                     connect_string: last.profile.connect_string.clone(),
+                    save_password: false,
                 };
                 self.editing_profile = None;
                 self.fill_form(&profile, window, cx);
@@ -2139,6 +2317,15 @@ impl Workbench {
                     ),
                 ),
         );
+        body = body.child(
+            Checkbox::new("save-password")
+                .label("Save password")
+                .checked(self.save_password)
+                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                    this.save_password = *checked;
+                    cx.notify();
+                })),
+        );
         let notice = self
             .connect_error
             .clone()
@@ -2165,10 +2352,18 @@ impl Workbench {
                     .child(text),
             );
         } else {
-            body = body.child(caption_text(
-                "Password tidak pernah disimpan; diisi setiap connect.".to_string(),
-                theme,
-            ));
+            let has_saved = self
+                .editing_profile
+                .and_then(|ix| self.profiles.get(ix))
+                .is_some_and(|p| p.save_password);
+            let hint = if self.save_password && has_saved {
+                "Password tersimpan di keychain OS. Kosongkan untuk tetap pakai yang lama."
+            } else if self.save_password {
+                "Password disimpan di keychain OS, bukan di file profil."
+            } else {
+                "Password tidak disimpan; diisi setiap connect."
+            };
+            body = body.child(caption_text(hint.to_string(), theme));
         }
         let mut footer = div()
             .flex()
@@ -2645,7 +2840,7 @@ impl Workbench {
                 theme,
             ))
             .child(caption_text(
-                "Theme preference, saved connections, and query history are stored in your user config directory. Passwords are never saved.".to_string(),
+                "Theme preference, saved connections, and query history are stored in your user config directory. Passwords are only saved when you tick \"Save password\", and then in the OS keychain, never in these files.".to_string(),
                 theme,
             ));
         panel.child(body)
@@ -3613,9 +3808,9 @@ impl Workbench {
                             .label("Open")
                             .icon(IconName::LogIn)
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                // Passwords are never stored: open the
-                                // filled dialog so the user types it.
-                                this.edit_profile(ix, window, cx);
+                                // Saved password: connect now. Otherwise
+                                // open the filled dialog for the password.
+                                this.open_profile(ix, window, cx);
                             })),
                     ),
             );

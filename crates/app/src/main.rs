@@ -1,4 +1,5 @@
 mod completion;
+mod keychain;
 mod plan;
 mod results;
 mod schema;
