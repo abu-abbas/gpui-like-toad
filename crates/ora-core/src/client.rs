@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::completion::CatalogObject;
+use crate::filter::{self, TableFilter};
 use crate::model::{ColumnDef, ConnectionProfile, ObjectKind, PlanNode, QueryResult, SchemaObject};
 
 /// Error from a database operation. The message is user-facing: driver errors
@@ -58,6 +59,38 @@ pub trait DbClient: Send {
     /// driver rejects them) and set `QueryResult::truncated` when the cap
     /// cut the result short.
     fn query(&mut self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError>;
+
+    /// Like [`DbClient::query`], with positional bind values (`:1` is
+    /// `binds[0]`), all bound as text; Oracle converts them to the column's
+    /// type when comparing. The default only supports an empty bind list.
+    fn query_binds(
+        &mut self,
+        sql: &str,
+        binds: &[String],
+        max_rows: usize,
+    ) -> Result<QueryResult, DbError> {
+        if binds.is_empty() {
+            self.query(sql, max_rows)
+        } else {
+            Err(DbError::new(
+                "bind variables are not supported by this backend",
+            ))
+        }
+    }
+
+    /// Rows of `owner.table` that pass `filter`, capped at `max_rows`: the
+    /// data tab's fetch. Built with [`filter::select_sql`], so filter
+    /// values travel as bind variables.
+    fn query_table(
+        &mut self,
+        owner: &str,
+        table: &str,
+        filter: &TableFilter,
+        max_rows: usize,
+    ) -> Result<QueryResult, DbError> {
+        let query = filter::select_sql(owner, table, filter, max_rows);
+        self.query_binds(&query.sql, &query.binds, max_rows)
+    }
 
     /// Run a non-SELECT statement (DML/DDL/PL/SQL). Returns rows affected
     /// when the database reports a count, else 0. Does not commit.

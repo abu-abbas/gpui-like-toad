@@ -161,10 +161,23 @@ impl DbClient for ThinClient {
     }
 
     fn query(&mut self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError> {
+        self.query_binds(sql, &[], max_rows)
+    }
+
+    fn query_binds(
+        &mut self,
+        sql: &str,
+        binds: &[String],
+        max_rows: usize,
+    ) -> Result<QueryResult, DbError> {
         let conn = self.conn()?;
         let sql = clean_statement(sql);
         let started = Instant::now();
-        let cursor = conn.query(sql, &[]).map_err(db_err)?;
+        let params: Vec<&dyn oracledb::ToDbValue> = binds
+            .iter()
+            .map(|b| b as &dyn oracledb::ToDbValue)
+            .collect();
+        let cursor = conn.query(sql, &params).map_err(db_err)?;
         // Column metadata comes from the cursor (not a row) so empty result
         // sets still report their columns. DbType refs are 'static, so the
         // borrow of the cursor ends here before iteration moves it.

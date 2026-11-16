@@ -13,12 +13,14 @@ pub mod completion;
 pub mod credentials;
 pub mod demo;
 pub mod export;
+pub mod filter;
 pub mod import;
 pub mod model;
 pub mod sql;
 pub mod store;
 
 pub use client::{DbClient, DbError, DbInfo};
+pub use filter::{BoundQuery, FilterCondition, FilterJoin, FilterOp, TableFilter};
 pub use model::{
     compose_easy_connect, parse_easy_connect, ColumnDef, ColumnInfo, ConnectionProfile, ObjectKind,
     PlanNode, QueryResult, SchemaObject, Value,

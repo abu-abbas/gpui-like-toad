@@ -18,7 +18,7 @@ use ora_core::import::{map_columns, parse_csv, quote_ident};
 use ora_core::sql::statement_kind;
 use ora_core::{
     ColumnDef, ConnectionProfile, DbClient, DbError, DbInfo, ObjectKind, PlanNode, QueryResult,
-    SchemaObject, DEFAULT_MAX_ROWS, EXPORT_MAX_ROWS,
+    SchemaObject, TableFilter, DEFAULT_MAX_ROWS, EXPORT_MAX_ROWS,
 };
 
 /// File format for "Export Data" on a whole table.
@@ -81,6 +81,13 @@ pub enum Job {
     /// `execute()`. Decided here so the UI has one code path.
     Run {
         sql: String,
+    },
+    /// Data tab fetch: rows of one table/view that pass the filter bar's
+    /// conditions, values sent as bind variables.
+    QueryTable {
+        owner: String,
+        name: String,
+        filter: TableFilter,
     },
     Commit,
     Rollback,
@@ -259,6 +266,17 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                 },
             }
         }
+        Job::QueryTable {
+            owner,
+            name,
+            filter,
+        } => match client.as_mut() {
+            Some(client) => match client.query_table(&owner, &name, &filter, DEFAULT_MAX_ROWS) {
+                Ok(result) => Response::QueryDone(result),
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
         Job::Commit => match client.as_mut() {
             Some(client) => match client.commit() {
                 Ok(()) => Response::Committed,
