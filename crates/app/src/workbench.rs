@@ -38,11 +38,11 @@ use crate::plan;
 use crate::results::ResultsDelegate;
 use crate::schema;
 use crate::theme::{
-    self, FONT_BODY, FONT_CAPTION, FONT_HEADING_MD, FONT_HEADING_XL, FONT_LABEL, GRID_ROW_HEIGHT,
-    LEADING_BODY, LEADING_CAPTION, LEADING_HEADING_MD, LEADING_HEADING_XL, LEADING_LABEL,
-    PAGINATION_HEIGHT, PLAN_PANEL_WIDTH, RADIUS_MD, RADIUS_SM, RAIL_BUTTON_HEIGHT, RAIL_WIDTH,
-    SIDE_PANEL_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6, STATUS_BAR_HEIGHT,
-    SUB_TAB_HEIGHT, TAB_BAR_HEIGHT, TOOLBAR_HEIGHT, TREE_ROW_HEIGHT,
+    self, FONT_BODY, FONT_CAPTION, FONT_HEADING_MD, FONT_HEADING_XL, FONT_LABEL, FONT_RAIL,
+    GRID_ROW_HEIGHT, LEADING_BODY, LEADING_CAPTION, LEADING_HEADING_MD, LEADING_HEADING_XL,
+    LEADING_LABEL, LEADING_RAIL, PAGINATION_HEIGHT, PLAN_PANEL_WIDTH, RADIUS_MD, RADIUS_SM,
+    RAIL_BUTTON_HEIGHT, RAIL_WIDTH, SIDE_PANEL_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6,
+    STATUS_BAR_HEIGHT, SUB_TAB_HEIGHT, TAB_BAR_HEIGHT, TOOLBAR_HEIGHT, TREE_ROW_HEIGHT,
 };
 use crate::worker::{DbHandle, Job, Response};
 
@@ -1221,7 +1221,7 @@ impl Workbench {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .w(px(RAIL_WIDTH - 8.))
+                .w(px(RAIL_WIDTH - 6.))
                 .h(px(RAIL_BUTTON_HEIGHT))
                 .gap(px(SPACE_1))
                 .rounded(px(RADIUS_MD))
@@ -1242,8 +1242,8 @@ impl Workbench {
             rail = rail.child(
                 button.child(icon(icon_name, 20., color)).child(
                     div()
-                        .text_size(px(FONT_CAPTION))
-                        .line_height(px(LEADING_CAPTION))
+                        .text_size(px(FONT_RAIL))
+                        .line_height(px(LEADING_RAIL))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(color)
                         .child(label),

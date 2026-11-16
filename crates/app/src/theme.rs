@@ -32,8 +32,11 @@ pub const TREE_ROW_HEIGHT: f32 = 28.0;
 pub const GRID_ROW_HEIGHT: f32 = 30.0;
 /// Status bar height.
 pub const STATUS_BAR_HEIGHT: f32 = 26.0;
-/// Primary icon rail width.
-pub const RAIL_WIDTH: f32 = 64.0;
+/// Primary icon rail width. Wider than the 64px token so the longest
+/// rail label fits on one line: "Connections" is 11 JetBrains Mono chars
+/// at 0.6em advance, i.e. 66px at [`FONT_RAIL`], inside a 70px button
+/// (`RAIL_WIDTH - 6`).
+pub const RAIL_WIDTH: f32 = 76.0;
 /// Height of one rail button (icon + label).
 pub const RAIL_BUTTON_HEIGHT: f32 = 52.0;
 /// Height of the Results / Explain Plan / Messages sub-tab row.
@@ -79,6 +82,9 @@ pub const FONT_LABEL: f32 = 12.0;
 pub const FONT_CAPTION: f32 = 11.0;
 pub const FONT_EDITOR: f32 = 13.0;
 pub const FONT_GRID: f32 = 12.0;
+/// Icon rail label size: 10px keeps "Connections" (11 chars x 0.6em =
+/// 66px) on one line inside the 70px rail button.
+pub const FONT_RAIL: f32 = 10.0;
 
 pub const LEADING_HEADING_XL: f32 = 32.0;
 pub const LEADING_HEADING_LG: f32 = 28.0;
@@ -86,6 +92,9 @@ pub const LEADING_HEADING_MD: f32 = 24.0;
 pub const LEADING_BODY: f32 = 20.0;
 pub const LEADING_LABEL: f32 = 18.0;
 pub const LEADING_CAPTION: f32 = 16.0;
+/// Icon rail label line height: icon 20 + gap 4 + label 14 = 38px, inside
+/// the 52px rail button.
+pub const LEADING_RAIL: f32 = 14.0;
 pub const LEADING_EDITOR: f32 = 22.0;
 pub const LEADING_GRID: f32 = 20.0;
 
