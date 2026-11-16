@@ -10,8 +10,8 @@ use std::time::Instant;
 
 use ora_core::sql::clean_statement;
 use ora_core::{
-    ColumnDef, ColumnInfo, ConnectionProfile, DbClient, DbError, DbInfo, ObjectKind, QueryResult,
-    SchemaObject, Value,
+    ColumnDef, ColumnInfo, ConnectionProfile, DbClient, DbError, DbInfo, ObjectKind, PlanNode,
+    QueryResult, SchemaObject, Value,
 };
 
 /// Blocking Oracle client. Owned exclusively by the GUI's background DB
@@ -283,16 +283,7 @@ impl DbClient for ThinClient {
     fn explain_plan(&mut self, sql: &str) -> Result<Vec<String>, DbError> {
         let conn = self.conn()?;
         let sql = clean_statement(sql);
-        if let Err(err) = conn.execute(&format!("EXPLAIN PLAN FOR {sql}"), &[]) {
-            let mut message = err.to_string();
-            if message.contains("02404") || message.contains("PLAN_TABLE") {
-                message.push_str(
-                    "\nHint: jalankan @?/rdbms/admin/catplan.sql sebagai user ini \
-                     untuk membuat PLAN_TABLE.",
-                );
-            }
-            return Err(DbError::new(message));
-        }
+        run_explain_plan(conn, sql)?;
         let cursor = conn
             .query(
                 "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY)",
@@ -307,6 +298,67 @@ impl DbClient for ThinClient {
         }
         Ok(lines)
     }
+
+    fn explain_plan_nodes(&mut self, sql: &str) -> Result<Vec<PlanNode>, DbError> {
+        let conn = self.conn()?;
+        let sql = clean_statement(sql);
+        run_explain_plan(conn, sql)?;
+        // Each EXPLAIN PLAN replaces the rows for its (null) statement id,
+        // so this query sees only the plan just generated. The hierarchical
+        // walk returns rows in tree order, siblings ordered by POSITION.
+        let cursor = conn
+            .query(
+                "SELECT id, parent_id, operation, options, object_name, cost, cardinality \
+                 FROM plan_table START WITH id = 0 \
+                 CONNECT BY PRIOR id = parent_id ORDER SIBLINGS BY position",
+                &[],
+            )
+            .map_err(db_err)?;
+        let mut nodes = Vec::new();
+        for row in cursor {
+            let row = row.map_err(db_err)?;
+            let id: Option<oracledb::OracleNumber> = row.get(0).map_err(db_err)?;
+            let parent_id: Option<oracledb::OracleNumber> = row.get(1).map_err(db_err)?;
+            let operation: Option<String> = row.get(2).map_err(db_err)?;
+            let options: Option<String> = row.get(3).map_err(db_err)?;
+            let object_name: Option<String> = row.get(4).map_err(db_err)?;
+            let cost: Option<oracledb::OracleNumber> = row.get(5).map_err(db_err)?;
+            let cardinality: Option<oracledb::OracleNumber> = row.get(6).map_err(db_err)?;
+            nodes.push(PlanNode {
+                id: id.and_then(number_to_i64).unwrap_or(0),
+                parent_id: parent_id.and_then(number_to_i64),
+                operation: operation.unwrap_or_default(),
+                options: options.unwrap_or_default(),
+                object_name: object_name.unwrap_or_default(),
+                cost: cost.and_then(number_to_i64),
+                cardinality: cardinality.and_then(number_to_i64),
+            });
+        }
+        Ok(nodes)
+    }
+}
+
+/// Run `EXPLAIN PLAN FOR <sql>`, translating a missing PLAN_TABLE into an
+/// error that tells the user how to create it.
+fn run_explain_plan(conn: &oracledb::Connection, sql: &str) -> Result<(), DbError> {
+    if let Err(err) = conn.execute(&format!("EXPLAIN PLAN FOR {sql}"), &[]) {
+        let mut message = err.to_string();
+        if message.contains("02404") || message.contains("PLAN_TABLE") {
+            message.push_str(
+                "\nHint: jalankan @?/rdbms/admin/catplan.sql sebagai user ini \
+                 untuk membuat PLAN_TABLE.",
+            );
+        }
+        return Err(DbError::new(message));
+    }
+    Ok(())
+}
+
+/// `PLAN_TABLE` cost/cardinality are NUMBERs; the UI only needs whole
+/// values, and the optimizer reports them as integers. Non-integer or
+/// unparseable values become `None` rather than failing the whole plan.
+fn number_to_i64(n: oracledb::OracleNumber) -> Option<i64> {
+    n.to_string().parse::<i64>().ok()
 }
 
 #[cfg(test)]
@@ -318,6 +370,7 @@ mod tests {
         let mut client = ThinClient::new();
         assert!(!client.is_connected());
         assert!(client.query("SELECT 1 FROM DUAL", 10).is_err());
+        assert!(client.explain_plan_nodes("SELECT 1 FROM DUAL").is_err());
         client.disconnect(); // safe when already disconnected
     }
 
