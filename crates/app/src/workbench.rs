@@ -1917,7 +1917,21 @@ impl Workbench {
     ) -> impl IntoElement {
         let mut col = div().flex().flex_col().size_full().bg(theme.background);
         col = col.child(self.render_sub_tab_bar(theme, cx));
-        col = col.child(div().flex_1().child(self.render_results_content(theme, cx)));
+        // The content wrapper must be a flex container: the results content
+        // is a `flex_1` div, and as a plain block child its flex sizing is
+        // ignored, leaving it content-height. `DataTable` sizes itself with
+        // `size_full`, which resolves against that indefinite height as
+        // auto, so the virtualized row list collapses to 0px and no rows
+        // paint even though the delegate holds data (only the header, with
+        // its explicit height, showed). As a flex item the content gets a
+        // definite flex-computed height and the rows render.
+        col = col.child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .child(self.render_results_content(theme, cx)),
+        );
         if self.active_tab().results_tab == ResultsTab::Results {
             col = col.child(self.render_pagination(theme, cx));
         }
