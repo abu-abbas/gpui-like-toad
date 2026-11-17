@@ -24,6 +24,9 @@ pub(super) struct UpdateState {
     tab_active: bool,
     /// Result of the last manual check, shown in Settings.
     status: Option<String>,
+    /// Download of the release file in progress / its outcome.
+    downloading: bool,
+    download_note: Option<(bool, String)>,
 }
 
 impl UpdateState {
@@ -36,6 +39,8 @@ impl UpdateState {
             tab_open: false,
             tab_active: false,
             status: None,
+            downloading: false,
+            download_note: None,
         }
     }
 }
@@ -75,7 +80,90 @@ fn fetch_latest() -> Result<Option<ReleaseInfo>, String> {
     Ok(update::parse_release(&body))
 }
 
+/// Where downloads go: `~/Downloads` when it exists, else the temp dir.
+fn download_dir() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    home.map(|h| std::path::PathBuf::from(h).join("Downloads"))
+        .filter(|d| d.is_dir())
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// Blocking download of one release asset; returns the saved path. The
+/// file is written under a `.part` name and renamed when complete.
+fn download_asset(asset: &update::Asset) -> Result<std::path::PathBuf, String> {
+    use std::io::Write as _;
+    const MAX_BYTES: u64 = 400 * 1024 * 1024;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_recv_body(Some(Duration::from_secs(60)))
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .user_agent(concat!("gpui-like-toad/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into();
+    let mut resp = agent.get(&asset.url).call().map_err(|e| e.to_string())?;
+    let dir = download_dir();
+    let target = dir.join(&asset.name);
+    let part = dir.join(format!("{}.part", asset.name));
+    let mut file = std::fs::File::create(&part).map_err(|e| e.to_string())?;
+    let mut reader = resp.body_mut().with_config().limit(MAX_BYTES).reader();
+    let copied = std::io::copy(&mut reader, &mut file).map_err(|e| e.to_string());
+    let finish = copied.and_then(|_| file.flush().map_err(|e| e.to_string()));
+    drop(file);
+    if let Err(err) = finish {
+        let _ = std::fs::remove_file(&part);
+        return Err(err);
+    }
+    std::fs::rename(&part, &target).map_err(|e| e.to_string())?;
+    Ok(target)
+}
+
 impl Workbench {
+    /// Download the file for this OS, then show it in the file manager.
+    fn download_update(&mut self, cx: &mut Context<Self>) {
+        let u = &mut self.updates;
+        if u.downloading {
+            return;
+        }
+        let Some(asset) = u
+            .available
+            .as_ref()
+            .and_then(|r| update::pick_asset(&r.assets, std::env::consts::OS))
+            .cloned()
+        else {
+            u.download_note = Some((
+                true,
+                "Tidak ada file untuk OS ini; buka halaman rilis.".into(),
+            ));
+            cx.notify();
+            return;
+        };
+        u.downloading = true;
+        u.download_note = Some((false, format!("Mengunduh {}...", asset.name)));
+        let task = cx
+            .background_executor()
+            .spawn(async move { download_asset(&asset) });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |this, cx| {
+                this.updates.downloading = false;
+                this.updates.download_note = Some(match result {
+                    Ok(path) => {
+                        cx.reveal_path(&path);
+                        (false, format!("Tersimpan di {}", path.display()))
+                    }
+                    Err(err) => (true, format!("Gagal mengunduh: {err}")),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Startup check: only if enabled and not checked within the interval.
     pub fn auto_check_updates(&mut self, cx: &mut Context<Self>) {
         let u = &self.updates;
@@ -397,6 +485,9 @@ impl Workbench {
                 .into_any_element();
         };
         let url = release.url.clone();
+        let can_download = update::pick_asset(&release.assets, std::env::consts::OS).is_some();
+        let downloading = self.updates.downloading;
+        let note = self.updates.download_note.clone();
         page = page
             .child(
                 div()
@@ -409,14 +500,38 @@ impl Workbench {
                 theme,
             ))
             .child(
-                div().flex().flex_row().py(px(SPACE_2)).child(
-                    Button::new("update-open")
-                        .label("Buka halaman rilis")
-                        .icon(IconName::Download)
-                        .primary()
-                        .on_click(move |_, _, cx| cx.open_url(&url)),
-                ),
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(SPACE_2))
+                    .py(px(SPACE_2))
+                    .when(can_download, |row| {
+                        row.child(
+                            Button::new("update-download")
+                                .label("Download")
+                                .icon(IconName::Download)
+                                .primary()
+                                .disabled(downloading)
+                                .on_click(cx.listener(|this, _, _, cx| this.download_update(cx))),
+                        )
+                    })
+                    .child(
+                        Button::new("update-open")
+                            .label("Buka halaman rilis")
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    ),
             );
+        if let Some((is_error, text)) = note {
+            page = page.child(if is_error {
+                div()
+                    .text_size(px(FONT_CAPTION))
+                    .line_height(px(LEADING_CAPTION))
+                    .text_color(theme.danger)
+                    .child(text)
+            } else {
+                caption_text(text, theme)
+            });
+        }
         let notes = release.notes.trim();
         if notes.is_empty() {
             page = page.child(caption_text("Tidak ada catatan rilis.".to_string(), theme));

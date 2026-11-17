@@ -39,6 +39,29 @@ impl std::fmt::Display for Version {
     }
 }
 
+/// Only assets under this prefix are ever downloaded.
+pub const DOWNLOAD_PREFIX: &str = "https://github.com/abu-abbas/gpui-like-toad/releases/download/";
+
+/// One downloadable file of a release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asset {
+    pub name: String,
+    pub url: String,
+    pub size: u64,
+}
+
+/// The asset for this OS: `.dmg` on macOS, `.exe` on Windows, the plain
+/// `linux-x86_64` binary on Linux. `os` is `std::env::consts::OS`.
+pub fn pick_asset<'a>(assets: &'a [Asset], os: &str) -> Option<&'a Asset> {
+    let wanted = |name: &str| match os {
+        "macos" => name.ends_with(".dmg"),
+        "windows" => name.ends_with("windows-x86_64.exe"),
+        "linux" => name.ends_with("linux-x86_64"),
+        _ => false,
+    };
+    assets.iter().find(|a| wanted(&a.name))
+}
+
 /// A release newer than the running build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseInfo {
@@ -47,6 +70,7 @@ pub struct ReleaseInfo {
     pub name: String,
     pub notes: String,
     pub url: String,
+    pub assets: Vec<Asset>,
 }
 
 /// Parse the GitHub "latest release" JSON. `None` if it lacks a usable tag
@@ -68,7 +92,29 @@ pub fn parse_release(body: &str) -> Option<ReleaseInfo> {
             .unwrap_or_default()
             .to_string()
     };
+    // Keep only assets with a safe file name hosted on this repo's
+    // release downloads.
+    let assets = json
+        .get("assets")
+        .and_then(Json::as_arr)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|a| {
+            let name = a.get("name")?.as_str()?.to_string();
+            let url = a.get("browser_download_url")?.as_str()?.to_string();
+            let safe = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+            (safe && url.starts_with(DOWNLOAD_PREFIX)).then(|| Asset {
+                name,
+                url,
+                size: a.get("size").and_then(Json::as_u64).unwrap_or(0),
+            })
+        })
+        .collect();
     Some(ReleaseInfo {
+        assets,
         version: Version::parse(&tag)?,
         name: text("name"),
         notes: text("body"),
@@ -121,6 +167,32 @@ mod tests {
         );
         assert!(parse_release(&BODY.replace("https://github.com/", "http://evil.test/")).is_none());
         assert!(parse_release("not json").is_none());
+    }
+
+    #[test]
+    fn picks_asset_per_os_and_rejects_foreign_hosts() {
+        let base = DOWNLOAD_PREFIX;
+        let body = format!(
+            r#"{{"tag_name":"v0.2.0","html_url":"https://github.com/abu-abbas/gpui-like-toad/releases/tag/v0.2.0",
+            "assets":[
+             {{"name":"Ora-The-Explorer-0.2.0-macos-arm64.dmg","browser_download_url":"{base}v0.2.0/a.dmg","size":5}},
+             {{"name":"Ora-The-Explorer-0.2.0-windows-x86_64.exe","browser_download_url":"{base}v0.2.0/w.exe","size":6}},
+             {{"name":"Ora-The-Explorer-0.2.0-linux-x86_64","browser_download_url":"{base}v0.2.0/l","size":7}},
+             {{"name":"evil","browser_download_url":"http://evil.test/x","size":1}},
+             {{"name":"../x","browser_download_url":"{base}v0.2.0/x","size":1}}]}}"#
+        );
+        let r = parse_release(&body).unwrap();
+        assert_eq!(r.assets.len(), 3);
+        assert!(pick_asset(&r.assets, "macos")
+            .unwrap()
+            .name
+            .ends_with(".dmg"));
+        assert!(pick_asset(&r.assets, "windows")
+            .unwrap()
+            .name
+            .ends_with(".exe"));
+        assert_eq!(pick_asset(&r.assets, "linux").unwrap().size, 7);
+        assert!(pick_asset(&r.assets, "freebsd").is_none());
     }
 
     #[test]
