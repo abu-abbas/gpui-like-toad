@@ -538,37 +538,16 @@ impl Workbench {
         let Some(prompt) = self.disconnect_prompt.as_ref() else {
             return div().into_any_element();
         };
-        let count = prompt.scripts.len();
-        let mut list = div()
-            .flex()
-            .flex_col()
-            .gap(px(SPACE_1))
-            .p(px(SPACE_2))
-            .rounded(px(RADIUS_MD))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.background);
-        for (_, title) in &prompt.scripts {
-            list = list.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(SPACE_2))
-                    .h(px(TREE_ROW_HEIGHT))
-                    .px(px(SPACE_1))
-                    .child(icon(IconName::FileCode, 14., theme.muted_foreground))
-                    .child(
-                        div()
-                            .min_w(px(0.))
-                            .truncate()
-                            .text_size(px(FONT_LABEL))
-                            .line_height(px(LEADING_LABEL))
-                            .text_color(theme.foreground)
-                            .child(title.clone()),
-                    ),
-            );
-        }
+        let names = prompt
+            .scripts
+            .iter()
+            .map(|(_, title)| title.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let text =
+            format!("Tab {names} masih berisi script dan akan ditutup. Simpan dulu ke file?");
+        // AlertDialog layout: title and message, then a footer band with
+        // the actions side by side.
         let card = div()
             .id("disconnect-prompt")
             .flex()
@@ -579,6 +558,7 @@ impl Workbench {
             .border_color(theme.border)
             .bg(theme.popover)
             .shadow_lg()
+            .overflow_hidden()
             .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" {
                     this.close_disconnect_prompt(cx);
@@ -587,82 +567,57 @@ impl Workbench {
             .child(
                 div()
                     .flex()
-                    .flex_row()
-                    .items_center()
+                    .flex_col()
                     .gap(px(SPACE_2))
-                    .px(px(SPACE_4))
-                    .h(px(44.))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(icon(IconName::LogOut, 16., theme.primary))
+                    .p(px(SPACE_4))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .truncate()
-                            .text_size(px(FONT_BODY))
+                            .text_size(px(FONT_HEADING_MD))
+                            .line_height(px(LEADING_HEADING_MD))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
-                            .child(format!("Disconnect {}", prompt.label)),
+                            .child(format!("Disconnect {}?", prompt.label)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(FONT_BODY))
+                            .line_height(px(LEADING_BODY))
+                            .text_color(theme.muted_foreground)
+                            .child(text),
                     ),
             )
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap(px(SPACE_3))
-                    .p(px(SPACE_4))
-                    .child(
-                        div()
-                            .text_size(px(FONT_BODY))
-                            .line_height(px(LEADING_BODY))
-                            .text_color(theme.foreground)
-                            .child(if count == 1 {
-                                "Tab ini masih berisi script dan akan ditutup. Simpan dulu?"
-                                    .to_string()
-                            } else {
-                                format!(
-                                    "{count} tab ini masih berisi script dan akan ditutup. Simpan dulu?"
-                                )
-                            }),
-                    )
-                    .child(list)
-                    .child(caption_text(
-                        "Simpan menanyakan lokasi file untuk tiap tab.".to_string(),
-                        theme,
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
                     .flex_row()
-                    .items_center()
                     .gap(px(SPACE_2))
-                    .px(px(SPACE_4))
-                    .py(px(SPACE_3))
-                    .border_t_1()
-                    .border_color(theme.border)
+                    .p(px(SPACE_4))
+                    .bg(theme.muted)
+                    .child(
+                        Button::new("disconnect-cancel")
+                            .flex_1()
+                            .label("Batal")
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.close_disconnect_prompt(cx)),
+                            ),
+                    )
                     .child(
                         Button::new("disconnect-discard")
+                            .flex_1()
                             .label("Jangan simpan")
+                            .danger()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.discard_scripts_then_disconnect(cx)
                             })),
                     )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("disconnect-cancel")
-                            .label("Batal")
-                            .on_click(cx.listener(|this, _, _, cx| this.close_disconnect_prompt(cx))),
-                    )
                     .child(
                         Button::new("disconnect-save")
+                            .flex_1()
                             .label("Simpan…")
-                            .icon(IconName::Save)
                             .primary()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.save_scripts_then_disconnect(cx)
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.save_scripts_then_disconnect(cx)),
+                            ),
                     ),
             );
         div()
@@ -674,7 +629,7 @@ impl Workbench {
             .flex()
             .flex_col()
             .items_center()
-            .pt(px(120.))
+            .pt(px(160.))
             .bg(gpui_kit::hsla(0., 0., 0., 0.35))
             .occlude()
             .child(card)
