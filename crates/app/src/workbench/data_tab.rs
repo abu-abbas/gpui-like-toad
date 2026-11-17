@@ -251,8 +251,8 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.busy {
-            self.status = "Masih ada operasi berjalan.".to_string();
+        if self.conn.busy {
+            self.conn.status = "Masih ada operasi berjalan.".to_string();
             cx.notify();
             return;
         }
@@ -306,7 +306,7 @@ impl Workbench {
             .and_then(|t| t.data.as_ref())
             .is_some_and(|d| d.edits.iter().any(|e| !e.applied));
         if staged {
-            self.status =
+            self.conn.status =
                 "Ada perubahan sel yang belum dikirim: klik Apply atau Discard dulu.".to_string();
             cx.notify();
         }
@@ -320,8 +320,8 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.busy {
-            self.status = "Masih ada operasi berjalan.".to_string();
+        if self.conn.busy {
+            self.conn.status = "Masih ada operasi berjalan.".to_string();
             cx.notify();
             return;
         }
@@ -358,8 +358,8 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.busy {
-            self.status = "Masih ada operasi berjalan.".to_string();
+        if self.conn.busy {
+            self.conn.status = "Masih ada operasi berjalan.".to_string();
             cx.notify();
             return;
         }
@@ -405,7 +405,7 @@ impl Workbench {
 
     /// Drop the applied filter and reset the bar to one empty row.
     fn clear_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.conn.busy {
             return;
         }
         let Some(data) = self.data_mut() else {
@@ -421,7 +421,7 @@ impl Workbench {
     /// the data dictionary each time they are opened, so they never show
     /// stale definitions; Data keeps its rows.
     pub(super) fn set_data_view(&mut self, view: DataView, cx: &mut Context<Self>) {
-        let busy = self.busy;
+        let busy = self.conn.busy;
         let Some(data) = self.data_mut() else {
             return;
         };
@@ -429,7 +429,7 @@ impl Workbench {
             return;
         }
         if view != DataView::Data && busy {
-            self.status = "Masih ada operasi berjalan.".to_string();
+            self.conn.status = "Masih ada operasi berjalan.".to_string();
             cx.notify();
             return;
         }
@@ -442,7 +442,7 @@ impl Workbench {
 
     /// (Re)load whatever the active data tab's current view shows.
     pub(super) fn load_data_view(&mut self, cx: &mut Context<Self>) {
-        if self.busy || self.session.is_none() {
+        if self.conn.busy || self.conn.session.is_none() {
             return;
         }
         let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
@@ -457,15 +457,15 @@ impl Workbench {
         match view {
             DataView::Data => self.reload_data(cx),
             DataView::Structure => {
-                self.status = format!("Memuat struktur {owner}.{name}...");
+                self.conn.status = format!("Memuat struktur {owner}.{name}...");
                 self.spawn_db(Job::Describe { owner, name }, PendingOp::DataStructure, cx);
             }
             DataView::Index => {
-                self.status = format!("Memuat index {owner}.{name}...");
+                self.conn.status = format!("Memuat index {owner}.{name}...");
                 self.spawn_db(Job::Indexes { owner, name }, PendingOp::DataIndexes, cx);
             }
             DataView::Ddl => {
-                self.status = format!("Memuat DDL {owner}.{name}...");
+                self.conn.status = format!("Memuat DDL {owner}.{name}...");
                 self.spawn_db(Job::Ddl { owner, name, kind }, PendingOp::DataDdl, cx);
             }
         }
@@ -474,7 +474,7 @@ impl Workbench {
     /// Fetch the active data tab's table with its applied filter. The
     /// statement goes to the Info log with its bind values.
     pub(super) fn reload_data(&mut self, cx: &mut Context<Self>) {
-        if self.busy || self.session.is_none() {
+        if self.conn.busy || self.conn.session.is_none() {
             return;
         }
         // A refetch would drop the edits that exist only in the grid.
@@ -484,7 +484,7 @@ impl Workbench {
             .and_then(|t| t.data.as_ref())
             .is_some_and(|d| d.edits.iter().any(|e| !e.applied));
         if staged {
-            self.status =
+            self.conn.status =
                 "Ada perubahan sel yang belum dikirim: klik Apply atau Discard dulu.".to_string();
             cx.notify();
             return;
@@ -510,10 +510,10 @@ impl Workbench {
             log.push_str(&format!("   [{}]", binds.join(", ")));
         }
         self.push_message(log);
-        self.status = format!("Memuat {owner}.{name}...");
+        self.conn.status = format!("Memuat {owner}.{name}...");
         // Not recorded in query history: the statement has bind
         // placeholders, so re-running it from History would fail.
-        self.pending_sql = None;
+        self.conn.pending_sql = None;
         self.spawn_db(
             Job::QueryTable {
                 owner,
@@ -555,7 +555,7 @@ impl Workbench {
         if data.edits.is_empty() {
             return None;
         }
-        let busy = self.busy;
+        let busy = self.conn.busy;
         let staged = data.edits.iter().filter(|e| !e.applied).count();
         let sent = data.edits.len() - staged;
         let label = match (staged, sent) {
@@ -697,7 +697,7 @@ impl Workbench {
                     Button::new("filter-clear")
                         .small()
                         .label("Clear")
-                        .disabled(self.busy)
+                        .disabled(self.conn.busy)
                         .on_click(
                             cx.listener(|this, _, window, cx| this.clear_filters(window, cx)),
                         ),
@@ -708,7 +708,7 @@ impl Workbench {
                         .small()
                         .primary()
                         .label("Apply All")
-                        .disabled(self.busy)
+                        .disabled(self.conn.busy)
                         .on_click(
                             cx.listener(|this, _, window, cx| this.apply_filters(None, window, cx)),
                         ),
@@ -859,7 +859,7 @@ impl Workbench {
                     .small()
                     .label(if is_applied { "Applied" } else { "Apply" })
                     .w(px(72.))
-                    .disabled(self.busy)
+                    .disabled(self.conn.busy)
                     .tooltip("Terapkan filter baris ini saja")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.apply_filters(Some(id), window, cx)
@@ -916,7 +916,7 @@ impl Workbench {
         }
         let more = tab.last_result.as_ref().is_some_and(|r| r.truncated);
         let filters = tab.data.as_ref().map_or(0, |d| d.applied.active().count());
-        let busy = self.busy;
+        let busy = self.conn.busy;
         // Wraps onto a second line in a narrow window instead of clipping
         // the paging controls past the edge.
         let mut footer = div()

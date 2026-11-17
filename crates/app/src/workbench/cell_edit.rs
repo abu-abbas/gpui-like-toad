@@ -44,10 +44,13 @@ pub(super) struct CellEditor {
 }
 
 impl Workbench {
-    /// Any data tab with edits that were not sent yet.
+    /// Any data tab of the active connection with edits that were not
+    /// sent yet.
     pub(super) fn has_staged_edits(&self) -> bool {
+        let conn = Some(self.conn.id);
         self.tabs
             .iter()
+            .filter(|t| t.conn == conn)
             .filter_map(|t| t.data.as_ref())
             .any(|d| d.edits.iter().any(|e| !e.applied))
     }
@@ -59,8 +62,8 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.busy {
-            self.status = "Masih ada operasi berjalan.".to_string();
+        if self.conn.busy {
+            self.conn.status = "Masih ada operasi berjalan.".to_string();
             cx.notify();
             return;
         }
@@ -160,7 +163,7 @@ impl Workbench {
                 .set_cell(&request.rowid, &request.column, shown);
         });
         self.sync_pending(tab_ix, cx);
-        self.status = "Perubahan ditandai. Klik Apply untuk mengirim ke database.".to_string();
+        self.conn.status = "Perubahan ditandai. Klik Apply untuk mengirim ke database.".to_string();
     }
 
     /// Push the tab's edit marks to its grid.
@@ -188,7 +191,7 @@ impl Workbench {
     /// Send every staged edit of the active data tab as UPDATEs. They stay
     /// uncommitted until the toolbar's Commit.
     pub(super) fn apply_edits(&mut self, cx: &mut Context<Self>) {
-        if self.busy || self.session.is_none() {
+        if self.conn.busy || self.conn.session.is_none() {
             return;
         }
         let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
@@ -216,7 +219,7 @@ impl Workbench {
                 u.column, u.rowid
             ));
         }
-        self.status = format!("Mengirim {} perubahan...", updates.len());
+        self.conn.status = format!("Mengirim {} perubahan...", updates.len());
         self.spawn_db(
             Job::UpdateCells {
                 owner,
@@ -248,21 +251,21 @@ impl Workbench {
                 self.push_message(format!(
                     "{done} perubahan dikirim. Belum di-commit: pakai Commit atau Rollback."
                 ));
-                self.status = format!("{done} perubahan dikirim, belum di-commit.");
+                self.conn.status = format!("{done} perubahan dikirim, belum di-commit.");
             }
             Some(err) => {
                 self.push_message(format!(
                     "Gagal pada perubahan ke-{} ({err}). {done} sebelumnya sudah dikirim.",
                     done + 1
                 ));
-                self.status = format!("Perubahan gagal: {err}");
+                self.conn.status = format!("Perubahan gagal: {err}");
             }
         }
     }
 
     /// Drop the edits that were not sent and show what the database holds.
     pub(super) fn discard_edits(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.conn.busy {
             return;
         }
         let tab_ix = self.active_tab;
@@ -282,7 +285,11 @@ impl Workbench {
 
     /// After Commit or Rollback: the tints go away in every data tab.
     pub(super) fn clear_edit_marks(&mut self, cx: &mut Context<Self>) {
+        let conn = Some(self.conn.id);
         for ix in 0..self.tabs.len() {
+            if self.tabs[ix].conn != conn {
+                continue;
+            }
             if let Some(data) = self.tabs[ix].data.as_mut() {
                 if !data.edits.is_empty() {
                     data.edits.clear();

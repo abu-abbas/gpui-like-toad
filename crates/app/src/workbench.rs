@@ -59,6 +59,7 @@ use crate::theme::{
 use crate::worker::{DbHandle, ExportFormat, Job, Password, Response};
 
 mod cell_edit;
+mod conns;
 mod data_tab;
 mod quick_open;
 mod updates;
@@ -80,6 +81,10 @@ const DATA_PAGE_SIZE: usize = MAX_PAGE_LIMIT;
 
 /// Header height of the dense data-tab grid (rows are 26px).
 const DATA_HEADER_HEIGHT: f32 = 28.;
+
+/// A tab whose connection was disconnected while another one stays open.
+const ORPHAN_TAB: &str =
+    "Koneksi tab ini sudah ditutup. Pilih koneksi lewat tombol koneksi di kanan atas.";
 
 const FORM_INCOMPLETE: &str = "Isi username dan host (atau TNS) dulu.";
 const MAX_MESSAGES_SHOWN: usize = 30;
@@ -157,6 +162,96 @@ struct LastConnection {
     profile_ix: Option<usize>,
 }
 
+/// Everything that belongs to one open connection: its worker thread and
+/// session, the operation in flight, the explorer's schema/object list and
+/// the autocomplete catalog. Each connection has its own worker, so a slow
+/// query on one never blocks another.
+///
+/// The active connection lives in [`Workbench::conn`] and every other one
+/// in [`Workbench::parked`]; activating a connection swaps the two, so the
+/// rest of the workbench only ever deals with `self.conn`.
+struct ConnState {
+    /// Stable id; tabs bind to a connection by it.
+    id: u64,
+    db: Option<DbHandle>,
+    session: Option<DbInfo>,
+    demo_mode: bool,
+    busy: bool,
+    pending_op: Option<PendingOp>,
+    pending_sql: Option<String>,
+    op_generation: u64,
+    connect_error: Option<String>,
+    last_connection: Option<LastConnection>,
+    /// Tab (by id) that the in-flight operation writes its result into, so
+    /// switching tabs mid-query never lands the result in the wrong tab.
+    pending_tab: Option<u64>,
+    schemas: Vec<String>,
+    current_schema: Option<String>,
+    selected_object: Option<String>,
+    objects: Vec<SchemaObject>,
+    /// Connect was started from a tab bound to another connection: open a
+    /// new tab for this one once it connects.
+    open_tab_on_connect: bool,
+    /// DML ran since the last commit/rollback (best effort: DDL commits
+    /// on its own and is not tracked). Shown in the connection switcher.
+    uncommitted: bool,
+    status: String,
+    /// This connection's autocomplete catalog while it is parked; empty
+    /// while active (the live one is `Workbench::catalog`).
+    catalog: Catalog,
+    /// Schemas whose catalog load is in flight, so one is not asked twice.
+    catalog_loading: HashSet<String>,
+    /// Bumped on connect and disconnect; a catalog response from an older
+    /// session is dropped.
+    catalog_epoch: u64,
+    /// Schema the user is waiting on after typing `SCHEMA.`: reopen the
+    /// popup when its catalog arrives.
+    catalog_retrigger: Option<String>,
+}
+
+impl ConnState {
+    fn new(id: u64) -> Self {
+        ConnState {
+            id,
+            db: None,
+            session: None,
+            demo_mode: false,
+            busy: false,
+            pending_op: None,
+            pending_sql: None,
+            op_generation: 0,
+            connect_error: None,
+            last_connection: None,
+            pending_tab: None,
+            schemas: Vec::new(),
+            current_schema: None,
+            selected_object: None,
+            objects: Vec::new(),
+            open_tab_on_connect: false,
+            uncommitted: false,
+            status: "Belum terhubung.".to_string(),
+            catalog: Catalog::new(),
+            catalog_loading: HashSet::new(),
+            catalog_epoch: 0,
+            catalog_retrigger: None,
+        }
+    }
+
+    /// Connected, or still connecting: worth keeping when parked.
+    fn is_open(&self) -> bool {
+        self.session.is_some() || (self.busy && matches!(self.pending_op, Some(PendingOp::Connect)))
+    }
+
+    /// Short name for tab labels and the switcher: the profile name.
+    fn label(&self) -> String {
+        match (&self.last_connection, &self.session) {
+            (Some(last), _) => last.profile.name.clone(),
+            (None, Some(s)) => format!("{}@{}", s.user, s.database),
+            (None, None) => "—".to_string(),
+        }
+    }
+}
+
 /// The explorer object a context-menu action applies to.
 #[derive(Clone)]
 struct ObjectRef {
@@ -180,6 +275,11 @@ struct QueryTab {
     results_tab: ResultsTab,
     /// Set for data tabs: the table shown and its filter bar.
     data: Option<DataTab>,
+    /// The connection (by [`ConnState::id`]) this tab runs on. `None`
+    /// until the tab first runs something: it then binds to the active
+    /// connection. A tab whose connection was closed keeps the old id and
+    /// refuses to run until a connection is picked for it.
+    conn: Option<u64>,
 }
 
 impl QueryTab {
@@ -221,6 +321,7 @@ impl QueryTab {
             plan_expanded: HashSet::new(),
             results_tab: ResultsTab::Results,
             data: None,
+            conn: None,
         }
     }
 }
@@ -262,25 +363,16 @@ pub struct Workbench {
     messages_scroll: ScrollHandle,
     show_home: bool,
     next_tab_id: u64,
-    db: Option<DbHandle>,
-    session: Option<DbInfo>,
-    demo_mode: bool,
-    busy: bool,
-    pending_op: Option<PendingOp>,
-    pending_sql: Option<String>,
-    op_generation: u64,
-    connect_error: Option<String>,
-    last_connection: Option<LastConnection>,
-    /// Tab (by id) that the in-flight operation writes its result into, so
-    /// switching tabs mid-query never lands the result in the wrong tab.
-    pending_tab: Option<u64>,
+    /// The active connection: the one the explorer, toolbar and status bar
+    /// show, and the one the active tab runs on.
+    conn: ConnState,
+    /// Every other open connection, parked until it is activated again
+    /// (see [`Workbench::activate_conn`]).
+    parked: Vec<ConnState>,
+    next_conn_id: u64,
     window_handle: AnyWindowHandle,
-    schemas: Vec<String>,
-    current_schema: Option<String>,
     category: ObjectCategory,
-    selected_object: Option<String>,
     object_scroll: UniformListScrollHandle,
-    objects: Vec<SchemaObject>,
     /// The Quick Open palette, while it is showing.
     quick_open: Option<QuickOpen>,
     /// The cell edit dialog, while it is showing.
@@ -289,18 +381,11 @@ pub struct Workbench {
     focus_handle: gpui_kit::FocusHandle,
     tree_filter: String,
     messages: Vec<String>,
-    status: String,
-    /// Autocomplete metadata, shared with every tab's completion provider.
+    /// Autocomplete metadata of the active connection, shared with every
+    /// tab's completion provider. A parked connection keeps its own in
+    /// [`ConnState::catalog`]; the two are swapped on activation.
     catalog: Rc<RefCell<Catalog>>,
     completion: Rc<SqlCompletionProvider>,
-    /// Schemas whose catalog load is in flight, so one is not asked twice.
-    catalog_loading: HashSet<String>,
-    /// Bumped on connect and disconnect; a catalog response from an older
-    /// session is dropped.
-    catalog_epoch: u64,
-    /// Schema the user is waiting on after typing `SCHEMA.`: reopen the
-    /// popup when its catalog arrives.
-    catalog_retrigger: Option<String>,
     /// GitHub Releases update check state (see `updates.rs`).
     updates: UpdateState,
     _subscriptions: Vec<Subscription>,
@@ -331,7 +416,7 @@ impl Workbench {
             catalog.clone(),
             Rc::new(move |schema, cx| {
                 let _ = workbench.update(cx, |this, cx| {
-                    this.catalog_retrigger = Some(schema.to_ascii_uppercase());
+                    this.conn.catalog_retrigger = Some(schema.to_ascii_uppercase());
                     this.load_catalog(schema, cx);
                 });
             }),
@@ -382,34 +467,19 @@ impl Workbench {
             // Start on the Navicat-style Home page.
             show_home: true,
             next_tab_id: 1,
-            db: None,
-            session: None,
-            demo_mode: false,
-            busy: false,
-            pending_op: None,
-            pending_sql: None,
-            op_generation: 0,
-            connect_error: None,
-            last_connection: None,
-            pending_tab: None,
+            conn: ConnState::new(1),
+            parked: Vec::new(),
+            next_conn_id: 1,
             window_handle: window.window_handle(),
-            schemas: Vec::new(),
-            current_schema: None,
             category: ObjectCategory::Tables,
-            selected_object: None,
             object_scroll: UniformListScrollHandle::new(),
-            objects: Vec::new(),
             quick_open: None,
             cell_editor: None,
             focus_handle: cx.focus_handle(),
             tree_filter: String::new(),
             messages: Vec::new(),
-            status: "Belum terhubung.".to_string(),
             catalog,
             completion,
-            catalog_loading: HashSet::new(),
-            catalog_epoch: 0,
-            catalog_retrigger: None,
             updates: UpdateState::load(),
             _subscriptions: vec![search_sub, appearance_sub],
         }
@@ -418,6 +488,12 @@ impl Workbench {
     // ----- helpers -----
 
     fn push_message(&mut self, message: String) {
+        // With several connections open, say which one a message is from.
+        let message = if self.open_conn_count() > 1 {
+            format!("[{}] {message}", self.conn.label())
+        } else {
+            message
+        };
         self.messages.push(message);
         if self.messages.len() > MAX_MESSAGES {
             let excess = self.messages.len() - MAX_MESSAGES;
@@ -522,7 +598,7 @@ impl Workbench {
     /// Index of the tab the running operation belongs to. `None` when that
     /// tab was closed while the operation ran.
     fn target_ix(&self) -> Option<usize> {
-        match self.pending_tab {
+        match self.conn.pending_tab {
             Some(id) => self.tabs.iter().position(|t| t.id == id),
             None => (self.active_tab < self.tabs.len()).then_some(self.active_tab),
         }
@@ -544,36 +620,56 @@ impl Workbench {
         });
     }
 
-    fn clear_all_grids(&mut self, cx: &mut Context<Self>) {
-        for tab in &mut self.tabs {
-            tab.last_result = None;
-            tab.elapsed_ms = None;
-            tab.plan_nodes = None;
-            tab.plan_lines.clear();
-            tab.table_state.update(cx, |state, cx| {
-                state.delegate_mut().set_result(QueryResult::default());
-                state.refresh(cx);
-            });
-        }
-    }
-
     /// Send a job to the worker and apply the response when it arrives. The
     /// blocking receive runs on the background executor, never the UI
     /// thread. The generation tag lets [`Workbench::stop`] drop the
     /// response of a superseded operation.
     fn spawn_db(&mut self, job: Job, op: PendingOp, cx: &mut Context<Self>) {
-        let Some(db) = self.db.clone() else {
+        let Some(db) = self.conn.db.clone() else {
             self.push_message("Belum terhubung.".to_string());
             return;
         };
+        // Work that lands in the active tab must run on that tab's own
+        // connection; a tab whose connection was closed has none.
+        let tab_op = matches!(
+            op,
+            PendingOp::Run
+                | PendingOp::Explain
+                | PendingOp::Describe { .. }
+                | PendingOp::DataStructure
+                | PendingOp::DataIndexes
+                | PendingOp::DataDdl
+                | PendingOp::ApplyEdits
+        );
+        let tab_conn = self.tabs.get(self.active_tab).and_then(|t| t.conn);
+        if tab_op && !self.show_home {
+            if tab_conn.is_some_and(|id| id != self.conn.id) {
+                let text = if self.active_tab_orphaned() {
+                    ORPHAN_TAB
+                } else {
+                    "Tab ini milik koneksi lain."
+                };
+                self.push_message(text.to_string());
+                self.conn.status = text.to_string();
+                self.active_tab_mut().results_tab = ResultsTab::Messages;
+                cx.notify();
+                return;
+            }
+            let id = self.conn.id;
+            let tab = self.active_tab_mut();
+            if tab.conn.is_none() {
+                tab.conn = Some(id);
+            }
+        }
         let rx: Receiver<Response> = db.request(job);
-        self.op_generation += 1;
-        let generation = self.op_generation;
-        self.pending_op = Some(op);
-        self.pending_tab = self.tabs.get(self.active_tab).map(|t| t.id);
-        self.busy = true;
+        self.conn.op_generation += 1;
+        let generation = self.conn.op_generation;
+        self.conn.pending_op = Some(op);
+        self.conn.pending_tab = self.tabs.get(self.active_tab).map(|t| t.id);
+        self.conn.busy = true;
         cx.notify();
         let handle = self.window_handle;
+        let conn_id = self.conn.id;
         cx.spawn(async move |view, cx| {
             let resp = cx
                 .background_executor()
@@ -583,7 +679,9 @@ impl Workbench {
             // editor text from a response.
             let _ = cx.update_window(handle, |_, window, cx| {
                 view.update(cx, |this, cx| {
-                    this.on_db_response(generation, resp, window, cx)
+                    this.with_conn(conn_id, cx, |this, background, cx| {
+                        this.on_db_response(generation, resp, background, window, cx)
+                    })
                 })
             });
         })
@@ -595,19 +693,20 @@ impl Workbench {
     /// supersede the operation the user is waiting on. The worker runs it
     /// in turn, after whatever is already queued.
     fn load_catalog(&mut self, owner: String, cx: &mut Context<Self>) {
-        let Some(db) = self.db.clone() else {
+        let Some(db) = self.conn.db.clone() else {
             return;
         };
-        if self.session.is_none() {
+        if self.conn.session.is_none() {
             return;
         }
         let key = owner.to_ascii_uppercase();
-        if !self.catalog_loading.insert(key.clone()) {
+        if !self.conn.catalog_loading.insert(key.clone()) {
             return;
         }
         let rx: Receiver<Response> = db.request(Job::Catalog { owner });
-        let epoch = self.catalog_epoch;
+        let epoch = self.conn.catalog_epoch;
         let handle = self.window_handle;
+        let conn_id = self.conn.id;
         cx.spawn(async move |view, cx| {
             let resp = cx
                 .background_executor()
@@ -615,7 +714,9 @@ impl Workbench {
                 .await;
             let _ = cx.update_window(handle, |_, window, cx| {
                 view.update(cx, |this, cx| {
-                    this.on_catalog_response(epoch, key, resp, window, cx)
+                    this.with_conn(conn_id, cx, |this, background, cx| {
+                        this.on_catalog_response(epoch, key, resp, background, window, cx)
+                    })
                 })
             });
         })
@@ -627,23 +728,24 @@ impl Workbench {
         epoch: u64,
         owner: String,
         resp: Result<Response, RecvError>,
+        background: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if epoch != self.catalog_epoch {
+        if epoch != self.conn.catalog_epoch {
             return;
         }
-        self.catalog_loading.remove(&owner);
-        let waiting = self.catalog_retrigger.as_deref() == Some(owner.as_str());
+        self.conn.catalog_loading.remove(&owner);
+        let waiting = self.conn.catalog_retrigger.as_deref() == Some(owner.as_str());
         if waiting {
-            self.catalog_retrigger = None;
+            self.conn.catalog_retrigger = None;
         }
         match resp {
             Ok(Response::Catalog(objects)) => {
                 self.catalog.borrow_mut().set_owner(&owner, objects);
                 // The user typed `SCHEMA.` and got nothing because it was
                 // still loading: show the list now, if they are still there.
-                if waiting && !self.show_home {
+                if waiting && !background && !self.show_home {
                     let editor = self.active_tab().editor.clone();
                     if editor.read(cx).focus_handle(cx).is_focused(window) {
                         editor.update(cx, |state, cx| state.show_completions(window, cx));
@@ -664,9 +766,9 @@ impl Workbench {
     }
 
     fn reset_catalog(&mut self, default_owner: Option<String>) {
-        self.catalog_epoch += 1;
-        self.catalog_loading.clear();
-        self.catalog_retrigger = None;
+        self.conn.catalog_epoch += 1;
+        self.conn.catalog_loading.clear();
+        self.conn.catalog_retrigger = None;
         let mut catalog = self.catalog.borrow_mut();
         catalog.clear();
         catalog.set_default_owner(default_owner);
@@ -693,8 +795,14 @@ impl Workbench {
 
     // ----- actions -----
 
-    fn connect(&mut self, demo: bool, cx: &mut Context<Self>) {
-        if self.busy {
+    fn connect(&mut self, demo: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if demo {
+            if let Some(id) = self.find_open_conn(None, true) {
+                self.switch_conn(id, window, cx);
+                return;
+            }
+        }
+        if self.conn.busy {
             return;
         }
         let (profile, password) = if demo {
@@ -754,7 +862,12 @@ impl Workbench {
         let Some(saved) = self.profiles.get(ix).cloned() else {
             return;
         };
-        if !saved.save_password || self.busy {
+        // Already open: switch to it rather than logging in twice.
+        if let Some(id) = self.find_open_conn(Some(ix), false) {
+            self.switch_conn(id, window, cx);
+            return;
+        }
+        if !saved.save_password || self.conn.busy {
             self.edit_profile(ix, window, cx);
             return;
         }
@@ -782,17 +895,18 @@ impl Workbench {
         profile_ix: Option<usize>,
         cx: &mut Context<Self>,
     ) {
-        if self.db.is_none() {
-            self.db = Some(DbHandle::spawn());
+        self.prepare_new_conn();
+        if self.conn.db.is_none() {
+            self.conn.db = Some(DbHandle::spawn());
         }
-        self.demo_mode = demo;
-        self.connect_error = None;
-        self.last_connection = Some(LastConnection {
+        self.conn.demo_mode = demo;
+        self.conn.connect_error = None;
+        self.conn.last_connection = Some(LastConnection {
             profile: profile.clone(),
             demo,
             profile_ix,
         });
-        self.status = "Menghubungkan...".to_string();
+        self.conn.status = "Menghubungkan...".to_string();
         self.spawn_db(
             Job::Connect {
                 profile,
@@ -805,7 +919,7 @@ impl Workbench {
     }
 
     fn test_connection(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.conn.busy {
             return;
         }
         let username = Self::input_text(&self.user_input, cx);
@@ -816,11 +930,11 @@ impl Workbench {
             return;
         }
         self.form_notice = None;
-        if self.db.is_none() {
-            self.db = Some(DbHandle::spawn());
+        if self.conn.db.is_none() {
+            self.conn.db = Some(DbHandle::spawn());
         }
         let name = Self::input_text(&self.name_input, cx);
-        self.status = "Mengetes koneksi...".to_string();
+        self.conn.status = "Mengetes koneksi...".to_string();
         self.spawn_db(
             Job::TestConnect {
                 profile: ConnectionProfile {
@@ -835,68 +949,71 @@ impl Workbench {
         );
     }
 
+    /// Close the active connection. Other open connections stay open; the
+    /// next one becomes active.
     fn disconnect(&mut self, cx: &mut Context<Self>) {
-        if let Some(db) = self.db.take() {
+        self.push_message("Disconnected.".to_string());
+        if let Some(db) = self.conn.db.take() {
             // Fire and forget: the worker closes the session on its own.
             let _ = db.request(Job::Disconnect);
         }
-        self.session = None;
+        self.conn.session = None;
         self.reset_catalog(None);
-        self.demo_mode = false;
+        self.conn.demo_mode = false;
+        self.conn.uncommitted = false;
         self.show_connection_form = false;
-        self.objects.clear();
-        self.schemas.clear();
-        self.current_schema = None;
-        self.selected_object = None;
-        self.clear_all_grids(cx);
-        self.status = "Belum terhubung.".to_string();
-        self.push_message("Disconnected.".to_string());
+        self.conn.objects.clear();
+        self.conn.schemas.clear();
+        self.conn.current_schema = None;
+        self.conn.selected_object = None;
+        self.conn.status = "Belum terhubung.".to_string();
+        self.after_disconnect(cx);
         cx.notify();
     }
 
     /// Reload the schema list, then the objects of the current schema
     /// (the session user's own schema on first load).
     fn refresh_schema(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.conn.busy {
             return;
         }
-        if self.session.is_none() {
+        if self.conn.session.is_none() {
             self.push_message("Belum terhubung.".to_string());
             return;
         }
-        self.status = "Memuat daftar schema...".to_string();
+        self.conn.status = "Memuat daftar schema...".to_string();
         self.spawn_db(Job::ListSchemas, PendingOp::ListSchemas, cx);
     }
 
     fn load_objects(&mut self, cx: &mut Context<Self>) {
-        let Some(owner) = self.current_schema.clone() else {
+        let Some(owner) = self.conn.current_schema.clone() else {
             return;
         };
-        self.status = format!("Memuat objek {owner}...");
+        self.conn.status = format!("Memuat objek {owner}...");
         self.spawn_db(Job::ListObjects { owner }, PendingOp::ListObjects, cx);
     }
 
     fn select_schema(&mut self, schema: String, cx: &mut Context<Self>) {
-        if self.busy || self.current_schema.as_deref() == Some(schema.as_str()) {
+        if self.conn.busy || self.conn.current_schema.as_deref() == Some(schema.as_str()) {
             return;
         }
-        self.current_schema = Some(schema);
-        self.selected_object = None;
-        self.objects.clear();
+        self.conn.current_schema = Some(schema);
+        self.conn.selected_object = None;
+        self.conn.objects.clear();
         self.load_objects(cx);
     }
 
     fn select_category(&mut self, category: ObjectCategory, cx: &mut Context<Self>) {
         self.category = category;
-        self.selected_object = None;
+        self.conn.selected_object = None;
         cx.notify();
     }
 
     fn run(&mut self, cx: &mut Context<Self>) {
-        if self.busy || self.show_home {
+        if self.conn.busy || self.show_home {
             return;
         }
-        if self.session.is_none() {
+        if self.conn.session.is_none() {
             self.push_message("Belum terhubung: Connect atau Demo dulu.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;
             cx.notify();
@@ -914,16 +1031,16 @@ impl Workbench {
             cx.notify();
             return;
         }
-        self.status = "Menjalankan...".to_string();
-        self.pending_sql = Some(sql.clone());
+        self.conn.status = "Menjalankan...".to_string();
+        self.conn.pending_sql = Some(sql.clone());
         self.spawn_db(Job::Run { sql }, PendingOp::Run, cx);
     }
 
     fn explain(&mut self, cx: &mut Context<Self>) {
-        if self.busy || self.show_home {
+        if self.conn.busy || self.show_home {
             return;
         }
-        if self.session.is_none() {
+        if self.conn.session.is_none() {
             self.push_message("Belum terhubung: Connect atau Demo dulu.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;
             cx.notify();
@@ -936,7 +1053,7 @@ impl Workbench {
             cx.notify();
             return;
         }
-        self.status = "Menjelaskan plan...".to_string();
+        self.conn.status = "Menjelaskan plan...".to_string();
         self.spawn_db(Job::Explain { sql }, PendingOp::Explain, cx);
     }
 
@@ -958,14 +1075,14 @@ impl Workbench {
     /// true cancellation — Oracle offers no cancel handle through the thin
     /// driver call in use — and the UI must never claim otherwise.
     fn stop(&mut self, cx: &mut Context<Self>) {
-        if !self.busy {
+        if !self.conn.busy {
             return;
         }
-        self.op_generation += 1;
-        self.pending_op = None;
-        self.pending_sql = None;
-        self.busy = false;
-        self.status = "Dihentikan (respons dibuang).".to_string();
+        self.conn.op_generation += 1;
+        self.conn.pending_op = None;
+        self.conn.pending_sql = None;
+        self.conn.busy = false;
+        self.conn.status = "Dihentikan (respons dibuang).".to_string();
         self.push_message(
             "Stop: operasi database yang sedang berjalan tidak dapat dibatalkan; responsnya akan diabaikan saat tiba.".to_string(),
         );
@@ -973,11 +1090,11 @@ impl Workbench {
     }
 
     fn commit(&mut self, cx: &mut Context<Self>) {
-        if self.busy || self.session.is_none() {
+        if self.conn.busy || self.conn.session.is_none() {
             return;
         }
         if self.has_staged_edits() {
-            self.status =
+            self.conn.status =
                 "Ada perubahan sel yang belum dikirim: klik Apply (atau Discard) dulu.".to_string();
             cx.notify();
             return;
@@ -986,7 +1103,7 @@ impl Workbench {
     }
 
     fn rollback(&mut self, cx: &mut Context<Self>) {
-        if self.busy || self.session.is_none() {
+        if self.conn.busy || self.conn.session.is_none() {
             return;
         }
         self.spawn_db(Job::Rollback, PendingOp::Rollback, cx);
@@ -1011,7 +1128,7 @@ impl Workbench {
                     path.display(),
                     result.row_count()
                 ));
-                self.status = format!("Exported {filename}");
+                self.conn.status = format!("Exported {filename}");
             }
             Err(err) => {
                 self.push_message(format!("Gagal menulis CSV: {err}"));
@@ -1041,7 +1158,7 @@ impl Workbench {
                             path.display(),
                             result.row_count()
                         ));
-                        self.status = format!("Exported {filename}");
+                        self.conn.status = format!("Exported {filename}");
                     }
                     Err(err) => {
                         self.push_message(format!("Gagal menulis XLSX: {err}"));
@@ -1062,7 +1179,8 @@ impl Workbench {
         self.next_tab_id += 1;
         let id = self.next_tab_id;
         let completion = self.completion.clone();
-        let tab = QueryTab::new(id, format!("Query {id}"), "", &completion, window, cx);
+        let mut tab = QueryTab::new(id, format!("Query {id}"), "", &completion, window, cx);
+        tab.conn = self.conn.is_open().then_some(self.conn.id);
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         self.show_home = false;
@@ -1097,6 +1215,7 @@ impl Workbench {
         self.show_home = false;
         self.leave_whats_new();
         self.tab_scroll.scroll_to_item(ix);
+        self.follow_tab_conn(cx);
         cx.notify();
     }
 
@@ -1184,7 +1303,7 @@ impl Workbench {
             self.editing_profile = Some(ix);
             self.fill_form(&profile, window, cx);
             self.form_notice = None;
-            self.connect_error = None;
+            self.conn.connect_error = None;
             self.show_connection_form = true;
             cx.notify();
         }
@@ -1194,7 +1313,7 @@ impl Workbench {
         self.editing_profile = None;
         self.use_tns = false;
         self.form_notice = None;
-        self.connect_error = None;
+        self.conn.connect_error = None;
         Self::set_input(&self.name_input.clone(), String::new(), window, cx);
         Self::set_input(&self.user_input.clone(), String::new(), window, cx);
         Self::set_input(&self.host_input.clone(), String::new(), window, cx);
@@ -1221,7 +1340,7 @@ impl Workbench {
     fn save_profile(&mut self, cx: &mut Context<Self>) {
         if self.save_profile_quiet(cx) {
             // A stale connect error would hide the "saved" notice.
-            self.connect_error = None;
+            self.conn.connect_error = None;
             let text = if self.save_password {
                 "Profil koneksi tersimpan, password di keychain."
             } else {
@@ -1291,13 +1410,7 @@ impl Workbench {
         if removed.save_password {
             self.apply_keychain(removed.id.clone(), PasswordAction::Delete, cx);
         }
-        if let Some(last) = &mut self.last_connection {
-            last.profile_ix = match last.profile_ix {
-                Some(i) if i == ix => None,
-                Some(i) if i > ix => Some(i - 1),
-                other => other,
-            };
-        }
+        self.shift_profile_ix(ix);
         if self.editing_profile == Some(ix) {
             self.editing_profile = None;
         } else if let Some(editing) = self.editing_profile {
@@ -1368,7 +1481,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.selected_object = Some(object.name.clone());
+        self.conn.selected_object = Some(object.name.clone());
         let double_click = matches!(event, ClickEvent::Mouse(m) if m.down.click_count >= 2);
         if double_click {
             if schema::has_data(&object.kind) {
@@ -1389,15 +1502,16 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.session.is_none() {
+        if self.conn.session.is_none() {
             return;
         }
-        if self.busy {
-            self.status = "Masih ada operasi berjalan.".to_string();
+        if self.conn.busy {
+            self.conn.status = "Masih ada operasi berjalan.".to_string();
             cx.notify();
             return;
         }
         let kind = self
+            .conn
             .objects
             .iter()
             .find(|o| o.owner == owner && o.name == name)
@@ -1432,10 +1546,10 @@ impl Workbench {
     }
 
     fn describe_object(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
-        if self.busy || self.session.is_none() || self.show_home {
+        if self.conn.busy || self.conn.session.is_none() || self.show_home {
             return;
         }
-        self.status = format!("Describe {}.{}...", object.owner, object.name);
+        self.conn.status = format!("Describe {}.{}...", object.owner, object.name);
         self.spawn_db(
             Job::Describe {
                 owner: object.owner.clone(),
@@ -1451,10 +1565,10 @@ impl Workbench {
 
     /// "View Script": fetch the DDL; the response opens it in a new tab.
     fn view_script(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
-        if self.busy || self.session.is_none() {
+        if self.conn.busy || self.conn.session.is_none() {
             return;
         }
-        self.status = format!("Mengambil DDL {}.{}...", object.owner, object.name);
+        self.conn.status = format!("Mengambil DDL {}.{}...", object.owner, object.name);
         self.spawn_db(
             Job::Ddl {
                 owner: object.owner.clone(),
@@ -1473,9 +1587,10 @@ impl Workbench {
     /// worker fetch and write the whole table. If the platform has no file
     /// dialog, fall back to a timestamped file in the working directory.
     fn export_table(&mut self, object: ObjectRef, format: ExportFormat, cx: &mut Context<Self>) {
-        if self.busy || self.session.is_none() {
+        if self.conn.busy || self.conn.session.is_none() {
             return;
         }
+        let conn_id = self.conn.id;
         let suggested = format!("{}.{}", object.name, format.extension());
         let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let prompt = cx.prompt_for_new_path(&dir, Some(&suggested));
@@ -1494,20 +1609,22 @@ impl Workbench {
                 return;
             };
             let _ = view.update(cx, |this, cx| {
-                this.status = format!("Export {}.{}...", object.owner, object.name);
-                this.spawn_db(
-                    Job::ExportTable {
-                        owner: object.owner.clone(),
-                        name: object.name.clone(),
-                        path,
-                        format,
-                    },
-                    PendingOp::ExportTable {
-                        owner: object.owner,
-                        name: object.name,
-                    },
-                    cx,
-                );
+                this.with_conn(conn_id, cx, |this, _, cx| {
+                    this.conn.status = format!("Export {}.{}...", object.owner, object.name);
+                    this.spawn_db(
+                        Job::ExportTable {
+                            owner: object.owner.clone(),
+                            name: object.name.clone(),
+                            path,
+                            format,
+                        },
+                        PendingOp::ExportTable {
+                            owner: object.owner,
+                            name: object.name,
+                        },
+                        cx,
+                    );
+                });
             });
         })
         .detach();
@@ -1516,9 +1633,10 @@ impl Workbench {
     /// "Import Data": pick a CSV file whose header names match the table's
     /// columns; rows are inserted without commit.
     fn import_table(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
-        if self.busy || self.session.is_none() {
+        if self.conn.busy || self.conn.session.is_none() {
             return;
         }
+        let conn_id = self.conn.id;
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -1542,19 +1660,21 @@ impl Workbench {
                 let Some(path) = path else {
                     return;
                 };
-                this.status = format!("Import ke {}.{}...", object.owner, object.name);
-                this.spawn_db(
-                    Job::ImportCsv {
-                        owner: object.owner.clone(),
-                        name: object.name.clone(),
-                        path,
-                    },
-                    PendingOp::ImportCsv {
-                        owner: object.owner,
-                        name: object.name,
-                    },
-                    cx,
-                );
+                this.with_conn(conn_id, cx, |this, _, cx| {
+                    this.conn.status = format!("Import ke {}.{}...", object.owner, object.name);
+                    this.spawn_db(
+                        Job::ImportCsv {
+                            owner: object.owner.clone(),
+                            name: object.name.clone(),
+                            path,
+                        },
+                        PendingOp::ImportCsv {
+                            owner: object.owner,
+                            name: object.name,
+                        },
+                        cx,
+                    );
+                });
             });
         })
         .detach();
@@ -1566,32 +1686,43 @@ impl Workbench {
         &mut self,
         generation: u64,
         resp: Result<Response, RecvError>,
+        background: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // A superseded operation (after Stop, or a newer op) drops its
         // response entirely: stale data must never overwrite fresh state.
-        if generation != self.op_generation {
+        if generation != self.conn.op_generation {
             return;
         }
-        let pending = self.pending_op.take();
-        let pending_sql = self.pending_sql.take();
-        self.busy = false;
+        let pending = self.conn.pending_op.take();
+        let pending_sql = self.conn.pending_sql.take();
+        self.conn.busy = false;
         let resp = match resp {
             Ok(resp) => resp,
             Err(_) => {
                 self.push_message("DB worker berhenti.".to_string());
-                self.status = "Worker error".to_string();
+                self.conn.status = "Worker error".to_string();
                 cx.notify();
                 return;
             }
         };
+        if matches!(
+            (&pending, &resp),
+            (Some(PendingOp::Run), Response::Executed(_))
+                | (Some(PendingOp::ImportCsv { .. }), Response::Imported(_))
+                | (Some(PendingOp::ApplyEdits), Response::CellsUpdated { .. })
+        ) {
+            self.conn.uncommitted = true;
+        }
         if let Response::Failed(message) = &resp {
             if matches!(pending, Some(PendingOp::Connect)) {
+                self.conn.open_tab_on_connect = false;
                 // A direct connect with a saved password failed (wrong or
                 // missing password): open the dialog so it can be fixed.
                 if !self.show_connection_form {
                     if let Some(ix) = self
+                        .conn
                         .last_connection
                         .as_ref()
                         .filter(|l| !l.demo)
@@ -1600,26 +1731,34 @@ impl Workbench {
                         self.edit_profile(ix, window, cx);
                     }
                 }
-                self.connect_error = Some(message.clone());
+                self.conn.connect_error = Some(message.clone());
             }
             self.push_message(message.clone());
-            self.status = "Error (lihat Messages).".to_string();
+            self.conn.status = "Error (lihat Messages).".to_string();
             self.target_tab_mut().results_tab = ResultsTab::Messages;
             cx.notify();
             return;
         }
         match (pending, resp) {
             (Some(PendingOp::Connect), Response::Connected(info)) => {
-                self.session = Some(info.clone());
+                self.conn.session = Some(info.clone());
                 self.reset_catalog(Some(info.user.clone()));
-                self.current_schema = None;
-                self.connect_error = None;
+                self.conn.current_schema = None;
+                self.conn.connect_error = None;
                 self.show_connection_form = false;
-                self.status = format!("Connected sebagai {}.", info.user);
+                self.conn.status = format!("Connected sebagai {}.", info.user);
                 self.push_message(format!(
                     "Connected: {} @ {} ({})",
                     info.user, info.database, info.version
                 ));
+                // Connected from a tab of another connection: give this
+                // one a tab of its own to work in.
+                if std::mem::take(&mut self.conn.open_tab_on_connect)
+                    && !background
+                    && self.show_home
+                {
+                    self.add_tab(window, cx);
+                }
                 cx.notify();
                 self.refresh_schema(cx);
             }
@@ -1631,12 +1770,12 @@ impl Workbench {
                     );
                     self.push_message(text.clone());
                     self.form_notice = Some((false, text));
-                    self.status = "Test koneksi berhasil.".to_string();
+                    self.conn.status = "Test koneksi berhasil.".to_string();
                 }
                 Err(message) => {
                     self.push_message(format!("Test koneksi gagal: {message}"));
                     self.form_notice = Some((true, format!("Test koneksi gagal: {message}")));
-                    self.status = "Test koneksi gagal.".to_string();
+                    self.conn.status = "Test koneksi gagal.".to_string();
                 }
             },
             (Some(PendingOp::Run), Response::QueryDone(result)) => {
@@ -1656,7 +1795,7 @@ impl Workbench {
                 self.set_grid_result(result, cx);
                 self.target_tab_mut().results_tab = ResultsTab::Results;
                 let is_data = self.target_tab_mut().data.is_some();
-                self.status = if truncated && is_data {
+                self.conn.status = if truncated && is_data {
                     format!("{rows} baris dalam {elapsed}ms (masih ada baris berikutnya)")
                 } else if truncated {
                     format!("{rows} baris dalam {elapsed}ms (dibatasi {DEFAULT_MAX_ROWS} baris)")
@@ -1669,7 +1808,7 @@ impl Workbench {
                     self.record_run(&sql);
                 }
                 self.push_message(format!("{affected} baris terpengaruh."));
-                self.status = format!("{affected} baris terpengaruh (belum commit).");
+                self.conn.status = format!("{affected} baris terpengaruh (belum commit).");
                 self.target_tab_mut().results_tab = ResultsTab::Messages;
             }
             (Some(PendingOp::Explain), Response::PlanTree(nodes, lines)) => {
@@ -1678,37 +1817,41 @@ impl Workbench {
                 tab.plan_nodes = Some(nodes);
                 tab.plan_lines = lines;
                 tab.results_tab = ResultsTab::Plan;
-                self.status = "Explain plan selesai.".to_string();
+                self.conn.status = "Explain plan selesai.".to_string();
             }
             (Some(PendingOp::Explain), Response::Plan(lines)) => {
                 let tab = self.target_tab_mut();
                 tab.plan_nodes = None;
                 tab.plan_lines = lines;
                 tab.results_tab = ResultsTab::Plan;
-                self.status = "Explain plan selesai.".to_string();
+                self.conn.status = "Explain plan selesai.".to_string();
             }
             (Some(PendingOp::ListSchemas), Response::Schemas(schemas)) => {
-                let user = self.session.as_ref().map(|s| s.user.clone());
+                let user = self.conn.session.as_ref().map(|s| s.user.clone());
                 // Keep the current pick on refresh; otherwise start in the
                 // session user's own schema, as Toad does.
-                let keep = self.current_schema.clone().filter(|c| schemas.contains(c));
-                self.current_schema = keep
+                let keep = self
+                    .conn
+                    .current_schema
+                    .clone()
+                    .filter(|c| schemas.contains(c));
+                self.conn.current_schema = keep
                     .or_else(|| user.filter(|u| schemas.contains(u)))
                     .or_else(|| schemas.first().cloned());
                 self.catalog.borrow_mut().set_schemas(schemas.clone());
-                self.schemas = schemas;
+                self.conn.schemas = schemas;
                 self.load_objects(cx);
             }
             (Some(PendingOp::ListObjects), Response::Objects(objects)) => {
                 let count = objects.len();
-                self.objects = objects;
-                self.selected_object = None;
-                let schema = self.current_schema.clone().unwrap_or_default();
-                self.status = format!("{schema}: {count} objek dimuat.");
+                self.conn.objects = objects;
+                self.conn.selected_object = None;
+                let schema = self.conn.current_schema.clone().unwrap_or_default();
+                self.conn.status = format!("{schema}: {count} objek dimuat.");
                 // Autocomplete metadata follows the explorer: (re)load the
                 // schema just listed, and the session user's own schema,
                 // which unqualified names resolve against.
-                let user = self.session.as_ref().map(|s| s.user.clone());
+                let user = self.conn.session.as_ref().map(|s| s.user.clone());
                 if !schema.is_empty() {
                     self.load_catalog(schema, cx);
                 }
@@ -1723,7 +1866,7 @@ impl Workbench {
                 let tab = self.active_tab_mut();
                 tab.title = format!("{name}.sql");
                 tab.kind = TabKind::Script;
-                self.status = format!("Script {owner}.{name}.");
+                self.conn.status = format!("Script {owner}.{name}.");
             }
             (
                 Some(PendingOp::ExportTable { owner, name }),
@@ -1742,13 +1885,13 @@ impl Workbench {
                     "Export {owner}.{name}: {rows} baris ke {}{cap}",
                     path.display()
                 ));
-                self.status = format!("Export {name} selesai: {rows} baris.");
+                self.conn.status = format!("Export {name} selesai: {rows} baris.");
             }
             (Some(PendingOp::ImportCsv { owner, name }), Response::Imported(rows)) => {
                 self.push_message(format!(
                     "Import {owner}.{name}: {rows} baris dimasukkan (belum commit)."
                 ));
-                self.status = format!("{rows} baris diimpor ke {name} (belum commit).");
+                self.conn.status = format!("{rows} baris diimpor ke {name} (belum commit).");
                 self.target_tab_mut().results_tab = ResultsTab::Messages;
             }
             (Some(PendingOp::Describe { owner, name }), Response::Described(defs)) => {
@@ -1756,11 +1899,11 @@ impl Workbench {
                 let count = result.row_count();
                 self.set_grid_result(result, cx);
                 self.target_tab_mut().results_tab = ResultsTab::Results;
-                self.status = format!("{owner}.{name}: {count} kolom.");
+                self.conn.status = format!("{owner}.{name}: {count} kolom.");
             }
             (Some(PendingOp::DataStructure), Response::Described(defs)) => {
                 let result = schema::describe_to_result(&defs);
-                self.status = format!("{} kolom.", result.row_count());
+                self.conn.status = format!("{} kolom.", result.row_count());
                 if let Some(state) = self
                     .target_tab_mut()
                     .data
@@ -1775,7 +1918,7 @@ impl Workbench {
             }
             (Some(PendingOp::DataIndexes), Response::Indexes(indexes)) => {
                 let result = schema::indexes_to_result(&indexes);
-                self.status = format!("{} index.", result.row_count());
+                self.conn.status = format!("{} index.", result.row_count());
                 if let Some(state) = self
                     .target_tab_mut()
                     .data
@@ -1789,7 +1932,7 @@ impl Workbench {
                 }
             }
             (Some(PendingOp::DataDdl), Response::Ddl(ddl)) => {
-                self.status = "DDL dimuat.".to_string();
+                self.conn.status = "DDL dimuat.".to_string();
                 if let Some(editor) = self.target_tab_mut().data.as_ref().map(|d| d.ddl.clone()) {
                     editor.update(cx, |state, cx| state.set_value(ddl, window, cx));
                 }
@@ -1798,19 +1941,22 @@ impl Workbench {
                 self.edits_applied(done, error, cx);
             }
             (Some(PendingOp::Commit), Response::Committed) => {
+                self.conn.uncommitted = false;
                 self.push_message("Commit berhasil.".to_string());
-                self.status = "Commit berhasil.".to_string();
+                self.conn.status = "Commit berhasil.".to_string();
                 self.clear_edit_marks(cx);
             }
             (Some(PendingOp::Rollback), Response::RolledBack) => {
+                self.conn.uncommitted = false;
                 self.push_message("Rollback berhasil.".to_string());
-                self.status = "Rollback berhasil.".to_string();
+                self.conn.status = "Rollback berhasil.".to_string();
                 self.clear_edit_marks(cx);
                 // The grid still shows the rolled-back values.
-                if self
-                    .tabs
-                    .get(self.active_tab)
-                    .is_some_and(|t| t.data.is_some())
+                if !background
+                    && self
+                        .tabs
+                        .get(self.active_tab)
+                        .is_some_and(|t| t.data.is_some())
                 {
                     self.reload_data(cx);
                 }
@@ -1821,18 +1967,22 @@ impl Workbench {
     }
 
     fn conn_status(&self, theme: &gpui_kit::component::Theme) -> (Hsla, &'static str, String) {
-        if self.busy && matches!(self.pending_op, Some(PendingOp::Connect)) {
+        if self.conn.busy && matches!(self.conn.pending_op, Some(PendingOp::Connect)) {
             return (theme.warning, "Connecting…", String::new());
         }
-        if let Some(session) = &self.session {
-            let mode = if self.demo_mode { "Demo" } else { "Connected" };
+        if let Some(session) = &self.conn.session {
+            let mode = if self.conn.demo_mode {
+                "Demo"
+            } else {
+                "Connected"
+            };
             return (
                 theme.success,
                 mode,
                 format!("{} @ {}", session.user, session.database),
             );
         }
-        if self.connect_error.is_some() {
+        if self.conn.connect_error.is_some() {
             return (
                 theme.danger,
                 "Connection failed",
@@ -2015,7 +2165,32 @@ impl Workbench {
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(label_color)
                             .child(tab.title.clone()),
-                    ),
+                    )
+                    // Which connection the tab runs on, once more than one
+                    // is open (or "closed" when its connection is gone).
+                    .when_some(self.tab_conn_label(tab), |this, (label, closed)| {
+                        this.child(
+                            div()
+                                .flex_none()
+                                .max_w(px(96.))
+                                .truncate()
+                                .px(px(SPACE_1))
+                                .rounded(px(RADIUS_SM))
+                                .bg(if closed {
+                                    theme.danger.opacity(0.15)
+                                } else {
+                                    theme.secondary
+                                })
+                                .text_size(px(FONT_CAPTION))
+                                .line_height(px(LEADING_CAPTION))
+                                .text_color(if closed {
+                                    theme.danger
+                                } else {
+                                    theme.muted_foreground
+                                })
+                                .child(label),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -2168,11 +2343,13 @@ impl Workbench {
                 .child(icon(IconName::Plus, 16., theme.muted_foreground)),
         );
         panel = panel.child(header);
-        panel = panel.child(self.render_session_card(theme, cx));
+        panel = panel
+            .child(self.render_session_card(theme, cx))
+            .child(self.render_parked_conns(theme, cx));
         // Navicat-style: saved connections are listed while disconnected
         // (click one to open its dialog); once connected the panel belongs
         // to the explorer. New/edit connection happens in a modal.
-        if self.session.is_some() {
+        if self.conn.session.is_some() {
             panel = panel.child(self.render_explorer(theme, cx));
         } else {
             panel = panel.child(self.render_profile_list(theme, cx));
@@ -2198,8 +2375,10 @@ impl Workbench {
                         Button::new("demo")
                             .label("Demo")
                             .icon(IconName::Play)
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
+                            .disabled(self.conn.busy)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.connect(true, window, cx)),
+                            ),
                     ),
             );
         }
@@ -2209,11 +2388,11 @@ impl Workbench {
     /// Connect again to the last connection: demo and profiles with a
     /// saved password reconnect directly; anything else opens its dialog.
     fn reconnect_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(last) = self.last_connection.clone() else {
+        let Some(last) = self.conn.last_connection.clone() else {
             return;
         };
         if last.demo {
-            self.connect(true, cx);
+            self.connect(true, window, cx);
         } else if let Some(ix) = last.profile_ix.filter(|ix| *ix < self.profiles.len()) {
             self.open_profile(ix, window, cx);
         } else {
@@ -2222,7 +2401,7 @@ impl Workbench {
     }
 
     fn edit_last_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(last) = self.last_connection.clone() else {
+        let Some(last) = self.conn.last_connection.clone() else {
             return;
         };
         if last.demo {
@@ -2255,7 +2434,7 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let Some(last) = self.last_connection.clone() else {
+        let Some(last) = self.conn.last_connection.clone() else {
             return div()
                 .px(px(SPACE_3))
                 .pt(px(SPACE_3))
@@ -2265,8 +2444,8 @@ impl Workbench {
                 ))
                 .into_any_element();
         };
-        let connected = self.session.is_some();
-        let connecting = self.busy && matches!(self.pending_op, Some(PendingOp::Connect));
+        let connected = self.conn.session.is_some();
+        let connecting = self.conn.busy && matches!(self.conn.pending_op, Some(PendingOp::Connect));
         let dot = if connecting {
             theme.warning
         } else if connected {
@@ -2275,7 +2454,7 @@ impl Workbench {
             theme.danger
         };
         let view = cx.entity();
-        let busy = self.busy;
+        let busy = self.conn.busy;
         let demo = last.demo;
         let menu_button = Button::new("connection-actions")
             .icon(IconName::EllipsisVertical)
@@ -2304,7 +2483,7 @@ impl Workbench {
                             .disabled(busy)
                             .on_click(move |_, window, cx: &mut App| {
                                 toggle_view.update(cx, |this, cx| {
-                                    if this.session.is_some() {
+                                    if this.conn.session.is_some() {
                                         this.disconnect(cx);
                                     } else {
                                         this.reconnect_last(window, cx);
@@ -2539,6 +2718,7 @@ impl Workbench {
                 })),
         );
         let notice = self
+            .conn
             .connect_error
             .clone()
             .map(|e| (true, e))
@@ -2589,7 +2769,7 @@ impl Workbench {
             .child(
                 Button::new("test-connect")
                     .label("Test")
-                    .disabled(self.busy)
+                    .disabled(self.conn.busy)
                     .on_click(cx.listener(|this, _, _, cx| this.test_connection(cx))),
             )
             .child(
@@ -2619,7 +2799,9 @@ impl Workbench {
             .child(
                 Button::new("connect")
                     .label(
-                        if self.busy && matches!(self.pending_op, Some(PendingOp::Connect)) {
+                        if self.conn.busy
+                            && matches!(self.conn.pending_op, Some(PendingOp::Connect))
+                        {
                             "Connecting…"
                         } else {
                             "Connect"
@@ -2627,8 +2809,8 @@ impl Workbench {
                     )
                     .icon(IconName::Database)
                     .primary()
-                    .disabled(self.busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.connect(false, cx))),
+                    .disabled(self.conn.busy)
+                    .on_click(cx.listener(|this, _, window, cx| this.connect(false, window, cx))),
             );
         let card = div()
             .id("connection-dialog")
@@ -2700,15 +2882,15 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let view = cx.entity();
-        let schemas = self.schemas.clone();
-        let current = self.current_schema.clone();
+        let schemas = self.conn.schemas.clone();
+        let current = self.conn.current_schema.clone();
         let schema_button = Button::new("schema-select")
             .child(select_trigger(
                 current.clone().unwrap_or_else(|| "(schema)".to_string()),
                 theme,
             ))
             .w_full()
-            .disabled(self.schemas.is_empty())
+            .disabled(self.conn.schemas.is_empty())
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.scrollable(true).max_h(px(360.)).min_w(px(220.));
                 for schema in &schemas {
@@ -2729,7 +2911,7 @@ impl Workbench {
         let view = cx.entity();
         let counts: Vec<(ObjectCategory, usize)> = ObjectCategory::ALL
             .iter()
-            .map(|c| (*c, schema::count_in(&self.objects, *c)))
+            .map(|c| (*c, schema::count_in(&self.conn.objects, *c)))
             .collect();
         let current_category = self.category;
         let category_button = Button::new("category-select")
@@ -2737,7 +2919,7 @@ impl Workbench {
                 format!(
                     "{} ({})",
                     current_category.label(),
-                    schema::count_in(&self.objects, current_category)
+                    schema::count_in(&self.conn.objects, current_category)
                 ),
                 theme,
             ))
@@ -2759,7 +2941,7 @@ impl Workbench {
             });
 
         let visible: Vec<ObjectRef> =
-            schema::objects_in(&self.objects, self.category, &self.tree_filter)
+            schema::objects_in(&self.conn.objects, self.category, &self.tree_filter)
                 .into_iter()
                 .map(|o| ObjectRef {
                     owner: o.owner.clone(),
@@ -2768,7 +2950,7 @@ impl Workbench {
                 })
                 .collect();
         let list = if visible.is_empty() {
-            let message = if self.busy && self.objects.is_empty() {
+            let message = if self.conn.busy && self.conn.objects.is_empty() {
                 "Memuat objek..."
             } else if self.tree_filter.is_empty() {
                 "Tidak ada objek di kategori ini."
@@ -2786,7 +2968,7 @@ impl Workbench {
                 .into_any_element()
         } else {
             let count = visible.len();
-            let selected = self.selected_object.clone();
+            let selected = self.conn.selected_object.clone();
             let theme = theme.clone();
             div()
                 .flex_1()
@@ -3143,7 +3325,7 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let no_session = self.session.is_none();
+        let no_session = self.conn.session.is_none();
         let on_home = self.show_home;
         let mut bar = div()
             .flex()
@@ -3190,7 +3372,7 @@ impl Workbench {
                         IconName::Play
                     })
                     .primary()
-                    .loading(self.busy)
+                    .loading(self.conn.busy)
                     .disabled(on_home || no_session)
                     .tooltip("Run (Cmd/Ctrl+Enter atau F5)")
                     .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
@@ -3201,7 +3383,7 @@ impl Workbench {
                         .small()
                         .label("Explain")
                         .icon(IconName::ChartColumn)
-                        .disabled(on_home || no_session || self.busy)
+                        .disabled(on_home || no_session || self.conn.busy)
                         .on_click(cx.listener(|this, _, _, cx| this.explain(cx))),
                 )
             })
@@ -3222,7 +3404,7 @@ impl Workbench {
                     .small()
                     .label("Stop")
                     .icon(IconName::Square)
-                    .disabled(no_session || !self.busy)
+                    .disabled(no_session || !self.conn.busy)
                     .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
             )
             .child(
@@ -3231,7 +3413,7 @@ impl Workbench {
                     .label("Commit")
                     .icon(IconName::Check)
                     .ghost()
-                    .disabled(no_session || self.busy)
+                    .disabled(no_session || self.conn.busy)
                     .on_click(cx.listener(|this, _, _, cx| this.commit(cx))),
             )
             .child(
@@ -3240,53 +3422,11 @@ impl Workbench {
                     .label("Rollback")
                     .icon(IconName::Undo2)
                     .ghost()
-                    .disabled(no_session || self.busy)
+                    .disabled(no_session || self.conn.busy)
                     .on_click(cx.listener(|this, _, _, cx| this.rollback(cx))),
             );
         bar = bar.child(actions).child(div().flex_1().min_w(px(SPACE_2)));
-        let (dot_color, _, conn_detail) = self.conn_status(theme);
-        let pill_label = if self.session.is_some() {
-            conn_detail
-        } else {
-            "Not connected".to_string()
-        };
-        bar.child(
-            div()
-                .id("conn-pill")
-                .flex()
-                .flex_row()
-                .items_center()
-                // Keeps its size; the toolbar buttons give way first.
-                .flex_none()
-                .max_w(px(280.))
-                .h(px(24.))
-                .gap(px(SPACE_2))
-                .px(px(SPACE_2))
-                .rounded(px(RADIUS_MD))
-                .border_1()
-                .border_color(theme.border)
-                .hover(|this| this.bg(theme.secondary))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.rail = RailPanel::Connections;
-                    cx.notify();
-                }))
-                .child(status_dot(dot_color))
-                .child(
-                    div()
-                        .min_w(px(0.))
-                        .truncate()
-                        .text_size(px(FONT_LABEL))
-                        .line_height(px(LEADING_LABEL))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.foreground)
-                        .child(pill_label),
-                )
-                .child(div().flex_none().child(icon(
-                    IconName::ChevronDown,
-                    14.,
-                    theme.muted_foreground,
-                ))),
-        )
+        bar.child(self.render_conn_pill(theme, cx))
     }
 
     /// Full-area grid of a data tab, with pagination under it.
@@ -3315,7 +3455,7 @@ impl Workbench {
                 .items_center()
                 .justify_center()
                 .child(empty_state_text(
-                    if self.busy {
+                    if self.conn.busy {
                         "Memuat data...".to_string()
                     } else {
                         "Tidak ada data. Lihat Info di bawah untuk error.".to_string()
@@ -3655,7 +3795,7 @@ impl Workbench {
                         .items_center()
                         .justify_center()
                         .child(empty_state_text(
-                            if self.session.is_none() {
+                            if self.conn.session.is_none() {
                                 "Connect first, then run a query to see results here."
                             } else {
                                 "Run a query to see results here. Cmd/Ctrl+Enter or F5 runs the active tab."
@@ -4093,7 +4233,28 @@ impl Workbench {
                 )
         };
         let mut grid = div().flex().flex_row().flex_wrap().gap(px(SPACE_3));
-        let demo_connected = self.demo_mode && self.session.is_some();
+        // Green "Connected" line on tiles whose connection is open, with
+        // "aktif" on the one the explorer shows.
+        let open_badge = |id: Option<u64>| {
+            id.map(|id| {
+                let active = id == self.conn.id;
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_1))
+                    .child(status_dot(theme.success))
+                    .child(caption_text(
+                        if active {
+                            "Connected · aktif".to_string()
+                        } else {
+                            "Connected".to_string()
+                        },
+                        theme,
+                    ))
+            })
+        };
+        let demo_open = self.find_open_conn(None, true);
         grid = grid.child(
             tile("home-demo-tile".to_string())
                 .child(tile_title(
@@ -4101,21 +4262,25 @@ impl Workbench {
                     "Demo database".to_string(),
                     "Built-in, no Oracle needed".to_string(),
                 ))
+                .children(open_badge(demo_open))
                 .child(
                     Button::new("home-demo")
-                        .label(if demo_connected {
-                            "Connected"
+                        .label(if demo_open.is_some() {
+                            "Buka"
                         } else {
                             "Connect"
                         })
                         .icon(IconName::Play)
                         .primary()
-                        .disabled(self.busy || demo_connected)
-                        .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
+                        .disabled(self.conn.busy && demo_open.is_none())
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.connect(true, window, cx)),
+                        ),
                 ),
         );
         for (ix, profile) in self.profiles.iter().enumerate() {
             let profile = profile.clone();
+            let open = self.find_open_conn(Some(ix), false);
             grid = grid.child(
                 tile(format!("home-profile-{ix}"))
                     .child(tile_title(
@@ -4123,13 +4288,15 @@ impl Workbench {
                         profile.name.clone(),
                         format!("{}@{}", profile.username, profile.connect_string),
                     ))
+                    .children(open_badge(open))
                     .child(
                         Button::new(format!("home-use-{ix}"))
-                            .label("Open")
+                            .label(if open.is_some() { "Buka" } else { "Open" })
                             .icon(IconName::LogIn)
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                // Saved password: connect now. Otherwise
-                                // open the filled dialog for the password.
+                                // Open already: switch to it. Saved password:
+                                // connect now. Otherwise open the filled
+                                // dialog for the password.
                                 this.open_profile(ix, window, cx);
                             })),
                     ),
@@ -4278,10 +4445,10 @@ impl Workbench {
                 .justify_end()
                 .child(
                     caption_text(
-                        if self.busy {
+                        if self.conn.busy {
                             "Running…".to_string()
-                        } else if self.session.is_some() {
-                            self.status.clone()
+                        } else if self.conn.session.is_some() {
+                            self.conn.status.clone()
                         } else {
                             String::new()
                         },
