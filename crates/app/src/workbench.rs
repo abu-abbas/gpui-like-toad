@@ -417,7 +417,7 @@ impl Workbench {
 
     // ----- helpers -----
 
-    fn push_message(&mut self, message: String) {
+    pub(crate) fn push_message(&mut self, message: String) {
         self.messages.push(message);
         if self.messages.len() > MAX_MESSAGES {
             let excess = self.messages.len() - MAX_MESSAGES;
