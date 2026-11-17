@@ -165,6 +165,12 @@ fn open_main_window(cx: &mut App) {
             height: gpui_kit::px(800.),
         },
     )));
+    // Below this the rail, the side panel's minimum width and the
+    // toolbar no longer fit side by side, and content gets clipped.
+    options.window_min_size = Some(Size {
+        width: gpui_kit::px(820.),
+        height: gpui_kit::px(520.),
+    });
     options.titlebar = Some(TitlebarOptions {
         title: Some(app_name!().into()),
         appears_transparent: false,

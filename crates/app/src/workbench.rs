@@ -2128,7 +2128,15 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut panel = div().flex().flex_col().size_full().bg(theme.background);
+        // `min_w(0)` + clip: the panel can be as narrow as its resize
+        // minimum, and nothing in it may push past the split edge.
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .bg(theme.background);
         let mut header = self.render_panel_header("Connections", theme);
         header = header.child(div().flex_1()).child(
             div()
@@ -2154,9 +2162,11 @@ impl Workbench {
         } else {
             panel = panel.child(self.render_profile_list(theme, cx));
             panel = panel.child(
+                // Wraps onto a second line when the panel is narrow.
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
                     .gap(px(SPACE_2))
                     .px(px(SPACE_3))
                     .pt(px(SPACE_3))
@@ -2363,6 +2373,7 @@ impl Workbench {
                         .flex_col()
                         .justify_center()
                         .flex_1()
+                        .min_w(px(0.))
                         .h(relative(1.0))
                         .px(px(SPACE_2))
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -2398,6 +2409,7 @@ impl Workbench {
                         .mr(px(SPACE_1))
                         .rounded(px(RADIUS_MD))
                         .hover(|this| this.bg(theme.danger))
+                        .flex_none()
                         .on_click(cx.listener(move |this, _, _, cx| this.remove_profile(ix, cx)))
                         .child(icon(IconName::Trash, 14., theme.muted_foreground)),
                 ),
@@ -2798,8 +2810,13 @@ impl Workbench {
                     .items_center()
                     .gap(px(SPACE_2))
                     .px(px(SPACE_3))
-                    .child(div().w(px(52.)).child(form_label("Schema", theme)))
-                    .child(div().flex_1().child(schema_button)),
+                    .child(
+                        div()
+                            .w(px(52.))
+                            .flex_none()
+                            .child(form_label("Schema", theme)),
+                    )
+                    .child(div().flex_1().min_w(px(0.)).child(schema_button)),
             )
             .child(
                 div()
@@ -2808,8 +2825,13 @@ impl Workbench {
                     .items_center()
                     .gap(px(SPACE_2))
                     .px(px(SPACE_3))
-                    .child(div().w(px(52.)).child(form_label("Objects", theme)))
-                    .child(div().flex_1().child(category_button)),
+                    .child(
+                        div()
+                            .w(px(52.))
+                            .flex_none()
+                            .child(form_label("Objects", theme)),
+                    )
+                    .child(div().flex_1().min_w(px(0.)).child(category_button)),
             )
             .child(
                 div()
@@ -3116,7 +3138,17 @@ impl Workbench {
             .border_b_1()
             .border_color(theme.border);
         let data_tab = !on_home && self.active_tab().kind == TabKind::Data;
-        bar = bar
+        // The buttons scroll sideways in a narrow window instead of pushing
+        // the connection pill past the edge.
+        let actions = div()
+            .id("toolbar-actions")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(SPACE_2))
+            .flex_shrink(1.)
+            .min_w(px(0.))
+            .overflow_x_scroll()
             // Like Navicat's "New Query" / Toad's "Editor": always opens a
             // fresh SQL editor tab, from any tab including Home.
             .child(
@@ -3191,8 +3223,8 @@ impl Workbench {
                     .ghost()
                     .disabled(no_session || self.busy)
                     .on_click(cx.listener(|this, _, _, cx| this.rollback(cx))),
-            )
-            .child(div().flex_1());
+            );
+        bar = bar.child(actions).child(div().flex_1().min_w(px(SPACE_2)));
         let (dot_color, _, conn_detail) = self.conn_status(theme);
         let pill_label = if self.session.is_some() {
             conn_detail
@@ -3205,6 +3237,9 @@ impl Workbench {
                 .flex()
                 .flex_row()
                 .items_center()
+                // Keeps its size; the toolbar buttons give way first.
+                .flex_none()
+                .max_w(px(280.))
                 .h(px(24.))
                 .gap(px(SPACE_2))
                 .px(px(SPACE_2))
@@ -3219,13 +3254,19 @@ impl Workbench {
                 .child(status_dot(dot_color))
                 .child(
                     div()
+                        .min_w(px(0.))
+                        .truncate()
                         .text_size(px(FONT_LABEL))
                         .line_height(px(LEADING_LABEL))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.foreground)
                         .child(pill_label),
                 )
-                .child(icon(IconName::ChevronDown, 14., theme.muted_foreground)),
+                .child(div().flex_none().child(icon(
+                    IconName::ChevronDown,
+                    14.,
+                    theme.muted_foreground,
+                ))),
         )
     }
 
@@ -3982,6 +4023,7 @@ impl Workbench {
                 .flex_col()
                 .gap(px(SPACE_2))
                 .w(px(232.))
+                .max_w_full()
                 .p(px(SPACE_3))
                 .rounded(px(RADIUS_MD))
                 .border_1()
@@ -4010,6 +4052,7 @@ impl Workbench {
                         .flex()
                         .flex_col()
                         .flex_1()
+                        .min_w(px(0.))
                         .overflow_hidden()
                         .child(
                             div()
@@ -4169,9 +4212,12 @@ impl Workbench {
                 .flex_row()
                 .items_center()
                 .gap(px(SPACE_2))
+                .min_w(px(0.))
                 .child(status_dot(dot_color))
                 .child(
                     div()
+                        .min_w(px(0.))
+                        .truncate()
                         .text_size(px(FONT_CAPTION))
                         .line_height(px(LEADING_CAPTION))
                         .font_weight(FontWeight::MEDIUM)
@@ -4204,16 +4250,28 @@ impl Workbench {
         // Right side: activity while busy, last action while connected,
         // empty while disconnected — the connection state already shows
         // once on the left, and every status line is mirrored to Messages.
-        bar.child(div().flex_1()).child(caption_text(
-            if self.busy {
-                "Running…".to_string()
-            } else if self.session.is_some() {
-                self.status.clone()
-            } else {
-                String::new()
-            },
-            theme,
-        ))
+        bar.child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_row()
+                .justify_end()
+                .child(
+                    caption_text(
+                        if self.busy {
+                            "Running…".to_string()
+                        } else if self.session.is_some() {
+                            self.status.clone()
+                        } else {
+                            String::new()
+                        },
+                        theme,
+                    )
+                    .min_w(px(0.))
+                    .truncate(),
+                ),
+        )
     }
 }
 
