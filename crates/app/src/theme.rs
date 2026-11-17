@@ -230,7 +230,8 @@ fn apply_light(theme: &mut Theme) {
     theme.table_hover = hex(VIOLET_50);
     theme.table_active = hex(VIOLET_100);
     theme.table_active_border = hex(VIOLET_500);
-    theme.table_row_border = hex(0xE4E4E7);
+    // Zebra only: no lines between rows.
+    theme.table_row_border = gpui_kit::hsla(0., 0., 0., 0.);
     theme.table_foot = hex(0xF4F4F5);
     theme.table_foot_foreground = hex(0x09090B);
     theme.list_hover = hex(VIOLET_50);
@@ -343,7 +344,7 @@ fn apply_dark(theme: &mut Theme) {
     theme.table_hover = hex(0x30264F);
     theme.table_active = hex(0x30264F);
     theme.table_active_border = hex(VIOLET_300);
-    theme.table_row_border = hex(0x3F3F46);
+    theme.table_row_border = gpui_kit::hsla(0., 0., 0., 0.);
     theme.table_foot = hex(0x27272A);
     theme.table_foot_foreground = hex(0xFAFAFA);
     theme.list_hover = hex(0x30264F);
