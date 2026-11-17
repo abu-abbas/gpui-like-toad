@@ -21,8 +21,8 @@ impl Workbench {
             self.close_quick_open(cx);
             return;
         }
-        if self.session.is_none() || self.show_connection_form {
-            self.status = "Quick Open butuh koneksi yang aktif.".to_string();
+        if self.conn.session.is_none() || self.show_connection_form {
+            self.conn.status = "Quick Open butuh koneksi yang aktif.".to_string();
             cx.notify();
             return;
         }
@@ -61,7 +61,7 @@ impl Workbench {
 
     fn quick_open_hits(&self) -> Vec<SchemaObject> {
         let query = self.quick_open.as_ref().map_or("", |q| q.query.as_str());
-        schema::quick_open_matches(&self.objects, query, QUICK_OPEN_ROWS)
+        schema::quick_open_matches(&self.conn.objects, query, QUICK_OPEN_ROWS)
             .into_iter()
             .cloned()
             .collect()
@@ -92,7 +92,7 @@ impl Workbench {
         };
         let (owner, name) = (object.owner.clone(), object.name.clone());
         self.close_quick_open(cx);
-        self.selected_object = Some(name.clone());
+        self.conn.selected_object = Some(name.clone());
         self.open_table_data(&owner, &name, window, cx);
     }
 
