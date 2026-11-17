@@ -280,7 +280,7 @@ impl Workbench {
             .outline()
             .small()
             .flex_none()
-            .max_w(px(300.))
+            .max_w(px(260.))
             .dropdown_caret(true)
             .child(status_dot(dot_color))
             .child(
