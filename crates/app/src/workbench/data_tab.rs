@@ -686,6 +686,8 @@ impl Workbench {
             .w(px(280.))
             .flex_none()
             .h_full()
+            .min_h(px(0.))
+            .overflow_hidden()
             .bg(theme.background)
             .border_l_1()
             .border_color(theme.border)

@@ -10,6 +10,7 @@
 
 pub mod client;
 pub mod completion;
+pub mod copy;
 pub mod credentials;
 pub mod demo;
 pub mod edit;
