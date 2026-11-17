@@ -113,7 +113,10 @@ impl Catalog {
 }
 
 fn has_columns(kind: &ObjectKind) -> bool {
-    matches!(kind, ObjectKind::Table | ObjectKind::View)
+    matches!(
+        kind,
+        ObjectKind::Table | ObjectKind::View | ObjectKind::MaterializedView
+    )
 }
 
 /// What a suggestion is, so the UI can pick an icon.
@@ -560,7 +563,7 @@ impl<'a> Collector<'a> {
         for object in objects {
             let kind = match object.kind {
                 ObjectKind::Table => SuggestionKind::Table,
-                ObjectKind::View => SuggestionKind::View,
+                ObjectKind::View | ObjectKind::MaterializedView => SuggestionKind::View,
                 ObjectKind::Synonym => SuggestionKind::Object,
                 // Indexes and triggers are never referenced in a query.
                 ObjectKind::Index | ObjectKind::Trigger => continue,

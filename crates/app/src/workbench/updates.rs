@@ -10,6 +10,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gpui_kit::component::spinner::Spinner;
 use ora_core::store::{self, UpdatePrefs};
 use ora_core::update::{self, ReleaseInfo};
 
@@ -628,7 +629,8 @@ impl Workbench {
         let can_download = update::pick_asset(&release.assets, std::env::consts::OS).is_some();
         let can_install = update::pick_installable(&release.assets, std::env::consts::OS).is_some();
         let staged = self.updates.staged.is_some();
-        let downloading = self.updates.downloading || self.updates.installing;
+        let installing = self.updates.installing;
+        let downloading = self.updates.downloading || installing;
         let note = self.updates.download_note.clone();
         page = page
             .child(
@@ -664,6 +666,7 @@ impl Workbench {
                                 .label("Update sekarang")
                                 .icon(IconName::Download)
                                 .primary()
+                                .loading(installing)
                                 .disabled(downloading)
                                 .on_click(cx.listener(|this, _, _, cx| this.install_update(cx))),
                         )
@@ -689,7 +692,7 @@ impl Workbench {
                     ),
             );
         if let Some((is_error, text)) = note {
-            page = page.child(if is_error {
+            let line = if is_error {
                 div()
                     .text_size(px(FONT_CAPTION))
                     .line_height(px(LEADING_CAPTION))
@@ -697,7 +700,19 @@ impl Workbench {
                     .child(text)
             } else {
                 caption_text(text, theme)
-            });
+            };
+            // A spinner next to the note while the update downloads/installs.
+            page = page.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .when(downloading, |row| {
+                        row.child(Spinner::new().small().color(theme.primary))
+                    })
+                    .child(line),
+            );
         }
         let notes = release.notes.trim();
         if notes.is_empty() {

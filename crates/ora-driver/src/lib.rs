@@ -245,10 +245,15 @@ impl DbClient for ThinClient {
         let owner_param: &str = &owner_upper;
         let cursor = conn
             .query(
-                "SELECT owner, object_name, object_type FROM all_objects \
-                 WHERE owner = :1 AND object_type IN \
-                 ('TABLE','VIEW','INDEX','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','TRIGGER','SYNONYM') \
-                 ORDER BY object_type, object_name",
+                // A materialized view is listed twice by the dictionary: as
+                // MATERIALIZED VIEW and as its container TABLE. Hide the
+                // container table so the MV shows up in its own category only.
+                "SELECT o.owner, o.object_name, o.object_type FROM all_objects o \
+                 WHERE o.owner = :1 AND o.object_type IN \
+                 ('TABLE','VIEW','MATERIALIZED VIEW','INDEX','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','TRIGGER','SYNONYM') \
+                 AND NOT (o.object_type = 'TABLE' AND EXISTS \
+                   (SELECT 1 FROM all_mviews m WHERE m.owner = o.owner AND m.mview_name = o.object_name)) \
+                 ORDER BY o.object_type, o.object_name",
                 &[&owner_param],
             )
             .map_err(db_err)?;
@@ -299,7 +304,10 @@ impl DbClient for ThinClient {
             &[],
         )
         .map_err(db_err)?;
-        let type_param: &str = kind.oracle_type();
+        // DBMS_METADATA spells multi-word types with an underscore
+        // (MATERIALIZED_VIEW).
+        let type_owned = kind.oracle_type().replace(' ', "_");
+        let type_param: &str = &type_owned;
         let name_param: &str = name;
         let owner_param: &str = owner;
         let cursor = conn
@@ -390,7 +398,7 @@ impl DbClient for ThinClient {
             .into_iter()
             .map(|object| CatalogObject {
                 columns: match object.kind {
-                    ObjectKind::Table | ObjectKind::View => {
+                    ObjectKind::Table | ObjectKind::View | ObjectKind::MaterializedView => {
                         columns.remove(&object.name).unwrap_or_default()
                     }
                     _ => Vec::new(),

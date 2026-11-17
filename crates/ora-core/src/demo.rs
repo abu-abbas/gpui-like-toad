@@ -364,6 +364,7 @@ impl DbClient for DemoClient {
             ("EMPLOYEES", ObjectKind::Table),
             ("DEPARTMENTS", ObjectKind::Table),
             ("EMP_DETAILS_VIEW", ObjectKind::View),
+            ("EMP_SUMMARY_MV", ObjectKind::MaterializedView),
             ("EMP_EMP_ID_PK", ObjectKind::Index),
             ("EMP_EMAIL_UK", ObjectKind::Index),
             ("DEPT_LOCATION_IX", ObjectKind::Index),
@@ -795,12 +796,13 @@ mod tests {
     fn demo_list_objects_and_describe() {
         let mut client = connected();
         let objects = client.list_objects("hr").unwrap();
-        assert_eq!(objects.len(), 12);
+        assert_eq!(objects.len(), 13);
         assert!(objects.iter().all(|o| o.owner == "HR"));
         // Every group the schema tree shows is represented.
         for kind in [
             ObjectKind::Table,
             ObjectKind::View,
+            ObjectKind::MaterializedView,
             ObjectKind::Index,
             ObjectKind::Package,
             ObjectKind::Procedure,
