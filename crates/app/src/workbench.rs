@@ -61,11 +61,13 @@ use crate::worker::{DbHandle, ExportFormat, Job, Password, Response};
 mod cell_edit;
 mod data_tab;
 mod quick_open;
+mod updates;
 use cell_edit::CellEditor;
 use data_tab::{DataTab, DataView};
 use quick_open::QuickOpen;
+use updates::UpdateState;
 
-actions!(db_explorer, [RunQuery, QuickOpenTable]);
+actions!(db_explorer, [RunQuery, QuickOpenTable, CheckForUpdates]);
 
 const MAX_MESSAGES: usize = 200;
 
@@ -296,6 +298,8 @@ pub struct Workbench {
     /// Schema the user is waiting on after typing `SCHEMA.`: reopen the
     /// popup when its catalog arrives.
     catalog_retrigger: Option<String>,
+    /// GitHub Releases update check state (see `updates.rs`).
+    updates: UpdateState,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -403,6 +407,7 @@ impl Workbench {
             catalog_loading: HashSet::new(),
             catalog_epoch: 0,
             catalog_retrigger: None,
+            updates: UpdateState::load(),
             _subscriptions: vec![search_sub, appearance_sub],
         }
     }
@@ -3015,6 +3020,8 @@ impl Workbench {
         }
         body = body
             .child(div().h(px(SPACE_4)))
+            .child(self.render_update_settings(theme, cx))
+            .child(div().h(px(SPACE_4)))
             .child(form_label("About", theme))
             .child(body_text(
                 format!(concat!(app_name!(), " {}"), env!("CARGO_PKG_VERSION")),
@@ -4234,10 +4241,14 @@ impl Render for Workbench {
             .key_context("Workbench")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _action: &RunQuery, _, cx| this.run(cx)))
+            .on_action(
+                cx.listener(|this, _action: &CheckForUpdates, _, cx| this.check_updates(true, cx)),
+            )
             .on_action(cx.listener(|this, _action: &QuickOpenTable, window, cx| {
                 this.toggle_quick_open(window, cx)
             }))
             .relative()
+            .children(self.render_update_banner(&theme, cx))
             .child(
                 // The rail sits outside the resizable group: as a fixed
                 // panel it was padded up to the group's minimum panel

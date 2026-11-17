@@ -121,6 +121,8 @@ fn install_menus(cx: &mut App) {
 
     cx.set_menus([
         Menu::new(app_name!()).items([
+            MenuItem::action("Check for Updates…", workbench::CheckForUpdates),
+            MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
             MenuItem::action(concat!("Hide ", app_name!()), Hide),
@@ -172,7 +174,10 @@ fn open_main_window(cx: &mut App) {
     });
     if let Err(err) = cx.open_window(options, |window, cx| {
         theme::apply_preference(pref, window, cx);
-        cx.new(|cx| workbench::Workbench::new(window, cx))
+        let view = cx.new(|cx| workbench::Workbench::new(window, cx));
+        // Background, rate-limited, silent on failure.
+        view.update(cx, |this, cx| this.auto_check_updates(cx));
+        view
     }) {
         eprintln!("error: failed to open window: {err:#}");
     }
