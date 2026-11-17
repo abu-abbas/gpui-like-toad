@@ -2472,9 +2472,8 @@ impl Workbench {
                 .child(icon(IconName::Plus, 16., theme.muted_foreground)),
         );
         panel = panel.child(header);
-        panel = panel
-            .child(self.render_session_card(theme, cx))
-            .child(self.render_parked_conns(theme, cx));
+        // Only the active connection: the toolbar pill switches.
+        panel = panel.child(self.render_session_card(theme, cx));
         // Navicat-style: saved connections are listed while disconnected
         // (click one to open its dialog); once connected the panel belongs
         // to the explorer. New/edit connection happens in a modal.
