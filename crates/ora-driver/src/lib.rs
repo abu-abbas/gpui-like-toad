@@ -220,6 +220,17 @@ impl DbClient for ThinClient {
         Ok(result.rows_affected())
     }
 
+    fn execute_binds(&mut self, sql: &str, binds: &[String]) -> Result<u64, DbError> {
+        let conn = self.conn()?;
+        let sql = clean_statement(sql);
+        let params: Vec<&dyn oracledb::ToDbValue> = binds
+            .iter()
+            .map(|b| b as &dyn oracledb::ToDbValue)
+            .collect();
+        let result = conn.execute(sql, &params).map_err(db_err)?;
+        Ok(result.rows_affected())
+    }
+
     fn commit(&mut self) -> Result<(), DbError> {
         self.conn()?.commit().map_err(db_err)
     }

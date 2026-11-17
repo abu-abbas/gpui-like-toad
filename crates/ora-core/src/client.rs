@@ -98,6 +98,41 @@ pub trait DbClient: Send {
     /// when the database reports a count, else 0. Does not commit.
     fn execute(&mut self, sql: &str) -> Result<u64, DbError>;
 
+    /// Like [`DbClient::execute`], with positional text binds. The default
+    /// only supports an empty bind list.
+    fn execute_binds(&mut self, sql: &str, binds: &[String]) -> Result<u64, DbError> {
+        if binds.is_empty() {
+            self.execute(sql)
+        } else {
+            Err(DbError::new(
+                "bind variables are not supported by this backend",
+            ))
+        }
+    }
+
+    /// Set one cell (`None` = NULL) of the row with `rowid`. Does not
+    /// commit. Exactly one row must change: anything else is an error, so
+    /// a stale ROWID can never touch the wrong row.
+    fn update_cell(
+        &mut self,
+        owner: &str,
+        table: &str,
+        column: &str,
+        rowid: &str,
+        value: Option<&str>,
+    ) -> Result<(), DbError> {
+        let query = crate::edit::update_cell_sql(owner, table, column, rowid, value);
+        match self.execute_binds(&query.sql, &query.binds)? {
+            1 => Ok(()),
+            0 => Err(DbError::new(
+                "baris tidak ditemukan lagi (sudah dihapus atau ROWID berubah)",
+            )),
+            n => Err(DbError::new(format!(
+                "UPDATE mengubah {n} baris, seharusnya 1; lakukan Rollback"
+            ))),
+        }
+    }
+
     fn commit(&mut self) -> Result<(), DbError>;
 
     fn rollback(&mut self) -> Result<(), DbError>;

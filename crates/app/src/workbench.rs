@@ -58,8 +58,10 @@ use crate::theme::{
 };
 use crate::worker::{DbHandle, ExportFormat, Job, Password, Response};
 
+mod cell_edit;
 mod data_tab;
 mod quick_open;
+use cell_edit::CellEditor;
 use data_tab::{DataTab, DataView};
 use quick_open::QuickOpen;
 
@@ -112,6 +114,8 @@ enum PendingOp {
     DataStructure,
     DataIndexes,
     DataDdl,
+    /// Send a data tab's staged cell edits as UPDATEs.
+    ApplyEdits,
     Ddl {
         owner: String,
         name: String,
@@ -274,6 +278,8 @@ pub struct Workbench {
     objects: Vec<SchemaObject>,
     /// The Quick Open palette, while it is showing.
     quick_open: Option<QuickOpen>,
+    /// The cell edit dialog, while it is showing.
+    cell_editor: Option<CellEditor>,
     /// Keeps shortcuts (Quick Open, Run) working when no input has focus.
     focus_handle: gpui_kit::FocusHandle,
     tree_filter: String,
@@ -387,6 +393,7 @@ impl Workbench {
             object_scroll: UniformListScrollHandle::new(),
             objects: Vec::new(),
             quick_open: None,
+            cell_editor: None,
             focus_handle: cx.focus_handle(),
             tree_filter: String::new(),
             messages: Vec::new(),
@@ -961,6 +968,12 @@ impl Workbench {
         if self.busy || self.session.is_none() {
             return;
         }
+        if self.has_staged_edits() {
+            self.status =
+                "Ada perubahan sel yang belum dikirim: klik Apply (atau Discard) dulu.".to_string();
+            cx.notify();
+            return;
+        }
         self.spawn_db(Job::Commit, PendingOp::Commit, cx);
     }
 
@@ -1381,18 +1394,28 @@ impl Workbench {
             .map_or(ObjectKind::Table, |o| o.kind.clone());
         self.add_tab(window, cx);
         let view = cx.entity().downgrade();
+        let editable = kind == ObjectKind::Table;
         let data = DataTab::new(owner, name, kind, window, cx);
         let tab = self.active_tab_mut();
         tab.title = format!("{owner}.{name}");
         tab.kind = TabKind::Data;
         tab.data = Some(data);
+        let edit_view = view.clone();
         tab.table_state.update(cx, |state, _| {
-            *state.delegate_mut() = ResultsDelegate::empty()
+            let mut delegate = ResultsDelegate::empty()
                 .with_page_size(DATA_PAGE_SIZE)
                 .with_row_numbers()
                 .with_quick_filter(Rc::new(move |condition, window, cx| {
                     let _ = view.update(cx, |this, cx| this.quick_filter(condition, window, cx));
                 }));
+            // Only tables have a stable ROWID to find a row by.
+            if editable {
+                delegate = delegate.with_cell_edit(Rc::new(move |request, window, cx| {
+                    let _ =
+                        edit_view.update(cx, |this, cx| this.open_cell_editor(request, window, cx));
+                }));
+            }
+            *state.delegate_mut() = delegate;
         });
         self.add_filter_row(None, None, window, cx);
         self.reload_data(cx);
@@ -1761,13 +1784,26 @@ impl Workbench {
                     editor.update(cx, |state, cx| state.set_value(ddl, window, cx));
                 }
             }
+            (Some(PendingOp::ApplyEdits), Response::CellsUpdated { done, error }) => {
+                self.edits_applied(done, error, cx);
+            }
             (Some(PendingOp::Commit), Response::Committed) => {
                 self.push_message("Commit berhasil.".to_string());
                 self.status = "Commit berhasil.".to_string();
+                self.clear_edit_marks(cx);
             }
             (Some(PendingOp::Rollback), Response::RolledBack) => {
                 self.push_message("Rollback berhasil.".to_string());
                 self.status = "Rollback berhasil.".to_string();
+                self.clear_edit_marks(cx);
+                // The grid still shows the rolled-back values.
+                if self
+                    .tabs
+                    .get(self.active_tab)
+                    .is_some_and(|t| t.data.is_some())
+                {
+                    self.reload_data(cx);
+                }
             }
             _ => {}
         }
@@ -3271,6 +3307,7 @@ impl Workbench {
                 .flex_col()
                 .flex_1()
                 .child(self.render_filter_bar(theme, cx))
+                .children(self.render_edit_bar(theme, cx))
                 .child(div().flex().flex_col().flex_1().child(grid))
                 .into_any_element(),
         };
@@ -3292,7 +3329,11 @@ impl Workbench {
         if let Some(result) = &tab.last_result {
             summary.push_str(&format!(
                 " · {} kolom · {} baris",
-                result.columns.len(),
+                result
+                    .columns
+                    .iter()
+                    .filter(|c| c.name != ora_core::ROWID_COLUMN)
+                    .count(),
                 result.row_count()
             ));
             if result.truncated && tab.data.is_some() {
@@ -4226,6 +4267,9 @@ impl Render for Workbench {
             })
             .when(self.quick_open.is_some(), |this| {
                 this.child(self.render_quick_open(&theme, cx))
+            })
+            .when(self.cell_editor.is_some(), |this| {
+                this.child(self.render_cell_editor(&theme, cx))
             })
     }
 }

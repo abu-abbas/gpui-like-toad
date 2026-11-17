@@ -331,13 +331,20 @@ pub const MAX_PAGE_LIMIT: usize = 5000;
 pub struct TablePage {
     pub offset: usize,
     pub limit: usize,
+    /// Also select each row's `ROWID` as the first column
+    /// ([`ROWID_COLUMN`]), which cell edits use to find their row.
+    pub rowid: bool,
 }
+
+/// Name of the extra first column carrying the row's `ROWID`.
+pub const ROWID_COLUMN: &str = "__ROWID__";
 
 impl Default for TablePage {
     fn default() -> Self {
         TablePage {
             offset: 0,
             limit: crate::DEFAULT_MAX_ROWS,
+            rowid: false,
         }
     }
 }
@@ -349,6 +356,7 @@ impl TablePage {
         TablePage {
             offset,
             limit: limit.clamp(1, MAX_PAGE_LIMIT),
+            rowid: false,
         }
     }
 
@@ -357,6 +365,7 @@ impl TablePage {
         TablePage {
             offset: self.offset.saturating_add(self.limit),
             limit: self.limit,
+            rowid: self.rowid,
         }
     }
 
@@ -365,7 +374,13 @@ impl TablePage {
         TablePage {
             offset: self.offset.saturating_sub(self.limit),
             limit: self.limit,
+            rowid: self.rowid,
         }
+    }
+
+    /// The same page, selecting (or not) the `ROWID` column.
+    pub fn with_rowid(self, rowid: bool) -> Self {
+        TablePage { rowid, ..self }
     }
 }
 
@@ -375,11 +390,19 @@ impl TablePage {
 /// full scan to open a big table, so the order is whatever Oracle returns
 /// (Oracle only guarantees a stable order with an explicit sort).
 pub fn select_sql(owner: &str, table: &str, filter: &TableFilter, page: TablePage) -> BoundQuery {
-    let mut sql = format!(
-        "SELECT * FROM {}.{}",
-        quote_ident(owner),
-        quote_ident(table)
-    );
+    let mut sql = if page.rowid {
+        format!(
+            "SELECT t.ROWID AS \"{ROWID_COLUMN}\", t.* FROM {}.{} t",
+            quote_ident(owner),
+            quote_ident(table)
+        )
+    } else {
+        format!(
+            "SELECT * FROM {}.{}",
+            quote_ident(owner),
+            quote_ident(table)
+        )
+    };
     let mut binds = Vec::new();
     if let Some((clause, b)) = filter.where_clause() {
         sql.push_str(" WHERE ");
@@ -428,6 +451,22 @@ mod tests {
             "SELECT * FROM \"HR\".\"ORDERS\" FETCH FIRST 1000 ROWS ONLY"
         );
         assert!(q.binds.is_empty());
+    }
+
+    #[test]
+    fn rowid_page_selects_rowid_first() {
+        let q = select_sql(
+            "HR",
+            "EMP",
+            &TableFilter::default(),
+            TablePage::default().with_rowid(true),
+        );
+        assert_eq!(
+            q.sql,
+            "SELECT t.ROWID AS \"__ROWID__\", t.* FROM \"HR\".\"EMP\" t FETCH FIRST 1000 ROWS ONLY"
+        );
+        assert!(TablePage::default().with_rowid(true).next().rowid);
+        assert!(TablePage::new(0, 5).with_rowid(true).prev().rowid);
     }
 
     #[test]
