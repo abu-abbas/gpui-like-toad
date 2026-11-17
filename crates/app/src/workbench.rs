@@ -659,6 +659,15 @@ impl Workbench {
         );
         let tab_conn = self.tabs.get(self.active_tab).and_then(|t| t.conn);
         if tab_op && !self.show_home {
+            // Safety net: the tab shows work of another open connection
+            // but that one is not active (some tab switch did not follow
+            // it). Run on the tab's own connection, never the active one.
+            if let Some(id) = tab_conn.filter(|id| *id != self.conn.id) {
+                if self.conn_by_id(id).is_some_and(|c| c.is_open() && !c.busy) {
+                    self.activate_conn(id, cx);
+                    return self.spawn_db(job, op, cx);
+                }
+            }
             if tab_conn.is_some_and(|id| id != self.conn.id) {
                 let text = if self.active_tab_orphaned() {
                     ORPHAN_TAB
@@ -1247,6 +1256,8 @@ impl Workbench {
         } else if ix < self.active_tab {
             self.active_tab -= 1;
         }
+        // The tab now showing may run on another connection.
+        self.follow_tab_conn(cx);
         cx.notify();
     }
 
@@ -1280,6 +1291,7 @@ impl Workbench {
         } else {
             self.active_tab = old_active.min(self.tabs.len() - 1);
         }
+        self.follow_tab_conn(cx);
         cx.notify();
     }
 
