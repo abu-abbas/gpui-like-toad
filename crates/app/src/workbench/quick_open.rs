@@ -114,11 +114,12 @@ impl Workbench {
         }
         for (ix, object) in hits.iter().enumerate() {
             let selected = ix == open.selected;
-            let icon_name = if object.kind == ObjectKind::View {
-                IconName::Eye
-            } else {
-                IconName::Table
-            };
+            let icon_name =
+                if matches!(object.kind, ObjectKind::View | ObjectKind::MaterializedView) {
+                    IconName::Eye
+                } else {
+                    IconName::Table
+                };
             let mut row = div()
                 .id(("quick-open-row", ix))
                 .flex()

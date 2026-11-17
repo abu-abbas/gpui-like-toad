@@ -4794,6 +4794,7 @@ fn render_object_row(
     let icon_name = match object.kind {
         ObjectKind::Table => IconName::Table,
         ObjectKind::View => IconName::Eye,
+        ObjectKind::MaterializedView => IconName::Columns3,
         ObjectKind::Index => IconName::ListOrdered,
         ObjectKind::Sequence => IconName::Hash,
         ObjectKind::Procedure | ObjectKind::Function => IconName::SquareFunction,
