@@ -297,6 +297,7 @@ pub struct Workbench {
     /// Home page: connections as a zebra list instead of cards, and
     /// whether each section is folded.
     home_list: bool,
+    side_conn_folded: bool,
     home_conn_folded: bool,
     home_recent_folded: bool,
     /// Keeps shortcuts (Quick Open, Run) working when no input has focus.
@@ -417,6 +418,7 @@ impl Workbench {
             cell_editor: None,
             info_collapsed: false,
             home_list: false,
+            side_conn_folded: false,
             home_conn_folded: false,
             home_recent_folded: false,
             focus_handle: cx.focus_handle(),
@@ -2494,15 +2496,62 @@ impl Workbench {
         if self.profiles.is_empty() {
             return div().into_any_element();
         }
+        // Wake-style group: a small muted heading with a fold chevron and
+        // a count, then single-line rows; the open one is a rounded shade.
+        let folded = self.side_conn_folded;
         let mut list = div()
             .flex()
             .flex_col()
-            .px(px(SPACE_3))
+            .px(px(SPACE_2))
             .pt(px(SPACE_3))
-            .gap(px(SPACE_1));
+            .gap(px(2.))
+            .child(
+                div()
+                    .id("side-conn-fold")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_1))
+                    .h(px(28.))
+                    .px(px(SPACE_2))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.side_conn_folded = !this.side_conn_folded;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(FONT_CAPTION))
+                            .line_height(px(LEADING_CAPTION))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.muted_foreground)
+                            .child("Saved connections"),
+                    )
+                    .child(icon(
+                        if folded {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        },
+                        12.,
+                        theme.muted_foreground,
+                    ))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(FONT_CAPTION))
+                            .line_height(px(LEADING_CAPTION))
+                            .text_color(theme.muted_foreground)
+                            .child(self.profiles.len().to_string()),
+                    ),
+            );
+        if folded {
+            return list.into_any_element();
+        }
         for (ix, profile) in self.profiles.iter().enumerate() {
             let selected = self.editing_profile == Some(ix);
             let mut row = div()
+                .group("profile-row")
                 .flex()
                 .flex_row()
                 .items_center()
@@ -2511,15 +2560,16 @@ impl Workbench {
             if selected {
                 row = row.bg(theme.accent);
             } else {
-                row = row.hover(|this| this.bg(theme.secondary));
+                row = row.hover(|this| this.bg(theme.background.opacity(0.7)));
             }
             list = list.child(
                 row.child(
                     div()
                         .id(format!("profile-{ix}"))
                         .flex()
-                        .flex_col()
-                        .justify_center()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(SPACE_2))
                         .flex_1()
                         .min_w(px(0.))
                         .h(relative(1.0))
@@ -2527,22 +2577,16 @@ impl Workbench {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.edit_profile(ix, window, cx);
                         }))
+                        .child(icon(IconName::Database, 14., theme.muted_foreground))
                         .child(
                             div()
+                                .flex_1()
+                                .min_w(px(0.))
                                 .text_size(px(FONT_LABEL))
                                 .line_height(px(LEADING_LABEL))
-                                .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.foreground)
                                 .truncate()
                                 .child(profile.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(FONT_CAPTION))
-                                .line_height(px(LEADING_CAPTION))
-                                .text_color(theme.muted_foreground)
-                                .truncate()
-                                .child(format!("{}@{}", profile.username, profile.connect_string)),
                         ),
                 )
                 .child(
