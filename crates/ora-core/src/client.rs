@@ -182,7 +182,7 @@ pub trait DbClient: Send {
         let mut out = Vec::with_capacity(objects.len());
         for object in objects {
             let columns = match object.kind {
-                ObjectKind::Table | ObjectKind::View => self
+                ObjectKind::Table | ObjectKind::View | ObjectKind::MaterializedView => self
                     .describe_table(&object.owner, &object.name)
                     .unwrap_or_default(),
                 _ => Vec::new(),

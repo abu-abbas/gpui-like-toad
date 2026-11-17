@@ -10,6 +10,7 @@ macro_rules! app_name {
 }
 
 mod completion;
+mod crash_log;
 mod keychain;
 mod plan;
 mod results;
@@ -54,6 +55,7 @@ fn main() {
         println!(concat!(app_name!(), " {}"), env!("CARGO_PKG_VERSION"));
         return;
     }
+    crash_log::install();
     let app = application()
         // AllAssets, NOT Assets: the default bundle embeds only the 106
         // icons in default-icons.txt, so every other Lucide icon used by
@@ -187,6 +189,16 @@ fn open_main_window(cx: &mut App) {
         width: gpui_kit::px(820.),
         height: gpui_kit::px(520.),
     });
+    // Linux: Wayland/X11 match this against `gpui-like-toad.desktop`
+    // (installed by the release tarball's install.sh) for the launcher and
+    // taskbar icon. Same id as the binary and config dir on purpose.
+    options.app_id = Some("gpui-like-toad".into());
+    // X11 also takes the window icon directly, so it shows even without
+    // the .desktop file installed (Wayland ignores this).
+    #[cfg(target_os = "linux")]
+    {
+        options.icon = linux_window_icon();
+    }
     options.titlebar = Some(TitlebarOptions {
         title: Some(app_name!().into()),
         appears_transparent: false,
@@ -202,6 +214,14 @@ fn open_main_window(cx: &mut App) {
         let view = cx.new(|cx| workbench::Workbench::new(window, cx));
         // Background, rate-limited, silent on failure.
         view.update(cx, |this, cx| this.auto_check_updates(cx));
+        if let Some(panic) = crash_log::take_previous() {
+            view.update(cx, |this, _| {
+                this.push_message(format!(
+                    "Sesi sebelumnya crash: {panic}. Detail lengkap ada di {}",
+                    crash_log::log_path().display()
+                ))
+            });
+        }
         view
     }) {
         eprintln!("error: failed to open window: {err:#}");
@@ -227,5 +247,23 @@ fn load_bundled_fonts(cx: &mut App) {
     ];
     if let Err(err) = cx.text_system().add_fonts(fonts) {
         eprintln!("warning: bundled fonts failed to load: {err}");
+    }
+}
+
+/// 256 px app icon for the X11 window (`_NET_WM_ICON`).
+#[cfg(target_os = "linux")]
+fn linux_window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+    let png = include_bytes!("../assets/icon/AppIcon.iconset/icon_256x256.png");
+    image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .ok()
+        .map(|img| std::sync::Arc::new(img.into_rgba8()))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[test]
+    fn linux_window_icon_decodes() {
+        let icon = super::linux_window_icon().expect("embedded PNG decodes");
+        assert_eq!((icon.width(), icon.height()), (256, 256));
     }
 }

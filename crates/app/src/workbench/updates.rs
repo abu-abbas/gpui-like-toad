@@ -2,11 +2,15 @@
 //! silent on failure) and from "Check for Updates" (menu / Settings). A
 //! newer release shows a banner with its notes and a button that opens the
 //! release page in the browser (the banner is one minimal line; a
-//! "What's new" tab next to Home lists the full release notes); nothing is downloaded or installed here.
+//! "What's new" tab next to Home lists the full release notes). The tab
+//! also has "Update sekarang": gpui-updater-core downloads the asset for
+//! this OS, checks SHA256SUMS and the minisign signature (key in
+//! release-key.pub), swaps the app in, then "Mulai ulang" relaunches.
 //! The request is one anonymous GET of the public API: no identifiers.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gpui_kit::component::spinner::Spinner;
 use ora_core::store::{self, UpdatePrefs};
 use ora_core::update::{self, ReleaseInfo};
 
@@ -27,6 +31,10 @@ pub(super) struct UpdateState {
     /// Download of the release file in progress / its outcome.
     downloading: bool,
     download_note: Option<(bool, String)>,
+    /// In-app update running (download, verify, install).
+    installing: bool,
+    /// Update installed; relaunch path (None = relaunch the same path).
+    staged: Option<Option<std::path::PathBuf>>,
 }
 
 impl UpdateState {
@@ -41,6 +49,8 @@ impl UpdateState {
             status: None,
             downloading: false,
             download_note: None,
+            installing: false,
+            staged: None,
         }
     }
 }
@@ -52,9 +62,8 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Blocking fetch of the latest release; run on a background thread.
-fn fetch_latest() -> Result<Option<ReleaseInfo>, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(10)))
         // OS trust store (macOS Keychain, Windows, Linux CA bundle), so
         // corporate TLS-inspecting proxies work like in the browser.
@@ -65,7 +74,12 @@ fn fetch_latest() -> Result<Option<ReleaseInfo>, String> {
         )
         .user_agent(concat!("gpui-like-toad/", env!("CARGO_PKG_VERSION")))
         .build()
-        .into();
+        .into()
+}
+
+/// Blocking fetch of the latest release; run on a background thread.
+fn fetch_latest() -> Result<Option<ReleaseInfo>, String> {
+    let agent = http_agent();
     let mut resp = agent
         .get(update::LATEST_RELEASE_API)
         .header("Accept", "application/vnd.github+json")
@@ -121,6 +135,85 @@ fn download_asset(asset: &update::Asset) -> Result<std::path::PathBuf, String> {
     Ok(target)
 }
 
+/// Base64 minisign public key (last line of `release-key.pub`).
+fn release_public_key() -> &'static str {
+    include_str!("../../../../release-key.pub")
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+}
+
+/// The release the app already fetched, shaped for gpui-updater-core: the
+/// asset for this OS, its `.minisig`, and its hash from `SHA256SUMS`.
+struct ReleaseSource {
+    info: ReleaseInfo,
+}
+
+impl gpui_updater_core::UpdateSource for ReleaseSource {
+    fn fetch_latest(&self) -> gpui_updater_core::Result<gpui_updater_core::Release> {
+        use gpui_updater_core as up;
+        let info = &self.info;
+        let asset = update::pick_installable(&info.assets, std::env::consts::OS).ok_or(
+            up::Error::NoMatchingAsset {
+                target_os: std::env::consts::OS,
+                target_arch: std::env::consts::ARCH,
+            },
+        )?;
+        let version = up::Version::parse(&info.version.to_string())
+            .map_err(|e| up::Error::Parse(e.to_string()))?;
+        let mut release = up::Release::new(
+            version,
+            up::Asset::new(asset.name.clone(), asset.url.clone(), asset.size),
+        );
+        let sig_name = format!("{}.minisig", asset.name);
+        if let Some(sig) = info.assets.iter().find(|a| a.name == sig_name) {
+            release = release.with_minisign_signature_url(sig.url.clone());
+        }
+        if let Some(sums) = info.assets.iter().find(|a| a.name == "SHA256SUMS") {
+            let mut resp = http_agent()
+                .get(&sums.url)
+                .call()
+                .map_err(|e| up::Error::Http(e.to_string()))?;
+            let text = resp
+                .body_mut()
+                .with_config()
+                .limit(1024 * 1024)
+                .read_to_string()
+                .map_err(|e| up::Error::Http(e.to_string()))?;
+            if let Some(hash) = update::sha256_from_sums(&text, &asset.name) {
+                release = release.with_sha256(hash);
+            }
+        }
+        Ok(release)
+    }
+}
+
+fn update_engine(info: &ReleaseInfo) -> gpui_updater_core::UpdateEngine<ReleaseSource> {
+    use gpui_updater_core as up;
+    let current =
+        up::Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| up::Version::new(0, 0, 0));
+    up::UpdateEngine::new(
+        ReleaseSource { info: info.clone() },
+        up::EngineConfig::new(current)
+            .minisign_public_key(release_public_key())
+            // Signature and checksum are both required: a release that
+            // lacks either is refused, never installed unchecked.
+            .verification(up::Verification::Strict),
+    )
+}
+
+/// Blocking: check, download, verify, install. Returns the relaunch path.
+fn install_release(info: &ReleaseInfo) -> Result<Option<std::path::PathBuf>, String> {
+    let engine = update_engine(info);
+    match engine.update_now(|_, _| {}) {
+        Ok(Some(installed)) => Ok(installed.restart_path),
+        Ok(None) => Err("Sudah versi terbaru.".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 impl Workbench {
     /// Download the file for this OS, then show it in the file manager.
     fn download_update(&mut self, cx: &mut Context<Self>) {
@@ -164,8 +257,56 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Download, verify and install the update in place.
+    fn install_update(&mut self, cx: &mut Context<Self>) {
+        let u = &mut self.updates;
+        if u.installing || u.downloading {
+            return;
+        }
+        let Some(info) = u.available.clone() else {
+            return;
+        };
+        u.installing = true;
+        u.download_note = Some((false, format!("Mengunduh dan memasang {}...", info.version)));
+        let task = cx
+            .background_executor()
+            .spawn(async move { install_release(&info) });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |this, cx| {
+                this.updates.installing = false;
+                this.updates.download_note = Some(match result {
+                    Ok(path) => {
+                        this.updates.staged = Some(path);
+                        (
+                            false,
+                            "Update terpasang. Mulai ulang untuk memakainya.".into(),
+                        )
+                    }
+                    Err(err) => (true, format!("Update gagal: {err}")),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Relaunch into the installed update.
+    fn restart_into_update(&mut self, cx: &mut Context<Self>) {
+        if let Some(Some(path)) = self.updates.staged.clone() {
+            cx.set_restart_path(path);
+        }
+        cx.restart();
+    }
+
     /// Startup check: only if enabled and not checked within the interval.
     pub fn auto_check_updates(&mut self, cx: &mut Context<Self>) {
+        // Windows: delete the `.old.exe` a previous update left behind.
+        #[cfg(target_os = "windows")]
+        if let Ok(root) = gpui_updater_core::current_install_root() {
+            gpui_updater_core::install::remove_leftovers(&root);
+        }
         let u = &self.updates;
         if update::should_auto_check(u.prefs.auto_check, u.prefs.last_checked, now_secs()) {
             self.check_updates(false, cx);
@@ -486,7 +627,10 @@ impl Workbench {
         };
         let url = release.url.clone();
         let can_download = update::pick_asset(&release.assets, std::env::consts::OS).is_some();
-        let downloading = self.updates.downloading;
+        let can_install = update::pick_installable(&release.assets, std::env::consts::OS).is_some();
+        let staged = self.updates.staged.is_some();
+        let installing = self.updates.installing;
+        let downloading = self.updates.downloading || installing;
         let note = self.updates.download_note.clone();
         page = page
             .child(
@@ -505,15 +649,41 @@ impl Workbench {
                     .flex_row()
                     .gap(px(SPACE_2))
                     .py(px(SPACE_2))
-                    .when(can_download, |row| {
+                    .when(staged, |row| {
                         row.child(
-                            Button::new("update-download")
-                                .label("Download")
+                            Button::new("update-restart")
+                                .label("Mulai ulang")
+                                .icon(IconName::Play)
+                                .primary()
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.restart_into_update(cx)),
+                                ),
+                        )
+                    })
+                    .when(can_install && !staged, |row| {
+                        row.child(
+                            Button::new("update-install")
+                                .label("Update sekarang")
                                 .icon(IconName::Download)
                                 .primary()
+                                .loading(installing)
                                 .disabled(downloading)
-                                .on_click(cx.listener(|this, _, _, cx| this.download_update(cx))),
+                                .on_click(cx.listener(|this, _, _, cx| this.install_update(cx))),
                         )
+                    })
+                    .when(can_download && !staged, |row| {
+                        row.child({
+                            let b = Button::new("update-download")
+                                .label("Download")
+                                .icon(IconName::Download)
+                                .disabled(downloading)
+                                .on_click(cx.listener(|this, _, _, cx| this.download_update(cx)));
+                            if can_install {
+                                b
+                            } else {
+                                b.primary()
+                            }
+                        })
                     })
                     .child(
                         Button::new("update-open")
@@ -522,7 +692,7 @@ impl Workbench {
                     ),
             );
         if let Some((is_error, text)) = note {
-            page = page.child(if is_error {
+            let line = if is_error {
                 div()
                     .text_size(px(FONT_CAPTION))
                     .line_height(px(LEADING_CAPTION))
@@ -530,7 +700,19 @@ impl Workbench {
                     .child(text)
             } else {
                 caption_text(text, theme)
-            });
+            };
+            // A spinner next to the note while the update downloads/installs.
+            page = page.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .when(downloading, |row| {
+                        row.child(Spinner::new().small().color(theme.primary))
+                    })
+                    .child(line),
+            );
         }
         let notes = release.notes.trim();
         if notes.is_empty() {

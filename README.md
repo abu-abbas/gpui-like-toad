@@ -133,6 +133,16 @@ Workflow lalu membangun biner rilis Linux + Windows + macOS (ARM), lalu menerbit
 
 Biner belum ditandatangani; code signing menyusul.
 
+Pasang di Linux (biar muncul di menu aplikasi dengan icon-nya): unduh `Ora-The-Explorer-<versi>-linux-x86_64.tar.gz`, lalu
+
+```sh
+mkdir ora && tar -xzf Ora-The-Explorer-*-linux-x86_64.tar.gz -C ora
+sh ora/install.sh            # ke ~/.local/bin + ~/.local/share, tanpa sudo
+sh ora/install.sh --uninstall
+```
+
+Di Windows icon sudah tertanam di `.exe` (lihat `crates/app/build.rs`), di macOS ada di bundel `.app`.
+
 ## Roadmap (follow-up)
 
 - Dock layout (panel bisa di-drag/tab) pakai komponen Dock gpui-kit.
