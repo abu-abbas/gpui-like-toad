@@ -4279,6 +4279,7 @@ impl Render for Workbench {
             .when(self.quick_open.is_some(), |this| {
                 this.child(self.render_quick_open(&theme, cx))
             })
+            .children(self.render_update_details(&theme, cx))
             .when(self.cell_editor.is_some(), |this| {
                 this.child(self.render_cell_editor(&theme, cx))
             })
