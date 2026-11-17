@@ -375,57 +375,6 @@ impl Workbench {
 }
 
 impl Workbench {
-    /// Sidebar rows for the open connections that are not active, under
-    /// the active one's card. Click a row to switch to it.
-    pub(super) fn render_parked_conns(
-        &self,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut list = div().flex().flex_col().gap(px(SPACE_1)).mx(px(SPACE_3));
-        for conn in self.parked.iter().filter(|c| c.is_open()) {
-            let id = conn.id;
-            let dot = if conn.session.is_some() {
-                theme.success
-            } else {
-                theme.warning
-            };
-            list = list.child(
-                div()
-                    .id(format!("parked-conn-{id}"))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(SPACE_2))
-                    .mt(px(SPACE_1))
-                    .px(px(SPACE_2))
-                    .h(px(TREE_ROW_HEIGHT))
-                    .rounded(px(RADIUS_MD))
-                    .hover(|this| this.bg(theme.secondary))
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.switch_conn(id, window, cx)),
-                    )
-                    .child(status_dot(dot))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .truncate()
-                            .text_size(px(FONT_LABEL))
-                            .line_height(px(LEADING_LABEL))
-                            .text_color(theme.muted_foreground)
-                            .child(conn.label()),
-                    )
-                    .when(conn.uncommitted, |this| {
-                        this.child(caption_text("belum commit".to_string(), theme))
-                    }),
-            );
-        }
-        list
-    }
-}
-
-impl Workbench {
     /// Close connection `id`, active or parked (Home tile Disconnect).
     pub(super) fn disconnect_conn(&mut self, id: u64, cx: &mut Context<Self>) {
         let back_to = (self.conn.id != id).then_some(self.conn.id);
