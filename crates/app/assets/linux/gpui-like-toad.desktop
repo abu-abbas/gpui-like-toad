@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Ora The Explorer
+GenericName=Oracle Database Explorer
+Comment=Browse and query Oracle databases
+Exec=gpui-like-toad
+Icon=gpui-like-toad
+Terminal=false
+Categories=Development;Database;
+Keywords=Oracle;SQL;Database;Toad;
+StartupNotify=true
+StartupWMClass=gpui-like-toad

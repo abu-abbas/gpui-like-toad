@@ -2391,6 +2391,7 @@ dependencies = [
  "anyhow",
  "gpui-kit",
  "gpui-updater-core",
+ "image",
  "keyring",
  "lsp-types",
  "ora-core",

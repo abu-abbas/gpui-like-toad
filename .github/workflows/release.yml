@@ -118,8 +118,35 @@ jobs:
           cp "$bin" "out/$out"
           # Linux: the in-app updater installs from a .tar.gz holding the
           # executable (the bare binary above stays for manual download).
+          # The tarball also carries the launcher entry, icons and
+          # install.sh (`sh install.sh`), so the app gets its icon in the
+          # app grid/dock. Only the binary is executable: the updater falls
+          # back to the first executable file when names differ.
           if [ "${{ runner.os }}" = "Linux" ]; then
-            tar -czf "out/$out.tar.gz" -C target/release gpui-like-toad
+            pkg="$RUNNER_TEMP/linux-pkg"
+            rm -rf "$pkg" && mkdir -p "$pkg/share/applications"
+            install -m 755 target/release/gpui-like-toad "$pkg/gpui-like-toad"
+            install -m 644 crates/app/assets/linux/install.sh "$pkg/install.sh"
+            install -m 644 crates/app/assets/linux/gpui-like-toad.desktop \
+              "$pkg/share/applications/gpui-like-toad.desktop"
+            iconset=crates/app/assets/icon/AppIcon.iconset
+            for pair in 16:icon_16x16 32:icon_32x32 64:icon_32x32@2x \
+                128:icon_128x128 256:icon_256x256 512:icon_512x512; do
+              size="${pair%%:*}"
+              dir="$pkg/share/icons/hicolor/${size}x${size}/apps"
+              mkdir -p "$dir"
+              install -m 644 "$iconset/${pair#*:}.png" "$dir/gpui-like-toad.png"
+            done
+            tar -czf "out/$out.tar.gz" -C "$pkg" .
+            tar -tzvf "out/$out.tar.gz"
+            # install.sh must work from the extracted tarball.
+            check="$RUNNER_TEMP/install-check"
+            mkdir -p "$check/x" && tar -xzf "out/$out.tar.gz" -C "$check/x"
+            env -u XDG_DATA_HOME -u XDG_BIN_HOME HOME="$check/home" sh "$check/x/install.sh"
+            test -x "$check/home/.local/bin/gpui-like-toad"
+            test -f "$check/home/.local/share/icons/hicolor/256x256/apps/gpui-like-toad.png"
+            grep -q "^Exec=$check/home/.local/bin/gpui-like-toad$" \
+              "$check/home/.local/share/applications/gpui-like-toad.desktop"
           fi
           ls -la out/
       - if: runner.os == 'macOS'
