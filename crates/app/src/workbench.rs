@@ -59,9 +59,11 @@ use crate::theme::{
 use crate::worker::{DbHandle, ExportFormat, Job, Password, Response};
 
 mod data_tab;
+mod quick_open;
 use data_tab::{DataTab, DataView};
+use quick_open::QuickOpen;
 
-actions!(db_explorer, [RunQuery]);
+actions!(db_explorer, [RunQuery, QuickOpenTable]);
 
 const MAX_MESSAGES: usize = 200;
 
@@ -270,6 +272,10 @@ pub struct Workbench {
     selected_object: Option<String>,
     object_scroll: UniformListScrollHandle,
     objects: Vec<SchemaObject>,
+    /// The Quick Open palette, while it is showing.
+    quick_open: Option<QuickOpen>,
+    /// Keeps shortcuts (Quick Open, Run) working when no input has focus.
+    focus_handle: gpui_kit::FocusHandle,
     tree_filter: String,
     messages: Vec<String>,
     status: String,
@@ -380,6 +386,8 @@ impl Workbench {
             selected_object: None,
             object_scroll: UniformListScrollHandle::new(),
             objects: Vec::new(),
+            quick_open: None,
+            focus_handle: cx.focus_handle(),
             tree_filter: String::new(),
             messages: Vec::new(),
             status: "Belum terhubung.".to_string(),
@@ -4165,8 +4173,13 @@ impl Workbench {
 }
 
 impl Render for Workbench {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        // Nothing focused (fresh start, closed palette): take focus so
+        // window-level shortcuts reach this view.
+        if window.focused(cx).is_none() {
+            window.focus(&self.focus_handle, cx);
+        }
         div()
             .flex()
             .flex_col()
@@ -4174,7 +4187,11 @@ impl Render for Workbench {
             .bg(theme.background)
             .text_color(theme.foreground)
             .key_context("Workbench")
+            .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _action: &RunQuery, _, cx| this.run(cx)))
+            .on_action(cx.listener(|this, _action: &QuickOpenTable, window, cx| {
+                this.toggle_quick_open(window, cx)
+            }))
             .relative()
             .child(
                 // The rail sits outside the resizable group: as a fixed
@@ -4202,6 +4219,9 @@ impl Render for Workbench {
             .child(self.render_status_bar(&theme))
             .when(self.show_connection_form, |this| {
                 this.child(self.render_connection_dialog(&theme, cx))
+            })
+            .when(self.quick_open.is_some(), |this| {
+                this.child(self.render_quick_open(&theme, cx))
             })
     }
 }
