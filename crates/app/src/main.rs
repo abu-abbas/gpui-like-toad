@@ -10,6 +10,7 @@ macro_rules! app_name {
 }
 
 mod completion;
+mod crash_log;
 mod keychain;
 mod plan;
 mod results;
@@ -54,6 +55,7 @@ fn main() {
         println!(concat!(app_name!(), " {}"), env!("CARGO_PKG_VERSION"));
         return;
     }
+    crash_log::install();
     let app = application()
         // AllAssets, NOT Assets: the default bundle embeds only the 106
         // icons in default-icons.txt, so every other Lucide icon used by
@@ -147,6 +149,15 @@ fn install_menus(cx: &mut App) {
             MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
         ]),
         Menu::new("View").items([MenuItem::action("Toggle Full Screen", ToggleFullScreen)]),
+        Menu::new("Connection").items([
+            MenuItem::action("New Connection…", workbench::NewConnection),
+            MenuItem::separator(),
+            MenuItem::action("Connect", workbench::ConnectLast),
+            MenuItem::action("Disconnect", workbench::DisconnectSession),
+            MenuItem::action("Edit Connection…", workbench::EditConnection),
+            MenuItem::separator(),
+            MenuItem::action("Refresh Schema", workbench::RefreshSchema),
+        ]),
         Menu::new("Window").items([
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),
@@ -188,6 +199,14 @@ fn open_main_window(cx: &mut App) {
         let view = cx.new(|cx| workbench::Workbench::new(window, cx));
         // Background, rate-limited, silent on failure.
         view.update(cx, |this, cx| this.auto_check_updates(cx));
+        if let Some(panic) = crash_log::take_previous() {
+            view.update(cx, |this, _| {
+                this.push_message(format!(
+                    "Sesi sebelumnya crash: {panic}. Detail lengkap ada di {}",
+                    crash_log::log_path().display()
+                ))
+            });
+        }
         view
     }) {
         eprintln!("error: failed to open window: {err:#}");

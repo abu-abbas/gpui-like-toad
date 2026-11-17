@@ -19,6 +19,9 @@ anyhow = "1"
 # Update check: one anonymous GET to the GitHub Releases API (rustls, no
 # OpenSSL needed at build time).
 ureq = { version = "3", features = ["platform-verifier"] }
+# In-app update (download, verify, swap in, relaunch). The GPUI-free core:
+# it only needs Rust 1.85, so the workspace toolchain floor stays.
+gpui-updater-core = "0.4"
 # Saved connection passwords live in the OS credential store: macOS
 # Keychain, Windows Credential Manager, Secret Service on Linux (pure-Rust
 # D-Bus via zbus, so no libdbus needed at build time).

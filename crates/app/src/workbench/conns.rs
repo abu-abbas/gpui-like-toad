@@ -247,12 +247,16 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let (dot_color, _, conn_detail) = self.conn_status(theme);
-        let pill_label = if self.conn.session.is_some() {
+        let others = self.open_conn_count() - usize::from(self.conn.is_open());
+        // With several open, the short profile name keeps the pill from
+        // squeezing Commit/Rollback off the toolbar.
+        let pill_label = if self.conn.session.is_some() && others > 0 {
+            self.conn.label()
+        } else if self.conn.session.is_some() {
             conn_detail
         } else {
             "Not connected".to_string()
         };
-        let others = self.open_conn_count() - usize::from(self.conn.is_open());
         // (id, name, user@db, active, uncommitted)
         let mut entries: Vec<(u64, String, String, bool, bool)> = Vec::new();
         for conn in std::iter::once(&self.conn).chain(self.parked.iter()) {
@@ -280,7 +284,7 @@ impl Workbench {
             .outline()
             .small()
             .flex_none()
-            .max_w(px(260.))
+            .max_w(px(240.))
             .dropdown_caret(true)
             .child(status_dot(dot_color))
             .child(
@@ -407,5 +411,22 @@ impl Workbench {
             );
         }
         list
+    }
+}
+
+impl Workbench {
+    /// Close connection `id`, active or parked (Home tile Disconnect).
+    pub(super) fn disconnect_conn(&mut self, id: u64, cx: &mut Context<Self>) {
+        let back_to = (self.conn.id != id).then_some(self.conn.id);
+        self.activate_conn(id, cx);
+        if self.conn.id != id {
+            return;
+        }
+        self.disconnect(cx);
+        // Closing a parked connection must not move the user off the one
+        // they were on.
+        if let Some(prev) = back_to {
+            self.activate_conn(prev, cx);
+        }
     }
 }
