@@ -11,10 +11,19 @@
 //! [`Theme::change`] loads the built-in light/dark base, then a second
 //! [`Theme::update`] overrides the colors (the order the component docs
 //! require, so the Base projection and open windows stay in step).
+//!
+//! Besides that palette ("Ora", the default) the user can pick one of the
+//! color themes gpui-kit ships in its `themes/` folder, separately for light
+//! and dark mode. Those files are bundled under `assets/themes/` and loaded
+//! into gpui-kit's [`ThemeRegistry`] at startup; picking one sets
+//! `Theme::light_theme`/`dark_theme`, and only fonts and radius are pinned
+//! on top so the density stays the same.
 
-use gpui_kit::component::{Theme, ThemeMode};
+use std::rc::Rc;
+
+use gpui_kit::component::{Theme, ThemeConfig, ThemeMode, ThemeRegistry};
 use gpui_kit::{rgb, App, Global, Hsla, Window};
-use ora_core::store::ThemePreference;
+use ora_core::store::{ThemeNames, ThemePreference};
 
 use crate::MONO_FONT_FAMILY;
 
@@ -116,16 +125,108 @@ fn hex(value: u32) -> Hsla {
     Hsla::from(rgb(value))
 }
 
-/// Apply one palette. `change` first (built-in base + mode), then a second
-/// `update` with the spec colors, fonts, and radius — the order the
-/// component theme docs require.
+// ---------------------------------------------------------------------------
+// Bundled gpui-kit themes
+// ---------------------------------------------------------------------------
+
+/// Display name of the app's own palette in the theme pickers.
+pub const ORA_THEME_LABEL: &str = "Ora (default)";
+
+/// gpui-kit's `themes/` folder, embedded so the release binary needs no
+/// files next to it. Each file is a theme set with one or more themes.
+const BUNDLED_THEMES: &[&str] = &[
+    include_str!("../assets/themes/adventure.json"),
+    include_str!("../assets/themes/alduin.json"),
+    include_str!("../assets/themes/asciinema.json"),
+    include_str!("../assets/themes/aurora.json"),
+    include_str!("../assets/themes/ayu.json"),
+    include_str!("../assets/themes/catppuccin.json"),
+    include_str!("../assets/themes/everforest.json"),
+    include_str!("../assets/themes/fahrenheit.json"),
+    include_str!("../assets/themes/flexoki.json"),
+    include_str!("../assets/themes/gruvbox.json"),
+    include_str!("../assets/themes/harper.json"),
+    include_str!("../assets/themes/hybrid.json"),
+    include_str!("../assets/themes/jellybeans.json"),
+    include_str!("../assets/themes/kibble.json"),
+    include_str!("../assets/themes/macos-classic.json"),
+    include_str!("../assets/themes/mellifluous.json"),
+    include_str!("../assets/themes/molokai.json"),
+    include_str!("../assets/themes/solarized.json"),
+    include_str!("../assets/themes/spaceduck.json"),
+    include_str!("../assets/themes/tokyonight.json"),
+    include_str!("../assets/themes/twilight.json"),
+];
+
+/// Register the bundled themes in gpui-kit's registry. Call once after
+/// `gpui_kit::init`. Returns the errors of files that failed to parse.
+pub fn register_bundled_themes(cx: &mut App) -> Vec<String> {
+    let registry = ThemeRegistry::global_mut(cx);
+    BUNDLED_THEMES
+        .iter()
+        .filter_map(|json| registry.load_themes_from_str(json).err())
+        .map(|err| err.to_string())
+        .collect()
+}
+
+/// Names of the bundled themes for one mode, sorted, for the pickers. The
+/// registry's own default light/dark entries are left out: "Ora" stands in
+/// for them.
+pub fn theme_names_for(dark: bool, cx: &App) -> Vec<String> {
+    let registry = ThemeRegistry::global(cx);
+    let defaults = [
+        registry.default_light_theme().name.clone(),
+        registry.default_dark_theme().name.clone(),
+    ];
+    let mut names: Vec<String> = registry
+        .themes()
+        .values()
+        .filter(|t| t.mode.is_dark() == dark && !defaults.contains(&t.name))
+        .map(|t| t.name.to_string())
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names
+}
+
+/// The registry entry for a saved name, if it still exists and matches the
+/// mode it was picked for. A stale or mismatched name falls back to Ora.
+fn lookup(name: Option<&str>, dark: bool, cx: &App) -> Option<Rc<ThemeConfig>> {
+    let config = ThemeRegistry::global(cx).themes().get(name?).cloned()?;
+    (config.mode.is_dark() == dark).then_some(config)
+}
+
+/// Apply one palette. `change` first (registered theme + mode), then a
+/// second `update` with the Ora colors (when no gpui-kit theme is picked
+/// for this mode), fonts, and radius — the order the component theme docs
+/// require.
 pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
+    let names = theme_names(cx);
+    let light = lookup(names.light.as_deref(), false, cx);
+    let dark = lookup(names.dark.as_deref(), true, cx);
+    let use_ora = if mode.is_dark() {
+        dark.is_none()
+    } else {
+        light.is_none()
+    };
+    let registry = ThemeRegistry::global(cx);
+    let light = light.unwrap_or_else(|| registry.default_light_theme().clone());
+    let dark = dark.unwrap_or_else(|| registry.default_dark_theme().clone());
+    if cx.has_global::<Theme>() {
+        // Swap the configs first; `change` below then loads the one for
+        // `mode` even when the mode itself did not change.
+        Theme::update(cx, |theme| {
+            theme.light_theme = light;
+            theme.dark_theme = dark;
+        });
+    }
     Theme::change(mode, window, cx);
     Theme::update(cx, |theme| {
-        if mode.is_dark() {
-            apply_dark(theme);
-        } else {
-            apply_light(theme);
+        if use_ora {
+            if mode.is_dark() {
+                apply_dark(theme);
+            } else {
+                apply_light(theme);
+            }
         }
         // JetBrains Mono for ALL UI text: both the sans and mono tokens.
         theme.font_family = MONO_FONT_FAMILY.into();
@@ -382,6 +483,22 @@ pub struct ThemePreferenceState(pub ThemePreference);
 
 impl Global for ThemePreferenceState {}
 
+/// The picked light/dark theme names, as a global for the same reason.
+#[derive(Default)]
+struct ThemeNamesState(ThemeNames);
+
+impl Global for ThemeNamesState {}
+
+pub fn theme_names(cx: &App) -> ThemeNames {
+    cx.try_global::<ThemeNamesState>()
+        .map(|state| state.0.clone())
+        .unwrap_or_default()
+}
+
+pub fn set_theme_names(names: ThemeNames, cx: &mut App) {
+    cx.set_global(ThemeNamesState(names));
+}
+
 pub fn preference(cx: &App) -> ThemePreference {
     cx.try_global::<ThemePreferenceState>()
         .map(|state| state.0)
@@ -415,5 +532,24 @@ pub fn apply_preference(pref: ThemePreference, window: &mut Window, cx: &mut App
 pub fn sync_system_appearance(window: &mut Window, cx: &mut App) {
     if preference(cx) == ThemePreference::System {
         apply_theme(resolve(ThemePreference::System, window), Some(window), cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BUNDLED_THEMES;
+    use gpui_kit::component::ThemeSet;
+
+    /// Every bundled gpui-kit theme file parses with the gpui-kit version we
+    /// build against, so none silently drops out of the pickers.
+    #[test]
+    fn bundled_themes_parse() {
+        let mut count = 0;
+        for json in BUNDLED_THEMES {
+            let set: ThemeSet = serde_json::from_str(json).expect("theme file parses");
+            assert!(!set.themes.is_empty());
+            count += set.themes.len();
+        }
+        assert!(count >= 30, "only {count} themes");
     }
 }

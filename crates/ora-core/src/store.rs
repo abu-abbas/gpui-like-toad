@@ -659,6 +659,62 @@ pub fn save_theme_preference_in(dir: &Path, pref: ThemePreference) -> std::io::R
     )
 }
 
+/// Names of the color themes picked for light and dark mode. `None` means
+/// the app's own palette ("Ora"). Names match gpui-kit `ThemeRegistry`
+/// entries, e.g. "Ayu Light" or "Tokyo Night".
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ThemeNames {
+    pub light: Option<String>,
+    pub dark: Option<String>,
+}
+
+pub fn load_theme_names_in(dir: &Path) -> ThemeNames {
+    let Some(v) = read_json_file(&dir.join("settings.json")) else {
+        return ThemeNames::default();
+    };
+    let name = |key: &str| {
+        v.get(key)
+            .and_then(Json::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    ThemeNames {
+        light: name("light_theme"),
+        dark: name("dark_theme"),
+    }
+}
+
+pub fn save_theme_names_in(dir: &Path, names: &ThemeNames) -> std::io::Result<()> {
+    let mut pairs: BTreeMap<String, Json> = match read_json_file(&dir.join("settings.json")) {
+        Some(Json::Obj(pairs)) => pairs.into_iter().collect(),
+        _ => BTreeMap::new(),
+    };
+    for (key, value) in [("light_theme", &names.light), ("dark_theme", &names.dark)] {
+        match value {
+            Some(name) => {
+                pairs.insert(key.to_string(), Json::Str(name.clone()));
+            }
+            None => {
+                pairs.remove(key);
+            }
+        }
+    }
+    write_json_file(
+        dir,
+        "settings.json",
+        &Json::Obj(pairs.into_iter().collect()),
+    )
+}
+
+pub fn load_theme_names() -> ThemeNames {
+    load_theme_names_in(&config_dir())
+}
+
+pub fn save_theme_names(names: &ThemeNames) -> std::io::Result<()> {
+    save_theme_names_in(&config_dir(), names)
+}
+
 pub fn load_theme_preference() -> ThemePreference {
     load_theme_preference_in(&config_dir())
 }
@@ -930,6 +986,33 @@ mod tests {
         assert_eq!(load_theme_preference_in(&dir), ThemePreference::Light);
         fs::write(dir.join("settings.json"), r#"{"theme":"bogus"}"#).unwrap();
         assert_eq!(load_theme_preference_in(&dir), ThemePreference::System);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_names_round_trip_keep_other_keys() {
+        let dir = scratch("theme-names");
+        assert_eq!(load_theme_names_in(&dir), ThemeNames::default());
+        save_theme_preference_in(&dir, ThemePreference::Dark).unwrap();
+        let names = ThemeNames {
+            light: Some("Ayu Light".into()),
+            dark: Some("Tokyo Night".into()),
+        };
+        save_theme_names_in(&dir, &names).unwrap();
+        assert_eq!(load_theme_names_in(&dir), names);
+        assert_eq!(load_theme_preference_in(&dir), ThemePreference::Dark);
+        // Back to the app palette removes the key again.
+        save_theme_names_in(
+            &dir,
+            &ThemeNames {
+                light: None,
+                ..names.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(load_theme_names_in(&dir).light, None);
+        let text = fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(!text.contains("light_theme"), "{text}");
         let _ = fs::remove_dir_all(&dir);
     }
 
