@@ -61,11 +61,16 @@ use crate::worker::{DbHandle, ExportFormat, Job, Password, Response};
 mod cell_edit;
 mod data_tab;
 mod quick_open;
+mod updates;
 use cell_edit::CellEditor;
 use data_tab::{DataTab, DataView};
 use quick_open::QuickOpen;
+use updates::UpdateState;
 
-actions!(db_explorer, [RunQuery, QuickOpenTable]);
+actions!(
+    db_explorer,
+    [RunQuery, QuickOpenTable, CheckForUpdates, OpenSettings]
+);
 
 const MAX_MESSAGES: usize = 200;
 
@@ -296,6 +301,8 @@ pub struct Workbench {
     /// Schema the user is waiting on after typing `SCHEMA.`: reopen the
     /// popup when its catalog arrives.
     catalog_retrigger: Option<String>,
+    /// GitHub Releases update check state (see `updates.rs`).
+    updates: UpdateState,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -403,6 +410,7 @@ impl Workbench {
             catalog_loading: HashSet::new(),
             catalog_epoch: 0,
             catalog_retrigger: None,
+            updates: UpdateState::load(),
             _subscriptions: vec![search_sub, appearance_sub],
         }
     }
@@ -1058,6 +1066,7 @@ impl Workbench {
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         self.show_home = false;
+        self.leave_whats_new();
         self.tab_scroll.scroll_to_item(self.active_tab);
         cx.notify();
     }
@@ -1086,6 +1095,7 @@ impl Workbench {
         }
         self.active_tab = ix;
         self.show_home = false;
+        self.leave_whats_new();
         self.tab_scroll.scroll_to_item(ix);
         cx.notify();
     }
@@ -1858,6 +1868,10 @@ impl Workbench {
             let active = !self.show_home && ix == self.active_tab;
             strip = strip.child(self.render_query_tab(ix, tab, active, theme, cx));
         }
+        // Always the last tab, after every query/data tab.
+        if self.show_whats_new_tab() {
+            strip = strip.child(self.render_whats_new_tab(theme, cx));
+        }
         div()
             .flex()
             .flex_row()
@@ -1893,7 +1907,7 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let active = self.show_home;
+        let active = self.show_home && !self.whats_new_active();
         let mut tab = div()
             .id("tab-home")
             .flex()
@@ -1906,6 +1920,7 @@ impl Workbench {
             .rounded(px(RADIUS_MD))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.show_home = true;
+                this.leave_whats_new();
                 cx.notify();
             }));
         if active {
@@ -3037,6 +3052,8 @@ impl Workbench {
         }
         body = body
             .child(div().h(px(SPACE_4)))
+            .child(self.render_update_settings(theme, cx))
+            .child(div().h(px(SPACE_4)))
             .child(form_label("About", theme))
             .child(body_text(
                 format!(concat!(app_name!(), " {}"), env!("CARGO_PKG_VERSION")),
@@ -3080,7 +3097,9 @@ impl Workbench {
         // The split wrappers below take `min_h(0)`: as flex items they
         // otherwise grow to their content (e.g. a long Messages list),
         // pushing the bottom panel past the window instead of scrolling.
-        if self.show_home {
+        if self.whats_new_active() {
+            main = main.child(self.render_whats_new_page(theme, cx));
+        } else if self.show_home {
             main = main.child(self.render_home(theme, cx));
         } else if self.active_tab().kind != TabKind::Query {
             // Toad-style object tabs: the data grid (or the script) fills
@@ -4292,10 +4311,18 @@ impl Render for Workbench {
             .key_context("Workbench")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _action: &RunQuery, _, cx| this.run(cx)))
+            .on_action(cx.listener(|this, _action: &OpenSettings, _, cx| {
+                this.rail = RailPanel::Settings;
+                cx.notify();
+            }))
+            .on_action(
+                cx.listener(|this, _action: &CheckForUpdates, _, cx| this.check_updates(true, cx)),
+            )
             .on_action(cx.listener(|this, _action: &QuickOpenTable, window, cx| {
                 this.toggle_quick_open(window, cx)
             }))
             .relative()
+            .children(self.render_update_banner(&theme, cx))
             .child(
                 // The rail sits outside the resizable group: as a fixed
                 // panel it was padded up to the group's minimum panel

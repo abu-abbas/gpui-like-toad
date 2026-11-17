@@ -90,6 +90,7 @@ fn main() {
             // itself while typing). Only editors with a completion
             // provider react, i.e. the SQL tabs.
             KeyBinding::new("ctrl-space", ShowCompletions, Some("Input")),
+            KeyBinding::new("cmd-,", workbench::OpenSettings, None),
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-h", Hide, None),
             KeyBinding::new("alt-cmd-h", HideOthers, None),
@@ -121,6 +122,12 @@ fn install_menus(cx: &mut App) {
 
     cx.set_menus([
         Menu::new(app_name!()).items([
+            // "About" opens Settings, whose About section shows the version.
+            MenuItem::action(concat!("About ", app_name!()), workbench::OpenSettings),
+            MenuItem::separator(),
+            MenuItem::action("Settings…", workbench::OpenSettings),
+            MenuItem::action("Check for Updates…", workbench::CheckForUpdates),
+            MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
             MenuItem::action(concat!("Hide ", app_name!()), Hide),
@@ -178,7 +185,10 @@ fn open_main_window(cx: &mut App) {
     });
     if let Err(err) = cx.open_window(options, |window, cx| {
         theme::apply_preference(pref, window, cx);
-        cx.new(|cx| workbench::Workbench::new(window, cx))
+        let view = cx.new(|cx| workbench::Workbench::new(window, cx));
+        // Background, rate-limited, silent on failure.
+        view.update(cx, |this, cx| this.auto_check_updates(cx));
+        view
     }) {
         eprintln!("error: failed to open window: {err:#}");
     }

@@ -174,28 +174,35 @@ pub enum Json {
 }
 
 impl Json {
-    fn get(&self, key: &str) -> Option<&Json> {
+    pub fn get(&self, key: &str) -> Option<&Json> {
         match self {
             Json::Obj(pairs) => pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v),
             _ => None,
         }
     }
 
-    fn as_str(&self) -> Option<&str> {
+    pub fn as_str(&self) -> Option<&str> {
         match self {
             Json::Str(s) => Some(s),
             _ => None,
         }
     }
 
-    fn as_bool(&self) -> Option<bool> {
+    pub fn as_arr(&self) -> Option<&[Json]> {
+        match self {
+            Json::Arr(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
         match self {
             Json::Bool(b) => Some(*b),
             _ => None,
         }
     }
 
-    fn as_u64(&self) -> Option<u64> {
+    pub fn as_u64(&self) -> Option<u64> {
         match self {
             Json::Num(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as u64),
             _ => None,
@@ -660,6 +667,82 @@ pub fn save_theme_preference(pref: ThemePreference) -> std::io::Result<()> {
     save_theme_preference_in(&config_dir(), pref)
 }
 
+// ---------------------------------------------------------------------------
+// Update-check preferences
+// ---------------------------------------------------------------------------
+
+/// Settings for the GitHub Releases update check, kept in `settings.json`
+/// next to the theme. Nothing here identifies the user or the machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatePrefs {
+    /// Check automatically at startup (at most once per interval).
+    pub auto_check: bool,
+    /// Unix seconds of the last request to GitHub (0 = never).
+    pub last_checked: u64,
+    /// Version the user dismissed the banner for; not announced again.
+    pub dismissed_version: Option<String>,
+}
+
+impl Default for UpdatePrefs {
+    fn default() -> Self {
+        Self {
+            auto_check: true,
+            last_checked: 0,
+            dismissed_version: None,
+        }
+    }
+}
+
+pub fn load_update_prefs_in(dir: &Path) -> UpdatePrefs {
+    let Some(v) = read_json_file(&dir.join("settings.json")) else {
+        return UpdatePrefs::default();
+    };
+    UpdatePrefs {
+        auto_check: v
+            .get("update_auto_check")
+            .and_then(Json::as_bool)
+            .unwrap_or(true),
+        last_checked: v
+            .get("update_last_checked")
+            .and_then(Json::as_u64)
+            .unwrap_or(0),
+        dismissed_version: v
+            .get("update_dismissed_version")
+            .and_then(Json::as_str)
+            .map(str::to_string),
+    }
+}
+
+pub fn save_update_prefs_in(dir: &Path, prefs: &UpdatePrefs) -> std::io::Result<()> {
+    // Preserve any other settings keys already in the file.
+    let mut pairs: BTreeMap<String, Json> = match read_json_file(&dir.join("settings.json")) {
+        Some(Json::Obj(pairs)) => pairs.into_iter().collect(),
+        _ => BTreeMap::new(),
+    };
+    pairs.insert("update_auto_check".into(), Json::Bool(prefs.auto_check));
+    pairs.insert(
+        "update_last_checked".into(),
+        Json::Num(prefs.last_checked as f64),
+    );
+    match &prefs.dismissed_version {
+        Some(v) => pairs.insert("update_dismissed_version".into(), Json::Str(v.clone())),
+        None => pairs.remove("update_dismissed_version"),
+    };
+    write_json_file(
+        dir,
+        "settings.json",
+        &Json::Obj(pairs.into_iter().collect()),
+    )
+}
+
+pub fn load_update_prefs() -> UpdatePrefs {
+    load_update_prefs_in(&config_dir())
+}
+
+pub fn save_update_prefs(prefs: &UpdatePrefs) -> std::io::Result<()> {
+    save_update_prefs_in(&config_dir(), prefs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -855,5 +938,20 @@ mod tests {
         let dir = config_dir();
         assert!(dir.ends_with("gpui-like-toad"));
         assert!(dir.is_absolute() || dir.starts_with("."));
+    }
+
+    #[test]
+    fn update_prefs_roundtrip_keeps_theme() {
+        let dir = scratch("update-prefs");
+        save_theme_preference_in(&dir, ThemePreference::Dark).unwrap();
+        assert_eq!(load_update_prefs_in(&dir), UpdatePrefs::default());
+        let prefs = UpdatePrefs {
+            auto_check: false,
+            last_checked: 1_700_000_000,
+            dismissed_version: Some("0.2.0".into()),
+        };
+        save_update_prefs_in(&dir, &prefs).unwrap();
+        assert_eq!(load_update_prefs_in(&dir), prefs);
+        assert_eq!(load_theme_preference_in(&dir), ThemePreference::Dark);
     }
 }
