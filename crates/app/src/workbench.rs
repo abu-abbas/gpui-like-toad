@@ -268,6 +268,9 @@ pub struct Workbench {
     /// Messages tab scroll; follows the newest message.
     messages_scroll: ScrollHandle,
     show_home: bool,
+    /// Demo database is offered in the UI only with ORA_DEMO set (kept for
+    /// screenshots and tests; real use connects to Oracle).
+    show_demo: bool,
     next_tab_id: u64,
     db: Option<DbHandle>,
     session: Option<DbInfo>,
@@ -390,6 +393,7 @@ impl Workbench {
             messages_scroll: ScrollHandle::new(),
             // Start on the Navicat-style Home page.
             show_home: true,
+            show_demo: std::env::var_os("ORA_DEMO").is_some(),
             next_tab_id: 1,
             db: None,
             session: None,
@@ -2317,13 +2321,15 @@ impl Workbench {
                                 this.open_new_connection(window, cx)
                             })),
                     )
-                    .child(
-                        Button::new("demo")
-                            .label("Demo")
-                            .icon(IconName::Play)
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
-                    ),
+                    .when(self.show_demo, |col| {
+                        col.child(
+                            Button::new("demo")
+                                .label("Demo")
+                                .icon(IconName::Play)
+                                .disabled(self.busy)
+                                .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
+                        )
+                    }),
             );
         }
         panel
@@ -4281,28 +4287,39 @@ impl Workbench {
         };
         let mut grid = div().flex().flex_row().flex_wrap().gap(px(SPACE_3));
         let demo_connected = self.demo_mode && self.session.is_some();
-        grid = grid.child(
-            tile("home-demo-tile".to_string())
-                .child(tile_title(
-                    IconName::Database,
-                    "Demo database".to_string(),
-                    "Built-in, no Oracle needed".to_string(),
-                ))
-                .child(
-                    Button::new("home-demo")
-                        .label(if demo_connected {
-                            "Connected"
-                        } else {
-                            "Connect"
-                        })
-                        .icon(IconName::Play)
-                        .primary()
-                        .disabled(self.busy || demo_connected)
-                        .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
-                ),
-        );
+        if self.show_demo || demo_connected {
+            grid = grid.child(
+                tile("home-demo-tile".to_string())
+                    .child(tile_title(
+                        IconName::Database,
+                        "Demo database".to_string(),
+                        "Built-in, no Oracle needed".to_string(),
+                    ))
+                    .child(if demo_connected {
+                        // Connected: the tile's button turns into Disconnect.
+                        Button::new("home-demo")
+                            .label("Disconnect")
+                            .icon(IconName::LogOut)
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx)))
+                    } else {
+                        Button::new("home-demo")
+                            .label("Connect")
+                            .icon(IconName::Play)
+                            .primary()
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx)))
+                    }),
+            );
+        }
         for (ix, profile) in self.profiles.iter().enumerate() {
             let profile = profile.clone();
+            let connected_here = self.session.is_some()
+                && !self.demo_mode
+                && self
+                    .last_connection
+                    .as_ref()
+                    .is_some_and(|last| last.profile_ix == Some(ix));
             grid = grid.child(
                 tile(format!("home-profile-{ix}"))
                     .child(tile_title(
@@ -4310,7 +4327,15 @@ impl Workbench {
                         profile.name.clone(),
                         format!("{}@{}", profile.username, profile.connect_string),
                     ))
-                    .child(
+                    .child(if connected_here {
+                        // This profile is the live session: Open becomes
+                        // Disconnect once the connection succeeded.
+                        Button::new(format!("home-use-{ix}"))
+                            .label("Disconnect")
+                            .icon(IconName::LogOut)
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx)))
+                    } else {
                         Button::new(format!("home-use-{ix}"))
                             .label("Open")
                             .icon(IconName::LogIn)
@@ -4318,8 +4343,8 @@ impl Workbench {
                                 // Saved password: connect now. Otherwise
                                 // open the filled dialog for the password.
                                 this.open_profile(ix, window, cx);
-                            })),
-                    ),
+                            }))
+                    }),
             );
         }
         grid = grid.child(

@@ -116,6 +116,11 @@ jobs:
           test "$("$bin" --version)" = "Ora The Explorer $VERSION"
           mkdir -p out
           cp "$bin" "out/$out"
+          # Linux: the in-app updater installs from a .tar.gz holding the
+          # executable (the bare binary above stays for manual download).
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            tar -czf "out/$out.tar.gz" -C target/release gpui-like-toad
+          fi
           ls -la out/
       - if: runner.os == 'macOS'
         name: Bundel .app dan DMG
@@ -203,7 +208,7 @@ jobs:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           ls -la out/
-          test "$(ls out/* | wc -l)" -eq 4
+          test "$(ls out/* | wc -l)" -eq 5
           cd out
           sha256sum Ora-The-Explorer-* > SHA256SUMS
           cat SHA256SUMS
@@ -218,7 +223,9 @@ jobs:
               echo "::warning::release-key.pub di repo tidak cocok dengan MINISIGN_SECRET_KEY."
             fi
             for f in Ora-The-Explorer-* SHA256SUMS; do
-              minisign -S -s "$RUNNER_TEMP/release.key" -m "$f"
+              # Trusted comment `version:X.Y.Z` binds the signature to this
+              # release, so an older signed file cannot pass as a newer one.
+              minisign -S -s "$RUNNER_TEMP/release.key" -t "version:${VERSION#v}" -m "$f"
               minisign -V -p "$RUNNER_TEMP/release.pub" -m "$f"
             done
             rm -f "$RUNNER_TEMP/release.key"

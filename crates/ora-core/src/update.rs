@@ -50,16 +50,39 @@ pub struct Asset {
     pub size: u64,
 }
 
-/// The asset for this OS: `.dmg` on macOS, `.exe` on Windows, the plain
-/// `linux-x86_64` binary on Linux. `os` is `std::env::consts::OS`.
+/// The asset for this OS: `.dmg` on macOS, `.exe` on Windows, on Linux the
+/// `.tar.gz` (or, for older releases, the plain `linux-x86_64` binary).
+/// `os` is `std::env::consts::OS`.
 pub fn pick_asset<'a>(assets: &'a [Asset], os: &str) -> Option<&'a Asset> {
+    pick_installable(assets, os).or_else(|| {
+        (os == "linux")
+            .then(|| assets.iter().find(|a| a.name.ends_with("linux-x86_64")))
+            .flatten()
+    })
+}
+
+/// The asset the in-app updater can install: the same as [`pick_asset`],
+/// except that Linux needs the `.tar.gz` (a bare binary cannot be swapped
+/// in by the updater).
+pub fn pick_installable<'a>(assets: &'a [Asset], os: &str) -> Option<&'a Asset> {
     let wanted = |name: &str| match os {
         "macos" => name.ends_with(".dmg"),
         "windows" => name.ends_with("windows-x86_64.exe"),
-        "linux" => name.ends_with("linux-x86_64"),
+        "linux" => name.ends_with("linux-x86_64.tar.gz"),
         _ => false,
     };
     assets.iter().find(|a| wanted(&a.name))
+}
+
+/// Lowercase hex SHA-256 of `name` from a `sha256sum`-style `SHA256SUMS`
+/// text (`<hash>  <name>` or `<hash> *<name>` per line).
+pub fn sha256_from_sums(sums: &str, name: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let (hash, file) = line.trim().split_once(char::is_whitespace)?;
+        let file = file.trim_start().trim_start_matches('*');
+        (file == name && hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| hash.to_ascii_lowercase())
+    })
 }
 
 /// A release newer than the running build.
@@ -192,7 +215,33 @@ mod tests {
             .name
             .ends_with(".exe"));
         assert_eq!(pick_asset(&r.assets, "linux").unwrap().size, 7);
+        assert!(pick_installable(&r.assets, "linux").is_none());
         assert!(pick_asset(&r.assets, "freebsd").is_none());
+    }
+
+    #[test]
+    fn linux_prefers_tarball_and_checksums_parse() {
+        let a = |n: &str| Asset {
+            name: n.into(),
+            url: format!("{DOWNLOAD_PREFIX}v1/{n}"),
+            size: 1,
+        };
+        let assets = vec![
+            a("Ora-The-Explorer-1.0.0-linux-x86_64"),
+            a("Ora-The-Explorer-1.0.0-linux-x86_64.tar.gz"),
+            a("Ora-The-Explorer-1.0.0-linux-x86_64.tar.gz.minisig"),
+        ];
+        let picked = pick_installable(&assets, "linux").unwrap();
+        assert!(picked.name.ends_with(".tar.gz"));
+        assert!(pick_asset(&assets, "linux")
+            .unwrap()
+            .name
+            .ends_with(".tar.gz"));
+        let hash = "A".repeat(64);
+        let sums = format!("{hash}  x.dmg\n{} *y.exe\nshort  z\n", "b".repeat(64));
+        assert_eq!(sha256_from_sums(&sums, "x.dmg"), Some("a".repeat(64)));
+        assert_eq!(sha256_from_sums(&sums, "y.exe"), Some("b".repeat(64)));
+        assert_eq!(sha256_from_sums(&sums, "z"), None);
     }
 
     #[test]
