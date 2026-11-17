@@ -8,7 +8,10 @@
 # Windows SmartScreen akan menampilkan peringatan saat pertama kali
 # menjalankan .exe-nya, dan macOS Gatekeeper akan memblokir .app/.dmg
 # sampai dibuka sekali lewat klik-kanan -> Open. macOS juga menerbitkan
-# .dmg berisi .app + symlink Applications (tinggal drag-and-drop).
+# .dmg berisi .app + symlink Applications (tinggal drag-and-drop). Bundel
+# .app diberi tanda tangan ad-hoc. Setiap rilis juga membawa SHA256SUMS dan
+# (kalau secret MINISIGN_SECRET_KEY diisi) file .minisig per aset, untuk
+# verifikasi update otomatis; lihat docs/release-signing.md.
 name: Release
 
 on:
@@ -153,6 +156,12 @@ jobs:
           </dict>
           </plist>
           EOF
+          # Tanda tangan ad-hoc (gratis, tanpa akun Apple Developer): segel
+          # bundel jadi konsisten dan arm64 tidak menolaknya karena segel
+          # rusak. Ini BUKAN notarization, jadi Gatekeeper tetap menegur
+          # instalasi pertama dari browser (klik kanan -> Open sekali).
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
           # Smoke test biner di dalam bundel (bukan cuma biner mentahnya).
           "$app/Contents/MacOS/gpui-like-toad" --version
           test "$("$app/Contents/MacOS/gpui-like-toad" --version)" = "Ora The Explorer $VERSION"
@@ -185,12 +194,42 @@ jobs:
           pattern: binary-*
           path: out
           merge-multiple: true
+      - name: Checksum dan tanda tangan minisign
+        env:
+          # Kunci rahasia minisign TANPA password (minisign -G -W); isi file
+          # .key-nya disimpan sebagai secret repo. Kalau belum diisi, langkah
+          # tanda tangan dilewati (checksum tetap dibuat) supaya rilis tetap
+          # jalan. Kunci publiknya di-commit sebagai release-key.pub.
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          ls -la out/
+          test "$(ls out/* | wc -l)" -eq 4
+          cd out
+          sha256sum Ora-The-Explorer-* > SHA256SUMS
+          cat SHA256SUMS
+          if [ -n "$MINISIGN_SECRET_KEY" ]; then
+            sudo apt-get install -y minisign
+            printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/release.key"
+            # Kunci publik diturunkan dari kunci rahasia, lalu dipakai
+            # memverifikasi tiap tanda tangan. Kalau release-key.pub di repo
+            # berbeda, beri peringatan: app akan menolak update.
+            minisign -R -s "$RUNNER_TEMP/release.key" -p "$RUNNER_TEMP/release.pub"
+            if [ -f ../release-key.pub ] && ! diff -q <(tail -n 1 ../release-key.pub) <(tail -n 1 "$RUNNER_TEMP/release.pub") >/dev/null; then
+              echo "::warning::release-key.pub di repo tidak cocok dengan MINISIGN_SECRET_KEY."
+            fi
+            for f in Ora-The-Explorer-* SHA256SUMS; do
+              minisign -S -s "$RUNNER_TEMP/release.key" -m "$f"
+              minisign -V -p "$RUNNER_TEMP/release.pub" -m "$f"
+            done
+            rm -f "$RUNNER_TEMP/release.key"
+          else
+            echo "::warning::MINISIGN_SECRET_KEY belum diisi; rilis tanpa tanda tangan minisign."
+          fi
+          ls -la
       - name: Terbitkan rilis dan pangkas rilis lama
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ls -la out/
-          test "$(ls out/* | wc -l)" -eq 4
           notes=$(git log -n 15 --no-merges --pretty='- %s' -- crates | head -15)
           VERSION="${VERSION#v}"
           gh release create "v$VERSION" out/* --target "${{ github.sha }}" \
