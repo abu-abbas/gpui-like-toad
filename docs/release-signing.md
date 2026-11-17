@@ -17,6 +17,9 @@ minisign -V -p release-key.pub -m Ora-The-Explorer-X.Y.Z-linux-x86_64
 
 ## Membuat kunci (sekali saja)
 
+Pasang minisign dulu: `brew install minisign` (macOS), `sudo apt install minisign`
+(Ubuntu), atau `scoop install minisign` (Windows).
+
 ```sh
 minisign -G -W -p release-key.pub -s release.key
 ```
