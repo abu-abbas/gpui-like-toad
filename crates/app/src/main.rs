@@ -209,7 +209,12 @@ fn open_main_window(cx: &mut App) {
         appears_transparent: false,
         traffic_light_position: None,
     });
-    if let Err(err) = cx.open_window(options, |window, cx| {
+    // `gpui_kit::open_window` wraps the content in a Root, which owns the
+    // tooltip layer; with a bare `cx.open_window` no tooltip ever shows.
+    if let Err(err) = gpui_kit::open_window(options, cx, |window, cx| {
+        // Remember the platform's default UI font before the Root applies
+        // the theme font over it.
+        theme::remember_ui_font(window.text_style().font_family);
         theme::apply_preference(pref, window, cx);
         let view = cx.new(|cx| workbench::Workbench::new(window, cx));
         // Background, rate-limited, silent on failure.

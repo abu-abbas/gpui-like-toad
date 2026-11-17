@@ -27,7 +27,7 @@ use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu, PopupMenu, Po
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::{
     h_resizable, resizable_panel, v_resizable, ActiveTheme as _, Disableable as _, Icon,
-    Sizable as _,
+    Selectable as _, Sizable as _,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -391,6 +391,12 @@ pub struct Workbench {
     disconnect_prompt: Option<conns::DisconnectPrompt>,
     /// The Info panel under data / script tabs is folded to its header.
     info_collapsed: bool,
+    /// Home page: connections as a zebra list instead of cards, and
+    /// whether each section is folded.
+    home_list: bool,
+    side_conn_folded: bool,
+    home_conn_folded: bool,
+    home_recent_folded: bool,
     /// Keeps shortcuts (Quick Open, Run) working when no input has focus.
     focus_handle: gpui_kit::FocusHandle,
     tree_filter: String,
@@ -492,6 +498,10 @@ impl Workbench {
             cell_editor: None,
             disconnect_prompt: None,
             info_collapsed: false,
+            home_list: false,
+            side_conn_folded: false,
+            home_conn_folded: false,
+            home_recent_folded: false,
             focus_handle: cx.focus_handle(),
             tree_filter: String::new(),
             messages: Vec::new(),
@@ -1720,6 +1730,11 @@ impl Workbench {
         tab.kind = TabKind::Data;
         tab.data = Some(data);
         let edit_view = view.clone();
+        let table_name = format!(
+            "{}.{}",
+            ora_core::import::quote_ident(owner),
+            ora_core::import::quote_ident(name)
+        );
         tab.table_state.update(cx, |state, _| {
             let mut delegate = ResultsDelegate::empty()
                 .with_page_size(DATA_PAGE_SIZE)
@@ -1734,6 +1749,7 @@ impl Workbench {
                         edit_view.update(cx, |this, cx| this.open_cell_editor(request, window, cx));
                 }));
             }
+            delegate.set_table_name(Some(table_name));
             *state.delegate_mut() = delegate;
         });
         self.add_filter_row(None, None, window, cx);
@@ -2449,9 +2465,9 @@ impl Workbench {
             .w(px(RAIL_WIDTH))
             .py(px(SPACE_2))
             .gap(px(SPACE_1))
-            .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.sidebar_border);
+            // One step further from the content than the side panel, so
+            // the rail, the panel and the work area are three shades.
+            .bg(theme.sidebar.blend(theme.foreground.opacity(0.06)));
         for (panel, icon_name, label) in items {
             let active = self.rail == panel;
             let mut button = div()
@@ -2523,8 +2539,6 @@ impl Workbench {
             .h(px(TOOLBAR_HEIGHT))
             .px(px(SPACE_3))
             .gap(px(SPACE_2))
-            .border_b_1()
-            .border_color(theme.border)
             .child(
                 div()
                     .text_size(px(FONT_BODY))
@@ -2548,7 +2562,7 @@ impl Workbench {
             .size_full()
             .min_w(px(0.))
             .overflow_hidden()
-            .bg(theme.background);
+            .bg(theme.sidebar);
         let mut header = self.render_panel_header("Connections", theme);
         header = header.child(div().flex_1()).child(
             div()
@@ -2764,15 +2778,62 @@ impl Workbench {
         if self.profiles.is_empty() {
             return div().into_any_element();
         }
+        // Wake-style group: a small muted heading with a fold chevron and
+        // a count, then single-line rows; the open one is a rounded shade.
+        let folded = self.side_conn_folded;
         let mut list = div()
             .flex()
             .flex_col()
-            .px(px(SPACE_3))
+            .px(px(SPACE_2))
             .pt(px(SPACE_3))
-            .gap(px(SPACE_1));
+            .gap(px(2.))
+            .child(
+                div()
+                    .id("side-conn-fold")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_1))
+                    .h(px(28.))
+                    .px(px(SPACE_2))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.side_conn_folded = !this.side_conn_folded;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(FONT_CAPTION))
+                            .line_height(px(LEADING_CAPTION))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.muted_foreground)
+                            .child("Saved connections"),
+                    )
+                    .child(icon(
+                        if folded {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        },
+                        12.,
+                        theme.muted_foreground,
+                    ))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(FONT_CAPTION))
+                            .line_height(px(LEADING_CAPTION))
+                            .text_color(theme.muted_foreground)
+                            .child(self.profiles.len().to_string()),
+                    ),
+            );
+        if folded {
+            return list.into_any_element();
+        }
         for (ix, profile) in self.profiles.iter().enumerate() {
             let selected = self.editing_profile == Some(ix);
             let mut row = div()
+                .group("profile-row")
                 .flex()
                 .flex_row()
                 .items_center()
@@ -2781,15 +2842,16 @@ impl Workbench {
             if selected {
                 row = row.bg(theme.accent);
             } else {
-                row = row.hover(|this| this.bg(theme.secondary));
+                row = row.hover(|this| this.bg(theme.background.opacity(0.7)));
             }
             list = list.child(
                 row.child(
                     div()
                         .id(format!("profile-{ix}"))
                         .flex()
-                        .flex_col()
-                        .justify_center()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(SPACE_2))
                         .flex_1()
                         .min_w(px(0.))
                         .h(relative(1.0))
@@ -2797,22 +2859,16 @@ impl Workbench {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.edit_profile(ix, window, cx);
                         }))
+                        .child(icon(IconName::Database, 14., theme.muted_foreground))
                         .child(
                             div()
+                                .flex_1()
+                                .min_w(px(0.))
                                 .text_size(px(FONT_LABEL))
                                 .line_height(px(LEADING_LABEL))
-                                .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.foreground)
                                 .truncate()
                                 .child(profile.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(FONT_CAPTION))
-                                .line_height(px(LEADING_CAPTION))
-                                .text_color(theme.muted_foreground)
-                                .truncate()
-                                .child(format!("{}@{}", profile.username, profile.connect_string)),
                         ),
                 )
                 .child(
@@ -3233,7 +3289,8 @@ impl Workbench {
                     .px(px(SPACE_3))
                     .child(
                         div()
-                            .w(px(52.))
+                            .w(px(60.))
+                            .whitespace_nowrap()
                             .flex_none()
                             .child(form_label("Schema", theme)),
                     )
@@ -3248,7 +3305,8 @@ impl Workbench {
                     .px(px(SPACE_3))
                     .child(
                         div()
-                            .w(px(52.))
+                            .w(px(60.))
+                            .whitespace_nowrap()
                             .flex_none()
                             .child(form_label("Objects", theme)),
                     )
@@ -3273,7 +3331,7 @@ impl Workbench {
         } else {
             "History"
         };
-        let mut panel = div().flex().flex_col().size_full().bg(theme.background);
+        let mut panel = div().flex().flex_col().size_full().bg(theme.sidebar);
         let mut header = self.render_panel_header(title, theme);
         if !favorites_only {
             header = header.child(div().flex_1()).child(
@@ -3329,18 +3387,20 @@ impl Workbench {
                 "history-scroll"
             })
             .overflow_y_scroll()
-            .p(px(SPACE_2))
-            .gap(px(SPACE_1));
+            .p(px(SPACE_2));
+        let mut zebra = 0usize;
         for (ix, entry) in entries {
             let preview = entry.sql.split_whitespace().collect::<Vec<_>>().join(" ");
             let sql = entry.sql.clone();
             let favorite = entry.favorite;
+            zebra += 1;
             list = list.child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .rounded(px(RADIUS_MD))
+                    .when(zebra % 2 == 1, |row| row.bg(theme.table_even))
                     .hover(|this| this.bg(theme.secondary))
                     .child(
                         div()
@@ -3349,6 +3409,10 @@ impl Workbench {
                             .flex_col()
                             .justify_center()
                             .flex_1()
+                            // Without min_w(0) a long script keeps its full
+                            // width and pushes the star out of view.
+                            .min_w(px(0.))
+                            .overflow_hidden()
                             .py(px(SPACE_1))
                             .px(px(SPACE_2))
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -3366,6 +3430,7 @@ impl Workbench {
                     .child(
                         div()
                             .id(format!("history-star-{ix}"))
+                            .flex_none()
                             .flex()
                             .flex_row()
                             .items_center()
@@ -3398,7 +3463,7 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut panel = div().flex().flex_col().size_full().bg(theme.background);
+        let mut panel = div().flex().flex_col().size_full().bg(theme.sidebar);
         // flex_none: the header keeps its height when the body is taller
         // than the panel; the body scrolls instead.
         panel = panel.child(self.render_panel_header("Settings", theme).flex_none());
@@ -3673,7 +3738,7 @@ impl Workbench {
                 Button::new("commit")
                     .small()
                     .tooltip("Commit")
-                    .icon(IconName::Check)
+                    .icon(Icon::new(IconName::Check).text_color(theme.success))
                     .ghost()
                     .disabled(no_session || self.conn.busy)
                     .on_click(cx.listener(|this, _, _, cx| this.commit(cx))),
@@ -3682,7 +3747,7 @@ impl Workbench {
                 Button::new("rollback")
                     .small()
                     .tooltip("Rollback")
-                    .icon(IconName::Undo2)
+                    .icon(Icon::new(IconName::Undo2).text_color(theme.danger))
                     .ghost()
                     .disabled(no_session || self.conn.busy)
                     .on_click(cx.listener(|this, _, _, cx| this.rollback(cx))),
@@ -3734,6 +3799,8 @@ impl Workbench {
                 .flex_row()
                 .flex_1()
                 .min_w(px(0.))
+                .min_h(px(0.))
+                .overflow_hidden()
                 .child(grid)
                 .child(self.render_details_panel(theme, cx))
                 .into_any_element()
@@ -3746,6 +3813,8 @@ impl Workbench {
                 .flex()
                 .flex_col()
                 .flex_1()
+                .min_h(px(0.))
+                .overflow_hidden()
                 .child(
                     div().flex_1().child(
                         DataTable::new(&data.structure)
@@ -3761,6 +3830,8 @@ impl Workbench {
                 .flex()
                 .flex_col()
                 .flex_1()
+                .min_h(px(0.))
+                .overflow_hidden()
                 .child(
                     div().flex_1().child(
                         DataTable::new(&data.indexes)
@@ -3776,15 +3847,27 @@ impl Workbench {
                 .flex()
                 .flex_col()
                 .flex_1()
+                .min_h(px(0.))
+                .overflow_hidden()
                 .child(Editor::new(&data.ddl).readonly(true).flex_1())
                 .into_any_element(),
             _ => div()
                 .flex()
                 .flex_col()
                 .flex_1()
+                .min_h(px(0.))
+                .overflow_hidden()
                 .child(self.render_filter_bar(theme, cx))
                 .children(self.render_edit_bar(theme, cx))
-                .child(div().flex().flex_col().flex_1().child(grid))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .overflow_hidden()
+                        .child(grid),
+                )
                 .into_any_element(),
         };
         div()
@@ -4473,14 +4556,66 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let folded = self.home_conn_folded;
+        let list_mode = self.home_list;
+        let toggle = |id: &str, label: &'static str, icon_name: IconName, active: bool| {
+            Button::new(id.to_string())
+                .small()
+                .ghost()
+                .icon(icon_name)
+                .selected(active)
+                .tooltip(label)
+        };
         let section = div().flex().flex_col().gap(px(SPACE_2)).child(
             div()
-                .text_size(px(FONT_HEADING_MD))
-                .line_height(px(LEADING_HEADING_MD))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.foreground)
-                .child("Connections"),
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(SPACE_1))
+                .child(self.section_title(
+                    "home-conn-fold",
+                    "Connections",
+                    folded,
+                    theme,
+                    cx,
+                    |this| {
+                        this.home_conn_folded = !this.home_conn_folded;
+                    },
+                ))
+                .child(div().flex_1())
+                .when(!folded, |row| {
+                    row.child(
+                        toggle(
+                            "home-view-cards",
+                            "Tampilan kartu",
+                            IconName::LayoutGrid,
+                            !list_mode,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.home_list = false;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        toggle(
+                            "home-view-list",
+                            "Tampilan daftar",
+                            IconName::List,
+                            list_mode,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.home_list = true;
+                            cx.notify();
+                        })),
+                    )
+                }),
         );
+        if folded {
+            return section;
+        }
+        if list_mode {
+            return section.child(self.render_home_connection_list(theme, cx));
+        }
         let tile = |id: String| {
             div()
                 .id(id)
@@ -4657,19 +4792,222 @@ impl Workbench {
         section.child(grid)
     }
 
+    /// A section title with a fold chevron, like the Agents/Projects
+    /// groups of a sidebar.
+    fn section_title(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        folded: bool,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+        toggle: fn(&mut Workbench),
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(SPACE_1))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                toggle(this);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .text_size(px(FONT_HEADING_MD))
+                    .line_height(px(LEADING_HEADING_MD))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.foreground)
+                    .child(label),
+            )
+            .child(icon(
+                if folded {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                },
+                14.,
+                theme.muted_foreground,
+            ))
+    }
+
+    /// Connections as a zebra table: status dot, name, user@target, action.
+    fn render_home_connection_list(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let demo_open = self.find_open_conn(None, true);
+        let row = |ix: usize| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(SPACE_3))
+                .h(px(TOOLBAR_HEIGHT + 4.))
+                .px(px(SPACE_3))
+                .rounded(px(RADIUS_MD))
+                .when(ix % 2 == 0, |r| r.bg(theme.table_even))
+        };
+        let cell = |text: String, color: gpui_kit::Hsla, weight: FontWeight, flex: f32| {
+            div()
+                .flex_basis(px(0.))
+                .flex_grow(1.)
+                .flex_shrink(1.)
+                .min_w(px(0.))
+                .w(relative(flex))
+                .truncate()
+                .text_size(px(FONT_LABEL))
+                .line_height(px(LEADING_LABEL))
+                .font_weight(weight)
+                .text_color(color)
+                .child(text)
+        };
+        let mut list = div().flex().flex_col().w_full();
+        // Open connections get Buka + Disconnect, closed ones one button.
+        let actions = |key: String,
+                       open: Option<u64>,
+                       closed: Button,
+                       cx: &mut Context<Self>|
+         -> gpui_kit::AnyElement {
+            match open {
+                Some(id) => div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(SPACE_2))
+                    .child(
+                        Button::new(format!("{key}-open"))
+                            .small()
+                            .label("Buka")
+                            .icon(IconName::LogIn)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.switch_conn(id, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("{key}-disconnect"))
+                            .small()
+                            .label("Disconnect")
+                            .icon(IconName::LogOut)
+                            .disabled(self.conn_by_id(id).is_some_and(|c| c.busy))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.request_disconnect(id, window, cx)
+                            })),
+                    )
+                    .into_any_element(),
+                None => closed.into_any_element(),
+            }
+        };
+        let mut n = 1;
+        if self.show_demo || demo_open.is_some() {
+            list = list.child(
+                row(n)
+                    .child(status_dot(if demo_open.is_some() {
+                        theme.success
+                    } else {
+                        theme.muted_foreground
+                    }))
+                    .child(cell(
+                        "Demo database".to_string(),
+                        theme.foreground,
+                        FontWeight::SEMIBOLD,
+                        0.3,
+                    ))
+                    .child(cell(
+                        "Built-in, no Oracle needed".to_string(),
+                        theme.muted_foreground,
+                        FontWeight::NORMAL,
+                        0.5,
+                    ))
+                    .child(actions(
+                        "list-demo".to_string(),
+                        demo_open,
+                        Button::new("list-demo")
+                            .small()
+                            .label("Connect")
+                            .icon(IconName::Play)
+                            .disabled(self.conn.busy)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.connect(true, window, cx)),
+                            ),
+                        cx,
+                    )),
+            );
+            n += 1;
+        }
+        for (ix, profile) in self.profiles.iter().enumerate() {
+            let open = self.find_open_conn(Some(ix), false);
+            list = list.child(
+                row(n)
+                    .child(status_dot(if open.is_some() {
+                        theme.success
+                    } else {
+                        theme.muted_foreground
+                    }))
+                    .child(cell(
+                        profile.name.clone(),
+                        theme.foreground,
+                        FontWeight::SEMIBOLD,
+                        0.3,
+                    ))
+                    .child(cell(
+                        format!("{}@{}", profile.username, profile.connect_string),
+                        theme.muted_foreground,
+                        FontWeight::NORMAL,
+                        0.5,
+                    ))
+                    .child(actions(
+                        format!("list-use-{ix}"),
+                        open,
+                        Button::new(format!("list-use-{ix}"))
+                            .small()
+                            .label("Open")
+                            .icon(IconName::LogIn)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_profile(ix, window, cx);
+                            })),
+                        cx,
+                    )),
+            );
+            n += 1;
+        }
+        list.child(
+            row(0).child(
+                Button::new("list-new")
+                    .small()
+                    .ghost()
+                    .label("New connection")
+                    .icon(IconName::Plus)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_new_connection(window, cx);
+                    })),
+            ),
+        )
+    }
+
     fn render_home_recent(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut section = div().flex().flex_col().gap(px(SPACE_2)).child(
-            div()
-                .text_size(px(FONT_HEADING_MD))
-                .line_height(px(LEADING_HEADING_MD))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.foreground)
-                .child("Recent queries"),
-        );
+        let folded = self.home_recent_folded;
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_2))
+            .child(self.section_title(
+                "home-recent-fold",
+                "Recent queries",
+                folded,
+                theme,
+                cx,
+                |this| this.home_recent_folded = !this.home_recent_folded,
+            ));
+        if folded {
+            return section.into_any_element();
+        }
         if self.history.is_empty() {
             return section
                 .child(caption_text(
@@ -4691,6 +5029,7 @@ impl Workbench {
                     .h(px(TOOLBAR_HEIGHT))
                     .px(px(SPACE_2))
                     .rounded(px(RADIUS_MD))
+                    .when(ix % 2 == 0, |row| row.bg(theme.table_even))
                     .hover(|this| this.bg(theme.secondary))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.new_tab_with_sql(sql.clone(), window, cx);
@@ -4799,6 +5138,9 @@ impl Workbench {
 
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The Root sets rem to the theme font size (13px) every frame; the
+        // layout was built for the default 16px rem.
+        window.set_rem_size(px(16.));
         let theme = cx.theme().clone();
         // Nothing focused (fresh start, closed palette): take focus so
         // window-level shortcuts reach this view.

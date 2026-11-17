@@ -121,6 +121,13 @@ pub const VIOLET_50: u32 = 0xF5F3FF;
 /// Derived darker violet for pressed primary buttons (not in the spec).
 const VIOLET_600: u32 = 0x5B3EE0;
 
+static UI_FONT: std::sync::OnceLock<gpui_kit::SharedString> = std::sync::OnceLock::new();
+
+/// Record the platform default font family so the theme can use it.
+pub fn remember_ui_font(family: gpui_kit::SharedString) {
+    let _ = UI_FONT.set(family);
+}
+
 fn hex(value: u32) -> Hsla {
     Hsla::from(rgb(value))
 }
@@ -228,8 +235,12 @@ pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
                 apply_light(theme);
             }
         }
-        // JetBrains Mono for ALL UI text: both the sans and mono tokens.
-        theme.font_family = MONO_FONT_FAMILY.into();
+        // UI text keeps the platform font (the Root would otherwise apply
+        // the theme font to the whole window); mono is for code only.
+        theme.font_family = UI_FONT
+            .get()
+            .cloned()
+            .unwrap_or_else(|| MONO_FONT_FAMILY.into());
         theme.mono_font_family = MONO_FONT_FAMILY.into();
         theme.font_size = gpui_kit::px(FONT_BODY);
         theme.mono_font_size = gpui_kit::px(FONT_EDITOR);
@@ -240,7 +251,10 @@ pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
     // `update`, but pin its typography tokens to JetBrains Mono directly
     // too, so editor-adjacent surfaces never fall back to a system font.
     let base = gpui_kit::base::Theme::global_mut(cx);
-    base.tokens.typography.sans = MONO_FONT_FAMILY.into();
+    base.tokens.typography.sans = UI_FONT
+        .get()
+        .cloned()
+        .unwrap_or_else(|| MONO_FONT_FAMILY.into());
     base.tokens.typography.mono = MONO_FONT_FAMILY.into();
 }
 
@@ -258,18 +272,18 @@ fn apply_light(theme: &mut Theme) {
     theme.button_primary_active = hex(VIOLET_600);
     theme.button_primary_foreground = hex(0xFFFFFF);
     theme.button = hex(0xFFFFFF);
-    theme.button_hover = hex(0xF4F4F5);
+    theme.button_hover = hex(0xEFEFF2);
     theme.button_active = hex(0xE4E4E7);
     theme.button_foreground = hex(0x09090B);
-    theme.secondary = hex(0xF4F4F5);
+    theme.secondary = hex(0xEFEFF2);
     theme.secondary_hover = hex(0xE4E4E7);
     theme.secondary_active = hex(0xD4D4D8);
     theme.secondary_foreground = hex(0x09090B);
-    theme.button_secondary = hex(0xF4F4F5);
+    theme.button_secondary = hex(0xEFEFF2);
     theme.button_secondary_hover = hex(0xE4E4E7);
     theme.button_secondary_active = hex(0xD4D4D8);
     theme.button_secondary_foreground = hex(0x09090B);
-    theme.muted = hex(0xF4F4F5);
+    theme.muted = hex(0xEFEFF2);
     theme.muted_foreground = hex(0x71717A);
     theme.accent = hex(VIOLET_50);
     theme.accent_foreground = hex(0x4C1D95);
@@ -311,21 +325,22 @@ fn apply_light(theme: &mut Theme) {
     theme.link = hex(VIOLET_500);
     theme.link_hover = hex(VIOLET_400);
     theme.link_active = hex(VIOLET_600);
-    theme.sidebar = hex(0xFFFFFF);
+    // A shade apart from the content, so the sidebar needs no border line.
+    theme.sidebar = hex(0xEFEFF2);
     theme.sidebar_foreground = hex(0x09090B);
     theme.sidebar_border = hex(0xE4E4E7);
     theme.sidebar_accent = hex(VIOLET_50);
     theme.sidebar_accent_foreground = hex(0x4C1D95);
     theme.sidebar_primary = hex(VIOLET_500);
     theme.sidebar_primary_foreground = hex(0xFFFFFF);
-    theme.tab = hex(0xF4F4F5);
+    theme.tab = hex(0xEFEFF2);
     theme.tab_active = hex(0xFFFFFF);
     theme.tab_active_foreground = hex(0x09090B);
     theme.tab_foreground = hex(0x71717A);
     theme.tab_bar = hex(0xFFFFFF);
-    theme.tab_bar_segmented = hex(0xF4F4F5);
+    theme.tab_bar_segmented = hex(0xEFEFF2);
     theme.table = hex(0xFFFFFF);
-    theme.table_head = hex(0xF4F4F5);
+    theme.table_head = hex(0xEFEFF2);
     theme.table_head_foreground = hex(0x09090B);
     theme.table_even = hex(0xFAFAFA);
     theme.table_hover = hex(VIOLET_50);
@@ -333,13 +348,13 @@ fn apply_light(theme: &mut Theme) {
     theme.table_active_border = hex(VIOLET_500);
     // Zebra only: no lines between rows.
     theme.table_row_border = gpui_kit::hsla(0., 0., 0., 0.);
-    theme.table_foot = hex(0xF4F4F5);
+    theme.table_foot = hex(0xEFEFF2);
     theme.table_foot_foreground = hex(0x09090B);
     theme.list_hover = hex(VIOLET_50);
     theme.list_active = hex(VIOLET_100);
     theme.list_active_border = hex(VIOLET_500);
     theme.list_even = hex(0xFAFAFA);
-    theme.list_head = hex(0xF4F4F5);
+    theme.list_head = hex(0xEFEFF2);
     theme.selection = hex(VIOLET_100);
     theme.caret = hex(VIOLET_500);
     theme.scrollbar = hex(0xE4E4E7);
@@ -350,7 +365,7 @@ fn apply_light(theme: &mut Theme) {
     theme.status_bar = hex(0xFFFFFF);
     theme.status_bar_border = hex(0xE4E4E7);
     theme.window_border = hex(0xE4E4E7);
-    theme.skeleton = hex(0xF4F4F5);
+    theme.skeleton = hex(0xEFEFF2);
     theme.drag_border = hex(VIOLET_500);
     theme.drop_target = hex(VIOLET_500);
     theme.group_box = hex(0xFFFFFF);
@@ -425,7 +440,7 @@ fn apply_dark(theme: &mut Theme) {
     theme.link = hex(VIOLET_300);
     theme.link_hover = hex(VIOLET_200);
     theme.link_active = hex(VIOLET_400);
-    theme.sidebar = hex(0x09090B);
+    theme.sidebar = hex(0x16161A);
     theme.sidebar_foreground = hex(0xFAFAFA);
     theme.sidebar_border = hex(0x3F3F46);
     theme.sidebar_accent = hex(0x30264F);

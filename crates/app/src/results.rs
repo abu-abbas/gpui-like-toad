@@ -16,8 +16,8 @@ use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    div, px, App, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
-    SharedString, Styled as _, Window,
+    div, px, App, ClipboardItem, Context, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, SharedString, Styled as _, Window,
 };
 use ora_core::{FilterCondition, FilterOp, QueryResult, Value, ROWID_COLUMN};
 
@@ -54,6 +54,9 @@ pub struct ResultsDelegate {
     rowid_col: Option<usize>,
     /// Edited cells by (ROWID, column name), tinted until commit.
     pending: HashMap<(String, String), CellMark>,
+    /// Quoted table name for "Copy As" statements; a placeholder when the
+    /// grid shows a free query.
+    table_name: Option<String>,
 }
 
 pub type QuickFilterHandler = Rc<dyn Fn(FilterCondition, &mut Window, &mut App)>;
@@ -178,6 +181,7 @@ impl ResultsDelegate {
             on_quick_filter: None,
             on_edit: None,
             rowid_col: None,
+            table_name: None,
             pending: HashMap::new(),
         }
     }
@@ -238,6 +242,79 @@ impl ResultsDelegate {
             .collect()
     }
 
+    /// Copy, Copy Field Name and the "Copy As" submenu for one row. Values
+    /// and names cover the shown columns only (hidden columns and the
+    /// ROWID stay out).
+    fn copy_menu(
+        &self,
+        menu: PopupMenu,
+        row_ix: usize,
+        data_col: usize,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> PopupMenu {
+        let abs_row = self.absolute_row(row_ix);
+        let fields: Vec<(String, Value)> = self
+            .row_fields(row_ix)
+            .into_iter()
+            .filter(|(name, _)| !self.hidden.contains(name))
+            .collect();
+        let rowid = self
+            .rowid_col
+            .and_then(|c| self.result.get(abs_row, c))
+            .map(Value::display);
+        let table = self
+            .table_name
+            .clone()
+            .unwrap_or_else(|| "TABLE_NAME".to_string());
+        let cell = self
+            .result
+            .get(abs_row, data_col)
+            .map(ora_core::copy::plain)
+            .unwrap_or_default();
+        let clipboard = |text: String| {
+            move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            }
+        };
+        let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+        let values: Vec<Value> = fields.iter().map(|(_, v)| v.clone()).collect();
+        let name_list = names.join(", ");
+        let value_list = {
+            let refs: Vec<&Value> = values.iter().collect();
+            ora_core::copy::join_values(&refs, ", ")
+        };
+        let menu = menu
+            .item(PopupMenuItem::new("Copy").on_click(clipboard(value_list)))
+            .item(PopupMenuItem::new("Copy Cell").on_click(clipboard(cell)))
+            .item(PopupMenuItem::new("Copy Field Name").on_click(clipboard(name_list)));
+        let submenu = PopupMenu::build(window, cx, move |sub, _, _| {
+            let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            let value_refs: Vec<&Value> = values.iter().collect();
+            use ora_core::copy;
+            sub.item(PopupMenuItem::new("Insert Statement").on_click(clipboard(
+                copy::insert_statement(&table, &name_refs, &value_refs),
+            )))
+            .item(PopupMenuItem::new("Update Statement").on_click(clipboard(
+                copy::update_statement(&table, &name_refs, &value_refs, rowid.as_deref()),
+            )))
+            .separator()
+            .item(
+                PopupMenuItem::new("Tab Separated Values (Data only)")
+                    .on_click(clipboard(copy::tsv(None, Some(&value_refs)))),
+            )
+            .item(
+                PopupMenuItem::new("Tab Separated Values (Field Name only)")
+                    .on_click(clipboard(copy::tsv(Some(&name_refs), None))),
+            )
+            .item(
+                PopupMenuItem::new("Tab Separated Values (Field Name and Data)")
+                    .on_click(clipboard(copy::tsv(Some(&name_refs), Some(&value_refs)))),
+            )
+        });
+        menu.item(PopupMenuItem::submenu("Copy As", submenu))
+    }
+
     /// The edit request for the cell at result row `abs_row`, column
     /// `data_col`; `None` when editing is off or the row has no ROWID.
     fn edit_request(&self, abs_row: usize, data_col: usize) -> Option<CellEditRequest> {
@@ -295,6 +372,11 @@ impl ResultsDelegate {
                 column
             });
         }
+    }
+
+    /// Table behind this grid, quoted, for INSERT/UPDATE copies.
+    pub fn set_table_name(&mut self, name: Option<String>) {
+        self.table_name = name;
     }
 
     pub fn page_size(&self) -> usize {
@@ -486,13 +568,15 @@ impl TableDelegate for ResultsDelegate {
         &mut self,
         row_ix: usize,
         mut menu: PopupMenu,
-        _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
         let Some(data_col) = self.right_col.and_then(|c| self.data_col(c)) else {
             return menu;
         };
         let abs_row = self.absolute_row(row_ix);
+        menu = self.copy_menu(menu, row_ix, data_col, window, &mut **cx);
+        menu = menu.separator();
         if let (Some(handler), Some(request)) =
             (self.on_edit.clone(), self.edit_request(abs_row, data_col))
         {
