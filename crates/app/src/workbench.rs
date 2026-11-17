@@ -2372,7 +2372,9 @@ impl Workbench {
             .w(px(RAIL_WIDTH))
             .py(px(SPACE_2))
             .gap(px(SPACE_1))
-            .bg(theme.sidebar);
+            // One step further from the content than the side panel, so
+            // the rail, the panel and the work area are three shades.
+            .bg(theme.sidebar.blend(theme.foreground.opacity(0.06)));
         for (panel, icon_name, label) in items {
             let active = self.rail == panel;
             let mut button = div()
