@@ -149,6 +149,15 @@ fn install_menus(cx: &mut App) {
             MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
         ]),
         Menu::new("View").items([MenuItem::action("Toggle Full Screen", ToggleFullScreen)]),
+        Menu::new("Connection").items([
+            MenuItem::action("New Connection…", workbench::NewConnection),
+            MenuItem::separator(),
+            MenuItem::action("Connect", workbench::ConnectLast),
+            MenuItem::action("Disconnect", workbench::DisconnectSession),
+            MenuItem::action("Edit Connection…", workbench::EditConnection),
+            MenuItem::separator(),
+            MenuItem::action("Refresh Schema", workbench::RefreshSchema),
+        ]),
         Menu::new("Window").items([
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),
