@@ -1066,6 +1066,7 @@ impl Workbench {
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         self.show_home = false;
+        self.leave_whats_new();
         self.tab_scroll.scroll_to_item(self.active_tab);
         cx.notify();
     }
@@ -1094,6 +1095,7 @@ impl Workbench {
         }
         self.active_tab = ix;
         self.show_home = false;
+        self.leave_whats_new();
         self.tab_scroll.scroll_to_item(ix);
         cx.notify();
     }
@@ -1866,6 +1868,10 @@ impl Workbench {
             let active = !self.show_home && ix == self.active_tab;
             strip = strip.child(self.render_query_tab(ix, tab, active, theme, cx));
         }
+        // Always the last tab, after every query/data tab.
+        if self.show_whats_new_tab() {
+            strip = strip.child(self.render_whats_new_tab(theme, cx));
+        }
         div()
             .flex()
             .flex_row()
@@ -1901,7 +1907,7 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let active = self.show_home;
+        let active = self.show_home && !self.whats_new_active();
         let mut tab = div()
             .id("tab-home")
             .flex()
@@ -1914,6 +1920,7 @@ impl Workbench {
             .rounded(px(RADIUS_MD))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.show_home = true;
+                this.leave_whats_new();
                 cx.notify();
             }));
         if active {
@@ -3068,7 +3075,9 @@ impl Workbench {
         // The split wrappers below take `min_h(0)`: as flex items they
         // otherwise grow to their content (e.g. a long Messages list),
         // pushing the bottom panel past the window instead of scrolling.
-        if self.show_home {
+        if self.whats_new_active() {
+            main = main.child(self.render_whats_new_page(theme, cx));
+        } else if self.show_home {
             main = main.child(self.render_home(theme, cx));
         } else if self.active_tab().kind != TabKind::Query {
             // Toad-style object tabs: the data grid (or the script) fills
@@ -4286,7 +4295,6 @@ impl Render for Workbench {
             .when(self.quick_open.is_some(), |this| {
                 this.child(self.render_quick_open(&theme, cx))
             })
-            .children(self.render_update_details(&theme, cx))
             .when(self.cell_editor.is_some(), |this| {
                 this.child(self.render_cell_editor(&theme, cx))
             })

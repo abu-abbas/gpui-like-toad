@@ -1,8 +1,8 @@
 //! Update check against GitHub Releases. At startup (at most once a day,
 //! silent on failure) and from "Check for Updates" (menu / Settings). A
 //! newer release shows a banner with its notes and a button that opens the
-//! release page in the browser (the banner is one minimal line; its
-//! "What's new" popup lists the full release notes); nothing is downloaded or installed here.
+//! release page in the browser (the banner is one minimal line; a
+//! "What's new" tab next to Home lists the full release notes); nothing is downloaded or installed here.
 //! The request is one anonymous GET of the public API: no identifiers.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,8 +19,9 @@ pub(super) struct UpdateState {
     available: Option<ReleaseInfo>,
     /// Banner visible (hidden by "Nanti" until the next newer version).
     banner: bool,
-    /// "What's new" popup open.
-    details_open: bool,
+    /// "What's new" tab exists (next to Home) and is the shown page.
+    tab_open: bool,
+    tab_active: bool,
     /// Result of the last manual check, shown in Settings.
     status: Option<String>,
 }
@@ -32,7 +33,8 @@ impl UpdateState {
             checking: false,
             available: None,
             banner: false,
-            details_open: false,
+            tab_open: false,
+            tab_active: false,
             status: None,
         }
     }
@@ -123,7 +125,9 @@ impl Workbench {
                         let dismissed = u.prefs.dismissed_version.as_deref() == Some(&r.tag);
                         u.status = Some(format!("Versi {} tersedia.", r.version));
                         u.banner = manual || !dismissed;
-                        u.details_open = false;
+                        // Like VS Code: the tab appears by itself, without
+                        // taking over the page the user is on.
+                        u.tab_open |= u.banner;
                         u.available = Some(r);
                     }
                     None => {
@@ -198,6 +202,26 @@ impl Workbench {
         ))
     }
 
+    pub(super) fn whats_new_active(&self) -> bool {
+        self.updates.tab_open && self.updates.tab_active
+    }
+
+    pub(super) fn show_whats_new_tab(&self) -> bool {
+        self.updates.tab_open
+    }
+
+    pub(super) fn leave_whats_new(&mut self) {
+        self.updates.tab_active = false;
+    }
+
+    fn open_whats_new(&mut self) {
+        self.updates.tab_open = true;
+        self.updates.tab_active = true;
+        // `show_home` means "no query tab is current"; the page replaces
+        // Home's content while the What's new tab is active.
+        self.show_home = true;
+    }
+
     /// Minimal one-line banner above the whole window when a newer release
     /// exists; clicking the text or "Lihat detail" opens the popup.
     pub(super) fn render_update_banner(
@@ -240,7 +264,7 @@ impl Workbench {
                         .primary()
                         .small()
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.updates.details_open = true;
+                            this.open_whats_new();
                             cx.notify();
                         })),
                 )
@@ -258,108 +282,148 @@ impl Workbench {
         )
     }
 
-    /// "What's new" popup: every note of the release, plus the button that
-    /// opens the release page.
-    pub(super) fn render_update_details(
+    /// The "What's new" tab button, placed right after Home.
+    pub(super) fn render_whats_new_tab(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
-    ) -> Option<gpui_kit::AnyElement> {
-        let release = self
-            .updates
-            .available
-            .as_ref()
-            .filter(|_| self.updates.details_open)?;
-        let url = release.url.clone();
-        let notes = release.notes.trim();
-        let mut list = div()
-            .id("update-notes")
+    ) -> gpui_kit::AnyElement {
+        let active = self.whats_new_active();
+        let mut container = div()
             .flex()
-            .flex_col()
-            .gap(px(SPACE_1))
-            .max_h(px(320.))
-            .overflow_y_scroll()
-            .px(px(SPACE_4))
-            .py(px(SPACE_2));
-        if notes.is_empty() {
-            list = list.child(caption_text("Tidak ada catatan rilis.".to_string(), theme));
-        }
-        for line in notes.lines().filter(|l| !l.trim().is_empty()) {
-            list = list.child(body_text(line.to_string(), theme));
-        }
-        let card = div()
-            .id("update-card")
-            .flex()
-            .flex_col()
-            .w(px(560.))
-            .rounded(px(RADIUS_MD))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .shadow_lg()
-            .on_click(|_, _, cx| cx.stop_propagation())
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .h(px(28.))
+            .rounded(px(RADIUS_MD));
+        container = if active {
+            container
+                .bg(theme.tab_active)
+                .border_1()
+                .border_color(theme.border)
+        } else {
+            container.hover(|this| this.bg(theme.secondary))
+        };
+        let color = if active {
+            theme.tab_active_foreground
+        } else {
+            theme.tab_foreground
+        };
+        container
             .child(
                 div()
-                    .px(px(SPACE_4))
-                    .pt(px(SPACE_3))
-                    .pb(px(SPACE_2))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(form_label("What's new", theme))
-                    .child(caption_text(
-                        format!(
-                            "Versi {} (kamu pakai {})",
-                            release.version,
-                            env!("CARGO_PKG_VERSION")
-                        ),
-                        theme,
-                    )),
-            )
-            .child(list)
-            .child(
-                div()
+                    .id("tab-whats-new")
                     .flex()
                     .flex_row()
-                    .justify_end()
-                    .gap(px(SPACE_2))
-                    .px(px(SPACE_4))
-                    .py(px(SPACE_3))
-                    .border_t_1()
-                    .border_color(theme.border)
+                    .items_center()
+                    .h(relative(1.0))
+                    .gap(px(SPACE_1))
+                    .pl(px(SPACE_2))
+                    .pr(px(SPACE_1))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.open_whats_new();
+                        cx.notify();
+                    }))
+                    .child(icon(
+                        IconName::Sparkles,
+                        14.,
+                        if active {
+                            theme.primary
+                        } else {
+                            theme.muted_foreground
+                        },
+                    ))
                     .child(
-                        Button::new("update-close")
-                            .label("Tutup")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.updates.details_open = false;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("update-open")
-                            .label("Buka halaman rilis")
-                            .primary()
-                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                        div()
+                            .text_size(px(FONT_LABEL))
+                            .line_height(px(LEADING_LABEL))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(color)
+                            .child("What's new"),
                     ),
+            )
+            .child(
+                div()
+                    .id("tab-whats-new-close")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(20.))
+                    .w(px(20.))
+                    .mr(px(SPACE_1))
+                    .rounded(px(RADIUS_SM))
+                    .hover(|this| this.bg(theme.danger).text_color(theme.danger_foreground))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.updates.tab_open = false;
+                        this.updates.tab_active = false;
+                        cx.notify();
+                    }))
+                    .child(icon(IconName::X, 12., theme.muted_foreground)),
+            )
+            .into_any_element()
+    }
+
+    /// The What's new page: every note of the release, plus the button
+    /// that opens the release page in the browser.
+    pub(super) fn render_whats_new_page(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let mut page = div()
+            .id("whats-new-page")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .gap(px(SPACE_2))
+            .p(px(SPACE_6));
+        let Some(release) = self.updates.available.as_ref() else {
+            return page
+                .child(
+                    div()
+                        .text_size(px(FONT_HEADING_XL))
+                        .line_height(px(LEADING_HEADING_XL))
+                        .child("What's new"),
+                )
+                .child(caption_text(
+                    format!(
+                        "Kamu memakai versi terbaru ({}).",
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                    theme,
+                ))
+                .into_any_element();
+        };
+        let url = release.url.clone();
+        page = page
+            .child(
+                div()
+                    .text_size(px(FONT_HEADING_XL))
+                    .line_height(px(LEADING_HEADING_XL))
+                    .child(format!("What's new di {}", release.version)),
+            )
+            .child(caption_text(
+                format!("Kamu memakai {}.", env!("CARGO_PKG_VERSION")),
+                theme,
+            ))
+            .child(
+                div().flex().flex_row().py(px(SPACE_2)).child(
+                    Button::new("update-open")
+                        .label("Buka halaman rilis")
+                        .icon(IconName::Download)
+                        .primary()
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                ),
             );
-        Some(
-            div()
-                .id("update-scrim")
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .pt(px(96.))
-                .bg(gpui_kit::hsla(0., 0., 0., 0.35))
-                .occlude()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.updates.details_open = false;
-                    cx.notify();
-                }))
-                .child(card)
-                .into_any_element(),
-        )
+        let notes = release.notes.trim();
+        if notes.is_empty() {
+            page = page.child(caption_text("Tidak ada catatan rilis.".to_string(), theme));
+        }
+        for line in notes.lines().filter(|l| !l.trim().is_empty()) {
+            page = page.child(body_text(line.to_string(), theme));
+        }
+        page.into_any_element()
     }
 }
