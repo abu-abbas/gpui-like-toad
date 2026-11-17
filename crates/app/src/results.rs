@@ -310,6 +310,30 @@ impl TableDelegate for ResultsDelegate {
         self.columns[col_ix].clone()
     }
 
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        // Header-only column dividers: the body has none, and the table's
+        // own handles only show on hover.
+        let divider = cx.theme().border;
+        div()
+            .w_full()
+            .h_full()
+            .flex()
+            .items_center()
+            .border_l_1()
+            .border_color(divider)
+            .pl(px(4.))
+            .when(
+                self.columns[col_ix].align == gpui_kit::TextAlign::Right,
+                |this| this.justify_end(),
+            )
+            .child(self.columns[col_ix].name.clone())
+    }
+
     fn render_td(
         &mut self,
         row_ix: usize,

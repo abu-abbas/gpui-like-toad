@@ -73,6 +73,42 @@ pub fn objects_in<'a>(
     list
 }
 
+/// Tables and views whose name matches `query`, best first, for Quick
+/// Open: exact name, then prefix, then substring, then the typed letters
+/// in order (`empdt` finds `EMP_DETAILS`). Case-insensitive; an empty
+/// query lists everything alphabetically. At most `limit` results.
+pub fn quick_open_matches<'a>(
+    objects: &'a [SchemaObject],
+    query: &str,
+    limit: usize,
+) -> Vec<&'a SchemaObject> {
+    let query = query.trim().to_lowercase();
+    let mut scored: Vec<(u8, &SchemaObject)> = objects
+        .iter()
+        .filter(|o| has_data(&o.kind))
+        .filter_map(|o| {
+            let name = o.name.to_lowercase();
+            let score = if query.is_empty() || name.starts_with(&query) {
+                u8::from(name != query && !query.is_empty())
+            } else if name.contains(&query) {
+                2
+            } else if is_subsequence(&query, &name) {
+                3
+            } else {
+                return None;
+            };
+            Some((score, o))
+        })
+        .collect();
+    scored.sort_by(|(sa, a), (sb, b)| sa.cmp(sb).then_with(|| a.name.cmp(&b.name)));
+    scored.into_iter().take(limit).map(|(_, o)| o).collect()
+}
+
+fn is_subsequence(needle: &str, haystack: &str) -> bool {
+    let mut chars = haystack.chars();
+    needle.chars().all(|n| chars.any(|h| h == n))
+}
+
 pub fn count_in(objects: &[SchemaObject], category: ObjectCategory) -> usize {
     objects
         .iter()
@@ -163,6 +199,35 @@ mod tests {
             name: name.to_string(),
             kind,
         }
+    }
+
+    #[test]
+    fn quick_open_ranks_exact_prefix_substring_then_letters() {
+        let objects = vec![
+            obj("HR", "EMP_DETAILS_VIEW", ObjectKind::View),
+            obj("HR", "JOB_EMP", ObjectKind::Table),
+            obj("HR", "EMP", ObjectKind::Table),
+            obj("HR", "EMPLOYEES", ObjectKind::Table),
+            obj("HR", "EMP_SEQ", ObjectKind::Sequence),
+            obj("HR", "DEPARTMENTS", ObjectKind::Table),
+        ];
+        let names = |q: &str| -> Vec<&str> {
+            quick_open_matches(&objects, q, 10)
+                .into_iter()
+                .map(|o| o.name.as_str())
+                .collect()
+        };
+        // Exact first, then prefix, then substring; sequences never.
+        assert_eq!(
+            names("emp"),
+            ["EMP", "EMPLOYEES", "EMP_DETAILS_VIEW", "JOB_EMP"]
+        );
+        // Letters in order, not contiguous.
+        assert_eq!(names("dprt"), ["DEPARTMENTS"]);
+        assert!(names("zzz").is_empty());
+        // Empty query: everything with data, alphabetical, capped.
+        assert_eq!(names("").len(), 5);
+        assert_eq!(quick_open_matches(&objects, "", 2).len(), 2);
     }
 
     #[test]

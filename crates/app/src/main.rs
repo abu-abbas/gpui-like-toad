@@ -84,6 +84,8 @@ fn main() {
             KeyBinding::new("cmd-enter", workbench::RunQuery, Some("Workbench")),
             KeyBinding::new("ctrl-enter", workbench::RunQuery, Some("Workbench")),
             KeyBinding::new("f5", workbench::RunQuery, Some("Workbench")),
+            KeyBinding::new("cmd-p", workbench::QuickOpenTable, Some("Workbench")),
+            KeyBinding::new("ctrl-p", workbench::QuickOpenTable, Some("Workbench")),
             // Open the SQL autocomplete popup by hand (it also opens by
             // itself while typing). Only editors with a completion
             // provider react, i.e. the SQL tabs.
