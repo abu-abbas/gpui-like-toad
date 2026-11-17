@@ -38,7 +38,7 @@ use gpui_kit::{
 use ora_core::completion::Catalog;
 use ora_core::credentials::{PasswordAction, SecretString};
 use ora_core::export::{to_csv, to_xlsx};
-use ora_core::sql::{clean_statement, format_sql};
+use ora_core::sql::{clean_statement, format_sql, statement_at};
 use ora_core::store::{self, HistoryEntry, SavedProfile, ThemePreference};
 use ora_core::{
     compose_easy_connect, parse_easy_connect, ConnectionProfile, DbInfo, ObjectKind, PlanNode,
@@ -69,7 +69,18 @@ use updates::UpdateState;
 
 actions!(
     db_explorer,
-    [RunQuery, QuickOpenTable, CheckForUpdates, OpenSettings]
+    [
+        RunQuery,
+        RunCurrent,
+        QuickOpenTable,
+        CheckForUpdates,
+        OpenSettings,
+        NewConnection,
+        ConnectLast,
+        DisconnectSession,
+        RefreshSchema,
+        EditConnection
+    ]
 );
 
 const MAX_MESSAGES: usize = 200;
@@ -907,6 +918,33 @@ impl Workbench {
             return;
         }
         let sql = self.editor_text(cx);
+        self.run_sql(sql, cx);
+    }
+
+    /// "Run Current": the selection if there is one, else the statement
+    /// the cursor sits in (statements end at `;`).
+    fn run_current(&mut self, cx: &mut Context<Self>) {
+        if self.busy || self.show_home || self.session.is_none() {
+            return self.run(cx);
+        }
+        if self.active_tab().data.is_some() {
+            return self.run(cx);
+        }
+        let editor = self.active_tab().editor.clone();
+        let sql = {
+            let state = editor.read(cx);
+            let range = state.selected_range();
+            let text = state.value().to_string();
+            if range.start < range.end && range.end <= text.len() {
+                text[range].to_string()
+            } else {
+                statement_at(&text, state.cursor())
+            }
+        };
+        self.run_sql(sql, cx);
+    }
+
+    fn run_sql(&mut self, sql: String, cx: &mut Context<Self>) {
         if clean_statement(&sql).is_empty() {
             self.push_message("Editor kosong.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;
@@ -1086,6 +1124,48 @@ impl Workbench {
             self.active_tab -= 1;
         }
         cx.notify();
+    }
+
+    /// Close every tab for which `close(ix, tab)` is true. The active tab
+    /// stays active when it survives; otherwise the nearest survivor is
+    /// shown (or Home when none is left).
+    fn close_tabs_where(
+        &mut self,
+        close: impl Fn(usize, &QueryTab, &App) -> bool,
+        cx: &mut Context<Self>,
+    ) {
+        let active_id = self.tabs.get(self.active_tab).map(|t| t.id);
+        let old_active = self.active_tab;
+        let doomed: Vec<bool> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(ix, t)| close(ix, t, cx))
+            .collect();
+        let mut ix = 0;
+        self.tabs.retain(|_| {
+            let keep = !doomed[ix];
+            ix += 1;
+            keep
+        });
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+            self.show_home = true;
+        } else if let Some(pos) = self.tabs.iter().position(|t| Some(t.id) == active_id) {
+            self.active_tab = pos;
+        } else {
+            self.active_tab = old_active.min(self.tabs.len() - 1);
+        }
+        cx.notify();
+    }
+
+    /// Whether a tab holds nothing that would be lost: a data tab with
+    /// no staged or uncommitted cell edits, or an empty SQL editor.
+    fn tab_is_saved(tab: &QueryTab, cx: &App) -> bool {
+        match &tab.data {
+            Some(d) => d.edits.is_empty(),
+            None => tab.editor.read(cx).value().trim().is_empty(),
+        }
     }
 
     fn activate_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -1967,6 +2047,8 @@ impl Workbench {
             .items_center()
             .h(px(28.))
             .rounded(px(RADIUS_MD));
+        let view = cx.entity();
+        let tab_count = self.tabs.len();
         if active {
             container = container
                 .bg(theme.tab_active)
@@ -1981,6 +2063,49 @@ impl Workbench {
             theme.tab_foreground
         };
         container
+            .context_menu(move |menu, _, _| {
+                let close = view.clone();
+                let others = view.clone();
+                let right = view.clone();
+                let saved = view.clone();
+                let all = view.clone();
+                menu.min_w(px(200.))
+                    .item(
+                        PopupMenuItem::new("Close").on_click(move |_, _, cx: &mut App| {
+                            close.update(cx, |this, cx| this.close_tab(ix, cx));
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Close Others")
+                            .disabled(tab_count < 2)
+                            .on_click(move |_, _, cx: &mut App| {
+                                others.update(cx, |this, cx| {
+                                    this.close_tabs_where(|i, _, _| i != ix, cx)
+                                });
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Close to the Right")
+                            .disabled(ix + 1 >= tab_count)
+                            .on_click(move |_, _, cx: &mut App| {
+                                right.update(cx, |this, cx| {
+                                    this.close_tabs_where(|i, _, _| i > ix, cx)
+                                });
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Close Saved").on_click(move |_, _, cx: &mut App| {
+                            saved.update(cx, |this, cx| {
+                                this.close_tabs_where(|_, t, cx| Self::tab_is_saved(t, cx), cx)
+                            });
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Close All").on_click(move |_, _, cx: &mut App| {
+                            all.update(cx, |this, cx| this.close_tabs_where(|_, _, _| true, cx));
+                        }),
+                    )
+            })
             .child(
                 div()
                     .id(format!("query-tab-{ix}"))
@@ -3204,6 +3329,17 @@ impl Workbench {
             )
             .when(!data_tab, |bar| {
                 bar.child(
+                    Button::new("run-current")
+                        .small()
+                        .label("Run Current")
+                        .icon(IconName::ListEnd)
+                        .disabled(on_home || no_session || self.busy)
+                        .tooltip("Jalankan seleksi, atau statement di posisi kursor (dipisah ;)")
+                        .on_click(cx.listener(|this, _, _, cx| this.run_current(cx))),
+                )
+            })
+            .when(!data_tab, |bar| {
+                bar.child(
                     Button::new("explain")
                         .small()
                         .label("Explain")
@@ -3216,7 +3352,7 @@ impl Workbench {
                 bar.child(
                     Button::new("format")
                         .small()
-                        .label("Format")
+                        .label("Beautify")
                         .icon(IconName::WandSparkles)
                         .disabled(on_home || no_session)
                         .on_click(
@@ -3610,7 +3746,7 @@ impl Workbench {
             .border_b_1()
             .border_color(theme.border);
         for (which, label) in [
-            (ResultsTab::Results, format!("Results ({rows})")),
+            (ResultsTab::Results, format!("Data ({rows})")),
             (ResultsTab::Plan, "Explain Plan".to_string()),
             (
                 ResultsTab::Messages,
@@ -4362,6 +4498,7 @@ impl Render for Workbench {
             .key_context("Workbench")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _action: &RunQuery, _, cx| this.run(cx)))
+            .on_action(cx.listener(|this, _: &RunCurrent, _, cx| this.run_current(cx)))
             .on_action(cx.listener(|this, _action: &OpenSettings, _, cx| {
                 this.rail = RailPanel::Settings;
                 cx.notify();
@@ -4369,6 +4506,30 @@ impl Render for Workbench {
             .on_action(
                 cx.listener(|this, _action: &CheckForUpdates, _, cx| this.check_updates(true, cx)),
             )
+            .on_action(cx.listener(|this, _: &NewConnection, window, cx| {
+                this.rail = RailPanel::Connections;
+                this.open_new_connection(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ConnectLast, window, cx| {
+                if this.session.is_none() && !this.busy {
+                    this.reconnect_last(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &DisconnectSession, _, cx| {
+                if this.session.is_some() && !this.busy {
+                    this.disconnect(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &RefreshSchema, _, cx| {
+                if this.session.is_some() && !this.busy {
+                    this.refresh_schema(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &EditConnection, window, cx| {
+                if this.session.is_none() && !this.busy && !this.demo_mode {
+                    this.edit_last_connection(window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _action: &QuickOpenTable, window, cx| {
                 this.toggle_quick_open(window, cx)
             }))
