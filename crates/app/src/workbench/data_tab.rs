@@ -11,6 +11,7 @@ use ora_core::{
 };
 
 use super::cell_edit::CellEdit;
+use crate::theme::{FONT_GRID, LEADING_GRID};
 
 /// Rows shown at once in the Structure / Index grids (no paging there).
 const INFO_GRID_ROWS: usize = 1000;
@@ -82,6 +83,10 @@ pub(super) struct DataTab {
     /// The filter the grid currently reflects (what Refresh re-runs).
     pub(super) applied: TableFilter,
     show_sql: bool,
+    /// The row Details panel on the right of the grid.
+    pub(super) show_details: bool,
+    /// Redraws the workbench when the grid's selected row changes.
+    pub(super) _grid_observe: Option<Subscription>,
     next_row_id: u64,
     /// The page the grid currently reflects (what Refresh re-runs).
     pub(super) page: TablePage,
@@ -91,9 +96,6 @@ pub(super) struct DataTab {
     pub(super) hidden: HashSet<String>,
     /// Cell edits staged or applied but not yet committed.
     pub(super) edits: Vec<CellEdit>,
-    /// Bottom tab to switch to once the first data fetch finishes (Describe
-    /// opens a tab on Structure).
-    pub(super) after_load: Option<DataView>,
     _page_subs: Vec<Subscription>,
 }
 
@@ -158,13 +160,14 @@ impl DataTab {
             join: FilterJoin::And,
             applied: TableFilter::default(),
             show_sql: false,
+            show_details: false,
+            _grid_observe: None,
             next_row_id: 0,
             page,
             limit_input,
             offset_input,
             hidden: HashSet::new(),
             edits: Vec::new(),
-            after_load: None,
             _page_subs: page_subs,
         }
     }
@@ -441,6 +444,13 @@ impl Workbench {
         cx.notify();
         if view != DataView::Data {
             self.load_data_view(cx);
+        } else if self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|t| t.last_result.is_none())
+        {
+            // Opened on another view (Describe): the rows were never loaded.
+            self.reload_data(cx);
         }
     }
 
@@ -609,6 +619,108 @@ impl Workbench {
                 })
                 .into_any_element(),
         )
+    }
+
+    /// The Details panel: every column of the selected row as a
+    /// `name / value` list, so a wide row can be read without scrolling
+    /// the grid sideways.
+    pub(super) fn render_details_panel(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let tab = self.active_tab();
+        let selected = tab.table_state.read(cx).selected_row();
+        let fields = selected
+            .map(|row| tab.table_state.read(cx).delegate().row_fields(row))
+            .unwrap_or_default();
+        let mut list = div()
+            .id("details-list")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .px(px(SPACE_3))
+            .py(px(SPACE_2))
+            .gap(px(SPACE_2));
+        if fields.is_empty() {
+            list = list.child(caption_text(
+                "Pilih sebuah baris untuk melihat semua kolomnya.".to_string(),
+                theme,
+            ));
+        }
+        for (name, value) in fields {
+            let is_null = value.is_null();
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .pb(px(SPACE_2))
+                    .border_b_1()
+                    .border_color(theme.border.opacity(0.5))
+                    .child(caption_text(name, theme))
+                    .child(
+                        div()
+                            .font_family(crate::MONO_FONT_FAMILY)
+                            .font_features(gpui_kit::FontFeatures::disable_ligatures())
+                            .text_size(px(FONT_GRID))
+                            .line_height(px(LEADING_GRID))
+                            .text_color(if is_null {
+                                theme.muted_foreground.opacity(0.6)
+                            } else {
+                                theme.foreground
+                            })
+                            .child(if is_null {
+                                "NULL".to_string()
+                            } else {
+                                value.display()
+                            }),
+                    ),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .w(px(280.))
+            .flex_none()
+            .h_full()
+            .bg(theme.background)
+            .border_l_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .h(px(DATA_HEADER_HEIGHT))
+                    .px(px(SPACE_3))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(caption_text(
+                        match selected {
+                            Some(row) => format!("Details · baris {}", row + 1),
+                            None => "Details".to_string(),
+                        },
+                        theme,
+                    ))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("details-close")
+                            .small()
+                            .ghost()
+                            .icon(IconName::X)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(data) = this.data_mut() {
+                                    data.show_details = false;
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(list)
+            .into_any_element()
     }
 
     pub(super) fn render_filter_bar(
@@ -1002,6 +1114,19 @@ impl Workbench {
                             .disabled(busy || !more)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.go_page(Some(page.next().offset), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("details-toggle")
+                            .small()
+                            .icon(IconName::PanelRight)
+                            .selected(data.show_details)
+                            .tooltip("Tampilkan semua kolom baris terpilih")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(data) = this.data_mut() {
+                                    data.show_details = !data.show_details;
+                                }
+                                cx.notify();
                             })),
                     )
                     .child(self.render_columns_button(data, theme, cx))

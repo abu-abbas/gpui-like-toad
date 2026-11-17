@@ -38,7 +38,7 @@ use gpui_kit::{
 use ora_core::completion::Catalog;
 use ora_core::credentials::{PasswordAction, SecretString};
 use ora_core::export::{to_csv, to_xlsx};
-use ora_core::sql::{clean_statement, format_sql};
+use ora_core::sql::{clean_statement, format_sql, statement_at};
 use ora_core::store::{self, HistoryEntry, SavedProfile, ThemePreference};
 use ora_core::{
     compose_easy_connect, parse_easy_connect, ConnectionProfile, DbInfo, ObjectKind, PlanNode,
@@ -69,7 +69,18 @@ use updates::UpdateState;
 
 actions!(
     db_explorer,
-    [RunQuery, QuickOpenTable, CheckForUpdates, OpenSettings]
+    [
+        RunQuery,
+        RunCurrent,
+        QuickOpenTable,
+        CheckForUpdates,
+        OpenSettings,
+        NewConnection,
+        ConnectLast,
+        DisconnectSession,
+        RefreshSchema,
+        EditConnection
+    ]
 );
 
 const MAX_MESSAGES: usize = 200;
@@ -257,8 +268,6 @@ pub struct Workbench {
     /// Messages tab scroll; follows the newest message.
     messages_scroll: ScrollHandle,
     show_home: bool,
-    /// The Info/messages strip under object tabs is folded to its header.
-    info_collapsed: bool,
     /// Demo database is offered in the UI only with ORA_DEMO set (kept for
     /// screenshots and tests; real use connects to Oracle).
     show_demo: bool,
@@ -286,6 +295,8 @@ pub struct Workbench {
     quick_open: Option<QuickOpen>,
     /// The cell edit dialog, while it is showing.
     cell_editor: Option<CellEditor>,
+    /// The Info panel under data / script tabs is folded to its header.
+    info_collapsed: bool,
     /// Keeps shortcuts (Quick Open, Run) working when no input has focus.
     focus_handle: gpui_kit::FocusHandle,
     tree_filter: String,
@@ -382,7 +393,6 @@ impl Workbench {
             messages_scroll: ScrollHandle::new(),
             // Start on the Navicat-style Home page.
             show_home: true,
-            info_collapsed: false,
             show_demo: std::env::var_os("ORA_DEMO").is_some(),
             next_tab_id: 1,
             db: None,
@@ -404,6 +414,7 @@ impl Workbench {
             objects: Vec::new(),
             quick_open: None,
             cell_editor: None,
+            info_collapsed: false,
             focus_handle: cx.focus_handle(),
             tree_filter: String::new(),
             messages: Vec::new(),
@@ -911,6 +922,33 @@ impl Workbench {
             return;
         }
         let sql = self.editor_text(cx);
+        self.run_sql(sql, cx);
+    }
+
+    /// "Run Current": the selection if there is one, else the statement
+    /// the cursor sits in (statements end at `;`).
+    fn run_current(&mut self, cx: &mut Context<Self>) {
+        if self.busy || self.show_home || self.session.is_none() {
+            return self.run(cx);
+        }
+        if self.active_tab().data.is_some() {
+            return self.run(cx);
+        }
+        let editor = self.active_tab().editor.clone();
+        let sql = {
+            let state = editor.read(cx);
+            let range = state.selected_range();
+            let text = state.value().to_string();
+            if range.start < range.end && range.end <= text.len() {
+                text[range].to_string()
+            } else {
+                statement_at(&text, state.cursor())
+            }
+        };
+        self.run_sql(sql, cx);
+    }
+
+    fn run_sql(&mut self, sql: String, cx: &mut Context<Self>) {
         if clean_statement(&sql).is_empty() {
             self.push_message("Editor kosong.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;
@@ -1090,6 +1128,48 @@ impl Workbench {
             self.active_tab -= 1;
         }
         cx.notify();
+    }
+
+    /// Close every tab for which `close(ix, tab)` is true. The active tab
+    /// stays active when it survives; otherwise the nearest survivor is
+    /// shown (or Home when none is left).
+    fn close_tabs_where(
+        &mut self,
+        close: impl Fn(usize, &QueryTab, &App) -> bool,
+        cx: &mut Context<Self>,
+    ) {
+        let active_id = self.tabs.get(self.active_tab).map(|t| t.id);
+        let old_active = self.active_tab;
+        let doomed: Vec<bool> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(ix, t)| close(ix, t, cx))
+            .collect();
+        let mut ix = 0;
+        self.tabs.retain(|_| {
+            let keep = !doomed[ix];
+            ix += 1;
+            keep
+        });
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+            self.show_home = true;
+        } else if let Some(pos) = self.tabs.iter().position(|t| Some(t.id) == active_id) {
+            self.active_tab = pos;
+        } else {
+            self.active_tab = old_active.min(self.tabs.len() - 1);
+        }
+        cx.notify();
+    }
+
+    /// Whether a tab holds nothing that would be lost: a data tab with
+    /// no staged or uncommitted cell edits, or an empty SQL editor.
+    fn tab_is_saved(tab: &QueryTab, cx: &App) -> bool {
+        match &tab.data {
+            Some(d) => d.edits.is_empty(),
+            None => tab.editor.read(cx).value().trim().is_empty(),
+        }
     }
 
     fn activate_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -1392,6 +1472,19 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_table_data_in(owner, name, DataView::Data, window, cx);
+    }
+
+    /// Like [`Self::open_table_data`], starting on `view` (Describe opens
+    /// the Structure view; the rows load when Data is first shown).
+    fn open_table_data_in(
+        &mut self,
+        owner: &str,
+        name: &str,
+        start_view: DataView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.session.is_none() {
             return;
         }
@@ -1409,6 +1502,10 @@ impl Workbench {
         let view = cx.entity().downgrade();
         let editable = kind == ObjectKind::Table;
         let data = DataTab::new(owner, name, kind, window, cx);
+        let table_state = self.active_tab().table_state.clone();
+        let observe = cx.observe(&table_state, |_, _, cx| cx.notify());
+        let mut data = data;
+        data._grid_observe = Some(observe);
         let tab = self.active_tab_mut();
         tab.title = format!("{owner}.{name}");
         tab.kind = TabKind::Data;
@@ -1431,29 +1528,13 @@ impl Workbench {
             *state.delegate_mut() = delegate;
         });
         self.add_filter_row(None, None, window, cx);
-        self.reload_data(cx);
-    }
-
-    /// "Describe": show the table's columns in its data tab, on the
-    /// Structure view. A tab that is already open is reused; otherwise a new
-    /// one opens (like Open Data) and switches to Structure once loaded.
-    fn describe_object(&mut self, object: ObjectRef, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy || self.session.is_none() {
-            return;
-        }
-        let existing = self.tabs.iter().position(|t| {
-            t.data
-                .as_ref()
-                .is_some_and(|d| d.owner == object.owner && d.name == object.name)
-        });
-        if let Some(ix) = existing {
-            self.activate_tab(ix, cx);
-            self.set_data_view(DataView::Structure, cx);
-            return;
-        }
-        self.open_table_data(&object.owner, &object.name, window, cx);
-        if let Some(data) = self.data_mut() {
-            data.after_load = Some(DataView::Structure);
+        if start_view == DataView::Data {
+            self.reload_data(cx);
+        } else {
+            if let Some(data) = self.data_mut() {
+                data.view = start_view;
+            }
+            self.load_data_view(cx);
         }
     }
 
@@ -1671,15 +1752,6 @@ impl Workbench {
                 } else {
                     format!("{rows} baris dalam {elapsed}ms")
                 };
-                // Describe: the data tab was opened only to land on Structure.
-                let next = self
-                    .target_tab_mut()
-                    .data
-                    .as_mut()
-                    .and_then(|d| d.after_load.take());
-                if let Some(view) = next {
-                    self.set_data_view(view, cx);
-                }
             }
             (Some(PendingOp::Run), Response::Executed(affected)) => {
                 if let Some(sql) = pending_sql {
@@ -1979,6 +2051,8 @@ impl Workbench {
             .items_center()
             .h(px(28.))
             .rounded(px(RADIUS_MD));
+        let view = cx.entity();
+        let tab_count = self.tabs.len();
         if active {
             container = container
                 .bg(theme.tab_active)
@@ -1993,6 +2067,49 @@ impl Workbench {
             theme.tab_foreground
         };
         container
+            .context_menu(move |menu, _, _| {
+                let close = view.clone();
+                let others = view.clone();
+                let right = view.clone();
+                let saved = view.clone();
+                let all = view.clone();
+                menu.min_w(px(200.))
+                    .item(
+                        PopupMenuItem::new("Close").on_click(move |_, _, cx: &mut App| {
+                            close.update(cx, |this, cx| this.close_tab(ix, cx));
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Close Others")
+                            .disabled(tab_count < 2)
+                            .on_click(move |_, _, cx: &mut App| {
+                                others.update(cx, |this, cx| {
+                                    this.close_tabs_where(|i, _, _| i != ix, cx)
+                                });
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Close to the Right")
+                            .disabled(ix + 1 >= tab_count)
+                            .on_click(move |_, _, cx: &mut App| {
+                                right.update(cx, |this, cx| {
+                                    this.close_tabs_where(|i, _, _| i > ix, cx)
+                                });
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Close Saved").on_click(move |_, _, cx: &mut App| {
+                            saved.update(cx, |this, cx| {
+                                this.close_tabs_where(|_, t, cx| Self::tab_is_saved(t, cx), cx)
+                            });
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Close All").on_click(move |_, _, cx: &mut App| {
+                            all.update(cx, |this, cx| this.close_tabs_where(|_, _, _| true, cx));
+                        }),
+                    )
+            })
             .child(
                 div()
                     .id(format!("query-tab-{ix}"))
@@ -3121,36 +3238,27 @@ impl Workbench {
             } else {
                 self.render_editor(cx).into_any_element()
             };
-            main = if self.info_collapsed {
-                // Folded: only the Info header stays under the grid.
-                main.child(
-                    div()
-                        .flex_1()
-                        .min_h(px(0.))
-                        .flex()
-                        .flex_col()
-                        .child(div().flex_1().min_h(px(0.)).child(top))
+            main = main.child(if self.info_collapsed {
+                // Folded: the work area takes everything but the header.
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1().min_h(px(0.)).child(top))
+                    .child(self.render_info_panel(theme, cx))
+            } else {
+                div().flex_1().min_h(px(0.)).child(
+                    v_resizable("object-split")
+                        .child(resizable_panel().child(top))
                         .child(
-                            div()
-                                .flex_none()
-                                .h(px(SUB_TAB_HEIGHT + 1.))
+                            resizable_panel()
+                                .size(px(150.))
+                                .size_range(px(80.)..px(400.))
                                 .child(self.render_info_panel(theme, cx)),
                         ),
                 )
-            } else {
-                main.child(
-                    div().flex_1().min_h(px(0.)).child(
-                        v_resizable("object-split")
-                            .child(resizable_panel().child(top))
-                            .child(
-                                resizable_panel()
-                                    .size(px(150.))
-                                    .size_range(px(80.)..px(400.))
-                                    .child(self.render_info_panel(theme, cx)),
-                            ),
-                    ),
-                )
-            };
+            });
         } else {
             main = main.child(
                 div().flex_1().min_h(px(0.)).child(
@@ -3227,6 +3335,17 @@ impl Workbench {
             )
             .when(!data_tab, |bar| {
                 bar.child(
+                    Button::new("run-current")
+                        .small()
+                        .label("Run Current")
+                        .icon(IconName::ListEnd)
+                        .disabled(on_home || no_session || self.busy)
+                        .tooltip("Jalankan seleksi, atau statement di posisi kursor (dipisah ;)")
+                        .on_click(cx.listener(|this, _, _, cx| this.run_current(cx))),
+                )
+            })
+            .when(!data_tab, |bar| {
+                bar.child(
                     Button::new("explain")
                         .small()
                         .label("Explain")
@@ -3239,7 +3358,7 @@ impl Workbench {
                 bar.child(
                     Button::new("format")
                         .small()
-                        .label("Format")
+                        .label("Beautify")
                         .icon(IconName::WandSparkles)
                         .disabled(on_home || no_session)
                         .on_click(
@@ -3329,6 +3448,8 @@ impl Workbench {
         let grid = if tab.last_result.is_some() {
             div()
                 .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
                 .child(
                     DataTable::new(&tab.table_state)
                         .stripe(true)
@@ -3353,6 +3474,18 @@ impl Workbench {
                     theme,
                 ))
                 .into_any_element()
+        };
+        let grid = if tab.data.as_ref().is_some_and(|d| d.show_details) {
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_w(px(0.))
+                .child(grid)
+                .child(self.render_details_panel(theme, cx))
+                .into_any_element()
+        } else {
+            grid
         };
         let view = tab.data.as_ref().map_or(DataView::Data, |d| d.view);
         let body = match (view, tab.data.as_ref()) {
@@ -3445,6 +3578,9 @@ impl Workbench {
             .flex()
             .flex_col()
             .size_full()
+            .when(collapsed, |this| {
+                this.h(px(SUB_TAB_HEIGHT + 1.)).flex_none()
+            })
             .bg(theme.background)
             .border_t_1()
             .border_color(theme.border)
@@ -3467,30 +3603,30 @@ impl Workbench {
                             .text_color(theme.foreground)
                             .child("Info"),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .truncate()
-                            .child(caption_text(summary, theme)),
-                    )
+                    .child(caption_text(summary, theme))
+                    .child(div().flex_1())
                     .child(
                         Button::new("info-toggle")
+                            .small()
+                            .ghost()
                             .icon(if collapsed {
                                 IconName::ChevronUp
                             } else {
                                 IconName::ChevronDown
                             })
-                            .ghost()
-                            .small()
+                            .tooltip(if collapsed {
+                                "Buka panel Info"
+                            } else {
+                                "Minimize panel Info"
+                            })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.info_collapsed = !this.info_collapsed;
                                 cx.notify();
                             })),
                     ),
             )
-            .when(!collapsed, |panel| {
-                panel.child(
+            .when(!collapsed, |this| {
+                this.child(
                     div()
                         .flex_1()
                         .min_h(px(0.))
@@ -3616,7 +3752,7 @@ impl Workbench {
             .border_b_1()
             .border_color(theme.border);
         for (which, label) in [
-            (ResultsTab::Results, format!("Results ({rows})")),
+            (ResultsTab::Results, format!("Data ({rows})")),
             (ResultsTab::Plan, "Explain Plan".to_string()),
             (
                 ResultsTab::Messages,
@@ -4387,6 +4523,7 @@ impl Render for Workbench {
             .key_context("Workbench")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _action: &RunQuery, _, cx| this.run(cx)))
+            .on_action(cx.listener(|this, _: &RunCurrent, _, cx| this.run_current(cx)))
             .on_action(cx.listener(|this, _action: &OpenSettings, _, cx| {
                 this.rail = RailPanel::Settings;
                 cx.notify();
@@ -4394,6 +4531,30 @@ impl Render for Workbench {
             .on_action(
                 cx.listener(|this, _action: &CheckForUpdates, _, cx| this.check_updates(true, cx)),
             )
+            .on_action(cx.listener(|this, _: &NewConnection, window, cx| {
+                this.rail = RailPanel::Connections;
+                this.open_new_connection(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ConnectLast, window, cx| {
+                if this.session.is_none() && !this.busy {
+                    this.reconnect_last(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &DisconnectSession, _, cx| {
+                if this.session.is_some() && !this.busy {
+                    this.disconnect(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &RefreshSchema, _, cx| {
+                if this.session.is_some() && !this.busy {
+                    this.refresh_schema(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &EditConnection, window, cx| {
+                if this.session.is_none() && !this.busy && !this.demo_mode {
+                    this.edit_last_connection(window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _action: &QuickOpenTable, window, cx| {
                 this.toggle_quick_open(window, cx)
             }))
@@ -4514,7 +4675,9 @@ fn object_menu(menu: PopupMenu, view: &Entity<Workbench>, object: &ObjectRef) ->
             "Describe",
             IconName::Columns3,
             has_data,
-            |this, o, window, cx| this.describe_object(o, window, cx),
+            |this, o, window, cx| {
+                this.open_table_data_in(&o.owner, &o.name, DataView::Structure, window, cx)
+            },
         ))
         .item(item(
             "View Script",
