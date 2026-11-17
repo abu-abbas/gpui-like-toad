@@ -104,6 +104,7 @@ impl QueryResult {
 pub enum ObjectKind {
     Table,
     View,
+    MaterializedView,
     Index,
     Sequence,
     Procedure,
@@ -119,6 +120,7 @@ impl ObjectKind {
         match raw {
             "TABLE" => ObjectKind::Table,
             "VIEW" => ObjectKind::View,
+            "MATERIALIZED VIEW" => ObjectKind::MaterializedView,
             "INDEX" => ObjectKind::Index,
             "SEQUENCE" => ObjectKind::Sequence,
             "PROCEDURE" => ObjectKind::Procedure,
@@ -135,6 +137,7 @@ impl ObjectKind {
         match self {
             ObjectKind::Table => "Tables",
             ObjectKind::View => "Views",
+            ObjectKind::MaterializedView => "Materialized Views",
             ObjectKind::Index => "Indexes",
             ObjectKind::Sequence => "Sequences",
             ObjectKind::Procedure => "Procedures",
@@ -151,6 +154,7 @@ impl ObjectKind {
         match self {
             ObjectKind::Table => "TABLE",
             ObjectKind::View => "VIEW",
+            ObjectKind::MaterializedView => "MATERIALIZED VIEW",
             ObjectKind::Index => "INDEX",
             ObjectKind::Sequence => "SEQUENCE",
             ObjectKind::Procedure => "PROCEDURE",
@@ -164,7 +168,10 @@ impl ObjectKind {
 
     /// True for objects the schema browser can describe column-by-column.
     pub fn is_describable(&self) -> bool {
-        matches!(self, ObjectKind::Table | ObjectKind::View)
+        matches!(
+            self,
+            ObjectKind::Table | ObjectKind::View | ObjectKind::MaterializedView
+        )
     }
 }
 
@@ -334,12 +341,17 @@ mod tests {
         assert_eq!(ObjectKind::Table.group_label(), "Tables");
         assert!(ObjectKind::Table.is_describable());
         assert!(!ObjectKind::Sequence.is_describable());
+        assert!(ObjectKind::MaterializedView.is_describable());
+        assert_eq!(
+            ObjectKind::MaterializedView.group_label(),
+            "Materialized Views"
+        );
         for raw in ["TABLE", "VIEW", "PACKAGE", "SYNONYM", "MATERIALIZED VIEW"] {
             assert_eq!(ObjectKind::from_oracle_type(raw).oracle_type(), raw);
         }
         assert_eq!(
             ObjectKind::from_oracle_type("MATERIALIZED VIEW"),
-            ObjectKind::Other("MATERIALIZED VIEW".into())
+            ObjectKind::MaterializedView
         );
     }
 }

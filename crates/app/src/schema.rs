@@ -10,6 +10,7 @@ use ora_core::{ColumnDef, ColumnInfo, IndexDef, ObjectKind, QueryResult, SchemaO
 pub enum ObjectCategory {
     Tables,
     Views,
+    MaterializedViews,
     Indexes,
     Sequences,
     Programs,
@@ -18,9 +19,10 @@ pub enum ObjectCategory {
 }
 
 impl ObjectCategory {
-    pub const ALL: [ObjectCategory; 7] = [
+    pub const ALL: [ObjectCategory; 8] = [
         ObjectCategory::Tables,
         ObjectCategory::Views,
+        ObjectCategory::MaterializedViews,
         ObjectCategory::Indexes,
         ObjectCategory::Sequences,
         ObjectCategory::Programs,
@@ -32,6 +34,7 @@ impl ObjectCategory {
         match self {
             ObjectCategory::Tables => "Tables",
             ObjectCategory::Views => "Views",
+            ObjectCategory::MaterializedViews => "Materialized Views",
             ObjectCategory::Indexes => "Indexes",
             ObjectCategory::Sequences => "Sequences",
             ObjectCategory::Programs => "Procs",
@@ -44,6 +47,7 @@ impl ObjectCategory {
         match self {
             ObjectCategory::Tables => *kind == ObjectKind::Table,
             ObjectCategory::Views => *kind == ObjectKind::View,
+            ObjectCategory::MaterializedViews => *kind == ObjectKind::MaterializedView,
             ObjectCategory::Indexes => *kind == ObjectKind::Index,
             ObjectCategory::Sequences => *kind == ObjectKind::Sequence,
             ObjectCategory::Programs => matches!(
@@ -235,7 +239,10 @@ mod tests {
         assert!(ObjectCategory::Programs.contains(&ObjectKind::Package));
         assert!(ObjectCategory::Programs.contains(&ObjectKind::Function));
         assert!(!ObjectCategory::Tables.contains(&ObjectKind::View));
-        assert_eq!(ObjectCategory::ALL.len(), 7);
+        assert!(ObjectCategory::MaterializedViews.contains(&ObjectKind::MaterializedView));
+        assert!(!ObjectCategory::Views.contains(&ObjectKind::MaterializedView));
+        assert!(!ObjectCategory::Tables.contains(&ObjectKind::MaterializedView));
+        assert_eq!(ObjectCategory::ALL.len(), 8);
     }
 
     #[test]
