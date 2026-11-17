@@ -42,7 +42,7 @@ use ora_core::sql::{clean_statement, format_sql};
 use ora_core::store::{self, HistoryEntry, SavedProfile, ThemePreference};
 use ora_core::{
     compose_easy_connect, parse_easy_connect, ConnectionProfile, DbInfo, ObjectKind, PlanNode,
-    QueryResult, SchemaObject, DEFAULT_MAX_ROWS,
+    QueryResult, SchemaObject, DEFAULT_MAX_ROWS, MAX_PAGE_LIMIT,
 };
 
 use crate::completion::SqlCompletionProvider;
@@ -67,7 +67,7 @@ const MAX_MESSAGES: usize = 200;
 
 /// Rows per page in a data tab: the whole capped fetch, so the grid
 /// scrolls instead of paging.
-const DATA_PAGE_SIZE: usize = DEFAULT_MAX_ROWS;
+const DATA_PAGE_SIZE: usize = MAX_PAGE_LIMIT;
 
 /// Header height of the dense data-tab grid (rows are 26px).
 const DATA_HEADER_HEIGHT: f32 = 28.;
@@ -1614,7 +1614,10 @@ impl Workbench {
                 }
                 self.set_grid_result(result, cx);
                 self.target_tab_mut().results_tab = ResultsTab::Results;
-                self.status = if truncated {
+                let is_data = self.target_tab_mut().data.is_some();
+                self.status = if truncated && is_data {
+                    format!("{rows} baris dalam {elapsed}ms (masih ada baris berikutnya)")
+                } else if truncated {
                     format!("{rows} baris dalam {elapsed}ms (dibatasi {DEFAULT_MAX_ROWS} baris)")
                 } else {
                     format!("{rows} baris dalam {elapsed}ms")
@@ -3281,7 +3284,9 @@ impl Workbench {
                 result.columns.len(),
                 result.row_count()
             ));
-            if result.truncated {
+            if result.truncated && tab.data.is_some() {
+                summary.push_str(" (masih ada baris berikutnya)");
+            } else if result.truncated {
                 summary.push_str(&format!(" (dibatasi {DEFAULT_MAX_ROWS})"));
             }
         }

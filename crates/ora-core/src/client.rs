@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::completion::CatalogObject;
-use crate::filter::{self, TableFilter};
+use crate::filter::{self, TableFilter, TablePage};
 use crate::model::IndexDef;
 use crate::model::{ColumnDef, ConnectionProfile, ObjectKind, PlanNode, QueryResult, SchemaObject};
 
@@ -79,18 +79,19 @@ pub trait DbClient: Send {
         }
     }
 
-    /// Rows of `owner.table` that pass `filter`, capped at `max_rows`: the
-    /// data tab's fetch. Built with [`filter::select_sql`], so filter
+    /// One page of the rows of `owner.table` that pass `filter`: the data
+    /// tab's fetch. `QueryResult::truncated` is set when more rows follow
+    /// the page. Built with [`filter::select_sql`], so filter
     /// values travel as bind variables.
     fn query_table(
         &mut self,
         owner: &str,
         table: &str,
         filter: &TableFilter,
-        max_rows: usize,
+        page: TablePage,
     ) -> Result<QueryResult, DbError> {
-        let query = filter::select_sql(owner, table, filter, max_rows);
-        self.query_binds(&query.sql, &query.binds, max_rows)
+        let query = filter::select_sql(owner, table, filter, page);
+        self.query_binds(&query.sql, &query.binds, page.limit)
     }
 
     /// Run a non-SELECT statement (DML/DDL/PL/SQL). Returns rows affected

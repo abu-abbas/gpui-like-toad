@@ -8,6 +8,7 @@
 //! page boundaries stay consistent while paging.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
@@ -33,6 +34,11 @@ pub struct ResultsDelegate {
     columns: Vec<Column>,
     /// Per result column: right-align its cells (numeric types).
     numeric: Vec<bool>,
+    /// Result columns hidden by name (the Columns picker); kept across
+    /// fetches so a refresh does not bring them back.
+    hidden: HashSet<String>,
+    /// Result column behind each shown data column, in order.
+    visible: Vec<usize>,
     /// Show a fixed row-number column on the left (data tabs).
     row_numbers: bool,
     page: usize,
@@ -138,6 +144,8 @@ impl ResultsDelegate {
             result: QueryResult::default(),
             columns: Vec::new(),
             numeric: Vec::new(),
+            hidden: HashSet::new(),
+            visible: Vec::new(),
             row_numbers: false,
             page: 0,
             page_size: PAGE_SIZE,
@@ -167,20 +175,23 @@ impl ResultsDelegate {
 
     /// Table column index to result column index; `None` is the gutter.
     fn data_col(&self, col_ix: usize) -> Option<usize> {
-        if self.row_numbers {
-            col_ix.checked_sub(1)
+        let ix = if self.row_numbers {
+            col_ix.checked_sub(1)?
         } else {
-            Some(col_ix)
-        }
+            col_ix
+        };
+        self.visible.get(ix).copied()
     }
 
-    pub fn page_size(&self) -> usize {
-        self.page_size
+    /// Hide the named result columns. Takes effect on the current result
+    /// right away; the caller refreshes the table state.
+    pub fn set_hidden(&mut self, hidden: HashSet<String>) {
+        self.hidden = hidden;
+        self.rebuild_columns();
     }
 
-    pub fn set_result(&mut self, result: QueryResult) {
-        self.numeric = numeric_columns(&result);
-        self.columns = Vec::with_capacity(result.columns.len() + 1);
+    fn rebuild_columns(&mut self) {
+        self.columns = Vec::with_capacity(self.result.columns.len() + 1);
         if self.row_numbers {
             self.columns.push(
                 Column::new("rownum", "#")
@@ -192,17 +203,31 @@ impl ResultsDelegate {
                     .selectable(false),
             );
         }
-        for (i, c) in result.columns.iter().enumerate() {
+        self.visible.clear();
+        for (i, c) in self.result.columns.iter().enumerate() {
+            if self.hidden.contains(&c.name) {
+                continue;
+            }
+            self.visible.push(i);
             let column = Column::new(format!("c{i}"), c.name.clone())
                 .width(140.)
                 .sortable();
-            self.columns.push(if self.numeric[i] {
+            self.columns.push(if self.numeric.get(i) == Some(&true) {
                 column.text_right()
             } else {
                 column
             });
         }
+    }
+
+    pub fn page_size(&self) -> usize {
+        self.page_size
+    }
+
+    pub fn set_result(&mut self, result: QueryResult) {
+        self.numeric = numeric_columns(&result);
         self.result = result;
+        self.rebuild_columns();
         self.page = 0;
     }
 
@@ -542,12 +567,50 @@ mod tests {
     }
 
     #[test]
+    fn hidden_columns_are_skipped_and_survive_new_results() {
+        let two_columns = || QueryResult {
+            columns: vec![
+                ColumnInfo {
+                    name: "A".into(),
+                    data_type: "NUMBER".into(),
+                },
+                ColumnInfo {
+                    name: "B".into(),
+                    data_type: "VARCHAR2".into(),
+                },
+                ColumnInfo {
+                    name: "C".into(),
+                    data_type: "VARCHAR2".into(),
+                },
+            ],
+            rows: vec![vec![int(1), text("x"), text("y")]],
+            truncated: false,
+            elapsed: Default::default(),
+        };
+        let mut delegate = ResultsDelegate::empty().with_row_numbers();
+        delegate.set_result(two_columns());
+        assert_eq!(delegate.columns.len(), 4);
+        delegate.set_hidden(HashSet::from(["B".to_string()]));
+        // Gutter + A + C; table column 2 is result column 2 (C).
+        assert_eq!(delegate.columns.len(), 3);
+        assert_eq!(delegate.data_col(0), None);
+        assert_eq!(delegate.data_col(1), Some(0));
+        assert_eq!(delegate.data_col(2), Some(2));
+        assert_eq!(delegate.data_col(3), None);
+        // A refetch keeps B hidden.
+        delegate.set_result(two_columns());
+        assert_eq!(delegate.columns.len(), 3);
+        delegate.set_hidden(HashSet::new());
+        assert_eq!(delegate.columns.len(), 4);
+    }
+
+    #[test]
     fn row_number_gutter_shifts_data_columns() {
         let mut delegate = ResultsDelegate::empty().with_row_numbers();
         delegate.set_result(result_with_rows(3));
         assert_eq!(delegate.columns.len(), 2);
         assert_eq!(delegate.data_col(0), None);
         assert_eq!(delegate.data_col(1), Some(0));
-        assert_eq!(ResultsDelegate::empty().data_col(0), Some(0));
+        assert_eq!(ResultsDelegate::empty().data_col(0), None);
     }
 }

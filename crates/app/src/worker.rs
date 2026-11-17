@@ -18,7 +18,7 @@ use ora_core::import::{map_columns, parse_csv, quote_ident};
 use ora_core::sql::statement_kind;
 use ora_core::{
     ColumnDef, ConnectionProfile, DbClient, DbError, DbInfo, IndexDef, ObjectKind, PlanNode,
-    QueryResult, SchemaObject, TableFilter, DEFAULT_MAX_ROWS, EXPORT_MAX_ROWS,
+    QueryResult, SchemaObject, TableFilter, TablePage, DEFAULT_MAX_ROWS, EXPORT_MAX_ROWS,
 };
 
 /// File format for "Export Data" on a whole table.
@@ -88,6 +88,7 @@ pub enum Job {
         owner: String,
         name: String,
         filter: TableFilter,
+        page: TablePage,
     },
     Commit,
     Rollback,
@@ -276,8 +277,9 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             owner,
             name,
             filter,
+            page,
         } => match client.as_mut() {
-            Some(client) => match client.query_table(&owner, &name, &filter, DEFAULT_MAX_ROWS) {
+            Some(client) => match client.query_table(&owner, &name, &filter, page) {
                 Ok(result) => Response::QueryDone(result),
                 Err(err) => Response::Failed(err.to_string()),
             },

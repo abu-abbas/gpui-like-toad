@@ -6,7 +6,7 @@
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::Selectable as _;
 use ora_core::filter::select_sql;
-use ora_core::{FilterCondition, FilterJoin, FilterOp, TableFilter};
+use ora_core::{FilterCondition, FilterJoin, FilterOp, TableFilter, TablePage, MAX_PAGE_LIMIT};
 
 /// Rows shown at once in the Structure / Index grids (no paging there).
 const INFO_GRID_ROWS: usize = 1000;
@@ -79,6 +79,13 @@ pub(super) struct DataTab {
     pub(super) applied: TableFilter,
     show_sql: bool,
     next_row_id: u64,
+    /// The page the grid currently reflects (what Refresh re-runs).
+    pub(super) page: TablePage,
+    limit_input: Entity<InputState>,
+    offset_input: Entity<InputState>,
+    /// Columns hidden by the Columns picker; survive refetches.
+    pub(super) hidden: HashSet<String>,
+    _page_subs: Vec<Subscription>,
 }
 
 impl DataTab {
@@ -106,6 +113,28 @@ impl DataTab {
                 .line_number(true)
                 .folding(true)
         });
+        let page = TablePage::default();
+        let limit_input = cx.new(|cx| {
+            InputState::new(&mut *window, cx)
+                .placeholder("Limit")
+                .default_value(page.limit.to_string())
+        });
+        let offset_input = cx.new(|cx| {
+            InputState::new(&mut *window, cx)
+                .placeholder("Offset")
+                .default_value(page.offset.to_string())
+        });
+        // Enter in either box jumps to that page.
+        let page_subs = [&limit_input, &offset_input]
+            .into_iter()
+            .map(|input| {
+                cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.go_page(None, window, cx);
+                    }
+                })
+            })
+            .collect();
         DataTab {
             owner: owner.to_string(),
             name: name.to_string(),
@@ -120,6 +149,11 @@ impl DataTab {
             applied: TableFilter::default(),
             show_sql: false,
             next_row_id: 0,
+            page,
+            limit_input,
+            offset_input,
+            hidden: HashSet::new(),
+            _page_subs: page_subs,
         }
     }
 
@@ -165,9 +199,9 @@ impl Workbench {
     ) {
         let input = cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Nilai"));
         // Enter in a value box applies all checked filters.
-        let enter = cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
+        let enter = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
-                this.apply_filters(None, cx);
+                this.apply_filters(None, window, cx);
             }
         });
         let Some(data) = self.data_mut() else {
@@ -223,7 +257,7 @@ impl Workbench {
             }
         }
         self.add_filter_row(None, Some(condition), window, cx);
-        self.apply_filters(None, cx);
+        self.apply_filters(None, window, cx);
     }
 
     /// Remove a row; the bar always keeps one, so removing the last row
@@ -255,7 +289,12 @@ impl Workbench {
     }
 
     /// Apply one row (`only`) or every checked row, then reload the grid.
-    pub(super) fn apply_filters(&mut self, only: Option<u64>, cx: &mut Context<Self>) {
+    pub(super) fn apply_filters(
+        &mut self,
+        only: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.busy {
             self.status = "Masih ada operasi berjalan.".to_string();
             cx.notify();
@@ -278,6 +317,58 @@ impl Workbench {
         if let Some(data) = self.data_mut() {
             data.applied = filter;
         }
+        // A new filter starts at the first page.
+        self.show_page(0, window, cx);
+    }
+
+    /// Jump to a page: `offset` if given, else whatever the Limit and
+    /// Offset boxes say (unreadable numbers keep the current value).
+    /// The boxes are rewritten with the values actually used.
+    pub(super) fn go_page(
+        &mut self,
+        offset: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy {
+            self.status = "Masih ada operasi berjalan.".to_string();
+            cx.notify();
+            return;
+        }
+        let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
+            return;
+        };
+        let offset = offset.unwrap_or_else(|| {
+            data.offset_input
+                .read(cx)
+                .value()
+                .trim()
+                .parse()
+                .unwrap_or(data.page.offset)
+        });
+        self.show_page(offset, window, cx);
+    }
+
+    /// Set the page (clamped) and reload.
+    fn show_page(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(data) = self.data_mut() else {
+            return;
+        };
+        let limit = data
+            .limit_input
+            .read(cx)
+            .value()
+            .trim()
+            .parse()
+            .unwrap_or(data.page.limit);
+        data.page = TablePage::new(offset, limit);
+        let (limit_input, offset_input, page) = (
+            data.limit_input.clone(),
+            data.offset_input.clone(),
+            data.page,
+        );
+        Self::set_input(&limit_input, page.limit.to_string(), window, cx);
+        Self::set_input(&offset_input, page.offset.to_string(), window, cx);
         self.reload_data(cx);
     }
 
@@ -292,7 +383,7 @@ impl Workbench {
         data.rows.clear();
         data.applied = TableFilter::default();
         self.add_filter_row(None, None, window, cx);
-        self.reload_data(cx);
+        self.show_page(0, window, cx);
     }
 
     /// Switch the bottom tab. Structure, Index and DDL are fetched from
@@ -358,8 +449,13 @@ impl Workbench {
         let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
             return;
         };
-        let (owner, name, filter) = (data.owner.clone(), data.name.clone(), data.applied.clone());
-        let query = select_sql(&owner, &name, &filter, DEFAULT_MAX_ROWS);
+        let (owner, name, filter, page) = (
+            data.owner.clone(),
+            data.name.clone(),
+            data.applied.clone(),
+            data.page,
+        );
+        let query = select_sql(&owner, &name, &filter, page);
         let mut log = query.sql.clone();
         if !query.binds.is_empty() {
             let binds: Vec<String> = query
@@ -380,10 +476,27 @@ impl Workbench {
                 owner,
                 name,
                 filter,
+                page,
             },
             PendingOp::Run,
             cx,
         );
+    }
+
+    /// Change the hidden-column set of the active data tab and redraw
+    /// the grid without refetching.
+    fn update_hidden(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut HashSet<String>)) {
+        let Some(data) = self.data_mut() else {
+            return;
+        };
+        f(&mut data.hidden);
+        let hidden = data.hidden.clone();
+        let table = self.active_tab().table_state.clone();
+        table.update(cx, |state, cx| {
+            state.delegate_mut().set_hidden(hidden);
+            state.refresh(cx);
+        });
+        cx.notify();
     }
 
     // ----- rendering -----
@@ -484,12 +597,13 @@ impl Workbench {
                         .primary()
                         .label("Apply All")
                         .disabled(self.busy)
-                        .on_click(cx.listener(|this, _, _, cx| this.apply_filters(None, cx))),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.apply_filters(None, window, cx)),
+                        ),
                 ),
         );
         if data.show_sql {
-            let preview =
-                select_sql(&data.owner, &data.name, &data.draft(cx), DEFAULT_MAX_ROWS).preview();
+            let preview = select_sql(&data.owner, &data.name, &data.draft(cx), data.page).preview();
             bar = bar.child(
                 div()
                     .flex()
@@ -632,7 +746,9 @@ impl Workbench {
                     .w(px(72.))
                     .disabled(self.busy)
                     .tooltip("Terapkan filter baris ini saja")
-                    .on_click(cx.listener(move |this, _, _, cx| this.apply_filters(Some(id), cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.apply_filters(Some(id), window, cx)
+                    })),
             )
             .child(
                 Button::new(("filter-remove", id))
@@ -654,7 +770,8 @@ impl Workbench {
             )
     }
 
-    /// Footer of a data tab: row count, cap notice and timing.
+    /// Footer of a data tab: view tabs, paging controls, column picker,
+    /// row range and timing.
     pub(super) fn render_data_footer(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -663,12 +780,17 @@ impl Workbench {
         let tab = self.active_tab();
         let current = tab.data.as_ref().map_or(DataView::Data, |d| d.view);
         let on_data = current == DataView::Data;
+        let page = tab.data.as_ref().map(|d| d.page).unwrap_or_default();
         let mut text = match &tab.last_result {
             Some(result) => {
                 let rows = result.row_count();
-                let mut text = format!("{rows} baris");
+                let mut text = if rows == 0 {
+                    "0 baris".to_string()
+                } else {
+                    format!("baris {}-{}", page.offset + 1, page.offset + rows)
+                };
                 if result.truncated {
-                    text.push_str(&format!(" (dibatasi {DEFAULT_MAX_ROWS}, pakai filter)"));
+                    text.push('+');
                 }
                 text
             }
@@ -677,8 +799,10 @@ impl Workbench {
         if let Some(ms) = tab.elapsed_ms {
             text.push_str(&format!(" · {ms} ms"));
         }
+        let more = tab.last_result.as_ref().is_some_and(|r| r.truncated);
         let filters = tab.data.as_ref().map_or(0, |d| d.applied.active().count());
-        div()
+        let busy = self.busy;
+        let mut footer = div()
             .flex()
             .flex_row()
             .items_center()
@@ -704,7 +828,130 @@ impl Workbench {
                 this.child(icon(IconName::ListFilter, 14., theme.success))
                     .child(caption_text(format!("{filters} filter"), theme))
             })
-            .child(div().flex_1())
-            .when(on_data, |this| this.child(caption_text(text, theme)))
+            .child(div().flex_1());
+        if on_data {
+            if let Some(data) = tab.data.as_ref() {
+                let step = page.limit;
+                footer = footer
+                    .child(
+                        Button::new("page-prev")
+                            .small()
+                            .icon(IconName::ChevronLeft)
+                            .tooltip("Halaman sebelumnya")
+                            .disabled(busy || page.offset == 0)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.go_page(Some(page.prev().offset), window, cx)
+                            })),
+                    )
+                    .child(caption_text("Limit".to_string(), theme))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(64.))
+                            .child(Input::new(&data.limit_input).small().w_full()),
+                    )
+                    .child(caption_text("Offset".to_string(), theme))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(80.))
+                            .child(Input::new(&data.offset_input).small().w_full()),
+                    )
+                    .child(
+                        Button::new("page-go")
+                            .small()
+                            .label("Go")
+                            .tooltip(format!(
+                                "Ambil {step} baris mulai dari offset (maks {MAX_PAGE_LIMIT})"
+                            ))
+                            .disabled(busy)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.go_page(None, window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("page-next")
+                            .small()
+                            .icon(IconName::ChevronRight)
+                            .tooltip("Halaman berikutnya")
+                            .disabled(busy || !more)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.go_page(Some(page.next().offset), window, cx)
+                            })),
+                    )
+                    .child(self.render_columns_button(data, theme, cx))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(130.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(caption_text(text, theme)),
+                    );
+            }
+        }
+        footer
+    }
+
+    /// The Columns dropdown: tick which columns the grid shows. The last
+    /// visible column cannot be hidden.
+    fn render_columns_button(
+        &self,
+        data: &DataTab,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let view = cx.entity();
+        let columns = data.columns.clone();
+        let hidden = data.hidden.clone();
+        let hidden_count = columns.iter().filter(|c| hidden.contains(*c)).count();
+        let label = if hidden_count == 0 {
+            "Columns".to_string()
+        } else {
+            format!(
+                "Columns ({} dari {})",
+                columns.len() - hidden_count,
+                columns.len()
+            )
+        };
+        Button::new("columns-picker")
+            .small()
+            .child(select_trigger(label, theme))
+            .tooltip("Pilih kolom yang ditampilkan")
+            .disabled(columns.is_empty())
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu.scrollable(true).max_h(px(360.)).min_w(px(220.));
+                for column in &columns {
+                    let visible = !hidden.contains(column);
+                    let shown =
+                        columns.len() - columns.iter().filter(|c| hidden.contains(*c)).count();
+                    let (view, column) = (view.clone(), column.clone());
+                    menu = menu.item(
+                        PopupMenuItem::new(column.clone())
+                            .checked(visible)
+                            .on_click(move |_, _, cx: &mut App| {
+                                // Never hide the last visible column.
+                                if visible && shown <= 1 {
+                                    return;
+                                }
+                                let column = column.clone();
+                                view.update(cx, |this, cx| {
+                                    this.update_hidden(cx, |set| {
+                                        if !set.remove(&column) {
+                                            set.insert(column);
+                                        }
+                                    });
+                                });
+                            }),
+                    );
+                }
+                menu = menu.separator();
+                let all = view.clone();
+                menu.item(PopupMenuItem::new("Tampilkan semua").on_click(
+                    move |_, _, cx: &mut App| {
+                        all.update(cx, |this, cx| this.update_hidden(cx, |set| set.clear()));
+                    },
+                ))
+            })
     }
 }
