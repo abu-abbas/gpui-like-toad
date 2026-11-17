@@ -79,6 +79,11 @@ fn main() {
     app.run(|cx: &mut App| {
         init(cx);
         load_bundled_fonts(cx);
+        // gpui-kit's bundled color themes (Settings > Light/Dark theme).
+        for err in theme::register_bundled_themes(cx) {
+            eprintln!("warning: bundled theme failed to load: {err}");
+        }
+        theme::set_theme_names(ora_core::store::load_theme_names(), cx);
         // Cmd/Ctrl+Enter and F5 run the active query. "cmd" is the
         // platform modifier (Command on macOS, Super/Win elsewhere);
         // the explicit ctrl-enter binding covers Windows/Linux Ctrl.
