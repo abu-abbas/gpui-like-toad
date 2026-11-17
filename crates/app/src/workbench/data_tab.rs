@@ -658,10 +658,12 @@ impl Workbench {
                 menu
             });
         let applied_count = applied.len();
+        // Wraps in a narrow window; the hint truncates first.
         bar = bar.child(
             div()
                 .flex()
                 .flex_row()
+                .flex_wrap()
                 .items_center()
                 .gap(px(SPACE_2))
                 .child(
@@ -678,15 +680,19 @@ impl Workbench {
                             cx.notify();
                         })),
                 )
-                .child(caption_text(
-                    if applied_count == 0 {
-                        "Tanpa filter. Enter di kolom nilai = Apply All.".to_string()
-                    } else {
-                        format!("{applied_count} filter aktif")
-                    },
-                    theme,
-                ))
-                .child(div().flex_1())
+                .child(
+                    caption_text(
+                        if applied_count == 0 {
+                            "Tanpa filter. Enter di kolom nilai = Apply All.".to_string()
+                        } else {
+                            format!("{applied_count} filter aktif")
+                        },
+                        theme,
+                    )
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate(),
+                )
                 .child(
                     Button::new("filter-clear")
                         .small()
@@ -814,9 +820,11 @@ impl Workbench {
             });
 
         // The value box turns green while the grid reflects this row.
+        // Never thinner than a usable input: in a narrow window the row
+        // wraps instead.
         let value = div()
             .flex_1()
-            .min_w(px(0.))
+            .min_w(px(120.))
             .rounded(px(RADIUS_MD))
             .border_1()
             .border_color(if is_applied {
@@ -839,6 +847,7 @@ impl Workbench {
         div()
             .flex()
             .flex_row()
+            .flex_wrap()
             .items_center()
             .gap(px(SPACE_2))
             .child(checkbox)
@@ -908,13 +917,19 @@ impl Workbench {
         let more = tab.last_result.as_ref().is_some_and(|r| r.truncated);
         let filters = tab.data.as_ref().map_or(0, |d| d.applied.active().count());
         let busy = self.busy;
+        // Wraps onto a second line in a narrow window instead of clipping
+        // the paging controls past the edge.
         let mut footer = div()
             .flex()
             .flex_row()
+            .flex_wrap()
+            .flex_none()
             .items_center()
-            .h(px(PAGINATION_HEIGHT))
-            .gap(px(SPACE_2))
+            .min_h(px(PAGINATION_HEIGHT))
+            .gap_x(px(SPACE_2))
+            .gap_y(px(SPACE_1))
             .px(px(SPACE_3))
+            .py(px(SPACE_1))
             .bg(theme.background)
             .border_t_1()
             .border_color(theme.border)
