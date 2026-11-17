@@ -13,6 +13,14 @@
 
 use super::*;
 
+/// The "save scripts before disconnect?" dialog: which connection, and
+/// the SQL tabs (id, title) that would be closed with text in them.
+pub(super) struct DisconnectPrompt {
+    id: u64,
+    label: String,
+    scripts: Vec<(u64, String)>,
+}
+
 impl Workbench {
     /// Connections that are connected (or connecting), active one included.
     pub(super) fn open_conn_count(&self) -> usize {
@@ -436,12 +444,13 @@ impl Workbench {
 
 impl Workbench {
     /// Disconnect from the UI: close connection `id` together with its
-    /// tabs. SQL tabs that hold text are offered for saving first (Save
-    /// asks for a file per tab; Cancel at any point keeps the connection).
+    /// tabs. When SQL tabs hold text, a dialog first offers to save them
+    /// (Save asks for a file per tab; Cancel at any point keeps the
+    /// connection).
     pub(super) fn request_disconnect(
         &mut self,
         id: u64,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let scripts: Vec<(u64, String)> = self
@@ -456,27 +465,24 @@ impl Workbench {
             return;
         }
         let label = self.conn_by_id(id).map_or_else(String::new, |c| c.label());
-        let names = scripts
-            .iter()
-            .map(|(_, title)| title.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let answer = window.prompt(
-            gpui_kit::PromptLevel::Warning,
-            &format!("Simpan script sebelum disconnect {label}?"),
-            Some(&format!("Tab ini akan ditutup: {names}")),
-            &["Simpan…", "Jangan simpan", "Batal"],
-            cx,
-        );
+        self.disconnect_prompt = Some(DisconnectPrompt { id, label, scripts });
+        cx.notify();
+    }
+
+    fn close_disconnect_prompt(&mut self, cx: &mut Context<Self>) {
+        self.disconnect_prompt = None;
+        cx.notify();
+    }
+
+    /// Dialog answer "Simpan…": save each script tab to a file the user
+    /// picks, then disconnect. Cancelling a file dialog stops there and
+    /// keeps the connection.
+    fn save_scripts_then_disconnect(&mut self, cx: &mut Context<Self>) {
+        let Some(DisconnectPrompt { id, scripts, .. }) = self.disconnect_prompt.take() else {
+            return;
+        };
+        cx.notify();
         cx.spawn(async move |view, cx| {
-            match answer.await {
-                Ok(0) => {}
-                Ok(1) => {
-                    let _ = view.update(cx, |this, cx| this.finish_disconnect(id, cx));
-                    return;
-                }
-                _ => return,
-            }
             for (tab_id, _) in scripts {
                 let request = view.update(cx, |this, cx| {
                     let tab = this.tabs.iter().find(|t| t.id == tab_id)?;
@@ -515,6 +521,164 @@ impl Workbench {
             let _ = view.update(cx, |this, cx| this.finish_disconnect(id, cx));
         })
         .detach();
+    }
+
+    /// Dialog answer "Jangan simpan": disconnect and drop the scripts.
+    fn discard_scripts_then_disconnect(&mut self, cx: &mut Context<Self>) {
+        if let Some(prompt) = self.disconnect_prompt.take() {
+            self.finish_disconnect(prompt.id, cx);
+        }
+    }
+
+    pub(super) fn render_disconnect_prompt(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let Some(prompt) = self.disconnect_prompt.as_ref() else {
+            return div().into_any_element();
+        };
+        let count = prompt.scripts.len();
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_1))
+            .p(px(SPACE_2))
+            .rounded(px(RADIUS_MD))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.background);
+        for (_, title) in &prompt.scripts {
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .h(px(TREE_ROW_HEIGHT))
+                    .px(px(SPACE_1))
+                    .child(icon(IconName::FileCode, 14., theme.muted_foreground))
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_size(px(FONT_LABEL))
+                            .line_height(px(LEADING_LABEL))
+                            .text_color(theme.foreground)
+                            .child(title.clone()),
+                    ),
+            );
+        }
+        let card = div()
+            .id("disconnect-prompt")
+            .flex()
+            .flex_col()
+            .w(px(440.))
+            .rounded(px(RADIUS_MD))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .shadow_lg()
+            .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.close_disconnect_prompt(cx);
+                }
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .px(px(SPACE_4))
+                    .h(px(44.))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(icon(IconName::LogOut, 16., theme.primary))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_size(px(FONT_BODY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child(format!("Disconnect {}", prompt.label)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(SPACE_3))
+                    .p(px(SPACE_4))
+                    .child(
+                        div()
+                            .text_size(px(FONT_BODY))
+                            .line_height(px(LEADING_BODY))
+                            .text_color(theme.foreground)
+                            .child(if count == 1 {
+                                "Tab ini masih berisi script dan akan ditutup. Simpan dulu?"
+                                    .to_string()
+                            } else {
+                                format!(
+                                    "{count} tab ini masih berisi script dan akan ditutup. Simpan dulu?"
+                                )
+                            }),
+                    )
+                    .child(list)
+                    .child(caption_text(
+                        "Simpan menanyakan lokasi file untuk tiap tab.".to_string(),
+                        theme,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .px(px(SPACE_4))
+                    .py(px(SPACE_3))
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        Button::new("disconnect-discard")
+                            .label("Jangan simpan")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.discard_scripts_then_disconnect(cx)
+                            })),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("disconnect-cancel")
+                            .label("Batal")
+                            .on_click(cx.listener(|this, _, _, cx| this.close_disconnect_prompt(cx))),
+                    )
+                    .child(
+                        Button::new("disconnect-save")
+                            .label("Simpan…")
+                            .icon(IconName::Save)
+                            .primary()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.save_scripts_then_disconnect(cx)
+                            })),
+                    ),
+            );
+        div()
+            .id("disconnect-prompt-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(120.))
+            .bg(gpui_kit::hsla(0., 0., 0., 0.35))
+            .occlude()
+            .child(card)
+            .into_any_element()
     }
 
     /// Close connection `id` (if still open) and every tab bound to it.

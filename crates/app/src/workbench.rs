@@ -387,6 +387,8 @@ pub struct Workbench {
     quick_open: Option<QuickOpen>,
     /// The cell edit dialog, while it is showing.
     cell_editor: Option<CellEditor>,
+    /// "Save scripts before disconnect?" dialog, while it is showing.
+    disconnect_prompt: Option<conns::DisconnectPrompt>,
     /// The Info panel under data / script tabs is folded to its header.
     info_collapsed: bool,
     /// Keeps shortcuts (Quick Open, Run) working when no input has focus.
@@ -488,6 +490,7 @@ impl Workbench {
             object_scroll: UniformListScrollHandle::new(),
             quick_open: None,
             cell_editor: None,
+            disconnect_prompt: None,
             info_collapsed: false,
             focus_handle: cx.focus_handle(),
             tree_filter: String::new(),
@@ -4772,6 +4775,9 @@ impl Render for Workbench {
             })
             .when(self.cell_editor.is_some(), |this| {
                 this.child(self.render_cell_editor(&theme, cx))
+            })
+            .when(self.disconnect_prompt.is_some(), |this| {
+                this.child(self.render_disconnect_prompt(&theme, cx))
             })
     }
 }
