@@ -3206,6 +3206,7 @@ impl Workbench {
                 .child(
                     DataTable::new(&tab.table_state)
                         .stripe(true)
+                        .fixed_cols_border(false)
                         .bordered(true)
                         .xsmall()
                         .header_row_height(px(DATA_HEADER_HEIGHT)),
@@ -3237,6 +3238,7 @@ impl Workbench {
                     div().flex_1().child(
                         DataTable::new(&data.structure)
                             .stripe(true)
+                            .fixed_cols_border(false)
                             .bordered(true)
                             .xsmall()
                             .header_row_height(px(DATA_HEADER_HEIGHT)),
@@ -3251,6 +3253,7 @@ impl Workbench {
                     div().flex_1().child(
                         DataTable::new(&data.indexes)
                             .stripe(true)
+                            .fixed_cols_border(false)
                             .bordered(true)
                             .xsmall()
                             .header_row_height(px(DATA_HEADER_HEIGHT)),
@@ -3566,6 +3569,7 @@ impl Workbench {
                         .child(
                             DataTable::new(&tab.table_state)
                                 .stripe(true)
+                                .fixed_cols_border(false)
                                 .bordered(true)
                                 .small()
                                 .header_row_height(px(GRID_ROW_HEIGHT)),
