@@ -669,6 +669,15 @@ impl Workbench {
         );
         let tab_conn = self.tabs.get(self.active_tab).and_then(|t| t.conn);
         if tab_op && !self.show_home {
+            // Safety net: the tab shows work of another open connection
+            // but that one is not active (some tab switch did not follow
+            // it). Run on the tab's own connection, never the active one.
+            if let Some(id) = tab_conn.filter(|id| *id != self.conn.id) {
+                if self.conn_by_id(id).is_some_and(|c| c.is_open() && !c.busy) {
+                    self.activate_conn(id, cx);
+                    return self.spawn_db(job, op, cx);
+                }
+            }
             if tab_conn.is_some_and(|id| id != self.conn.id) {
                 let text = if self.active_tab_orphaned() {
                     ORPHAN_TAB
@@ -1257,6 +1266,8 @@ impl Workbench {
         } else if ix < self.active_tab {
             self.active_tab -= 1;
         }
+        // The tab now showing may run on another connection.
+        self.follow_tab_conn(cx);
         cx.notify();
     }
 
@@ -1290,6 +1301,7 @@ impl Workbench {
         } else {
             self.active_tab = old_active.min(self.tabs.len() - 1);
         }
+        self.follow_tab_conn(cx);
         cx.notify();
     }
 
@@ -1532,6 +1544,87 @@ impl Workbench {
         self.history.clear();
         self.persist_history();
         cx.notify();
+    }
+
+    /// Pick the color theme for light (`dark == false`) or dark mode;
+    /// `None` is the app's own palette.
+    fn set_theme_name(
+        &mut self,
+        dark: bool,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut names = theme::theme_names(cx);
+        if dark {
+            names.dark = name;
+        } else {
+            names.light = name;
+        }
+        theme::set_theme_names(names.clone(), cx);
+        theme::apply_preference(self.theme_pref, window, cx);
+        if let Err(err) = store::save_theme_names(&names) {
+            self.push_message(format!("Gagal menyimpan pilihan tema: {err}"));
+        }
+        cx.notify();
+    }
+
+    /// One "Light theme" / "Dark theme" picker: Ora first, then the
+    /// bundled gpui-kit themes for that mode.
+    fn render_theme_picker(
+        &self,
+        dark: bool,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let names = theme::theme_names(cx);
+        let current = if dark { names.dark } else { names.light };
+        let options = theme::theme_names_for(dark, cx);
+        // A saved name that no longer exists shows (and acts) as Ora.
+        let current = current.filter(|c| options.contains(c));
+        let label = current
+            .clone()
+            .unwrap_or_else(|| theme::ORA_THEME_LABEL.to_string());
+        let view = cx.entity();
+        let id = if dark {
+            "theme-dark-select"
+        } else {
+            "theme-light-select"
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_1))
+            .child(caption_text(
+                if dark { "Dark theme" } else { "Light theme" }.to_string(),
+                theme,
+            ))
+            .child(
+                Button::new(id)
+                    .child(select_trigger(label, theme))
+                    .w_full()
+                    .dropdown_menu(move |menu, _, _| {
+                        let mut menu = menu.scrollable(true).max_h(px(360.)).min_w(px(220.));
+                        let entries =
+                            std::iter::once(None).chain(options.iter().cloned().map(Some));
+                        for entry in entries {
+                            let view = view.clone();
+                            let checked = entry == current;
+                            let text = entry
+                                .clone()
+                                .unwrap_or_else(|| theme::ORA_THEME_LABEL.to_string());
+                            menu = menu.item(PopupMenuItem::new(text).checked(checked).on_click(
+                                move |_, window, cx: &mut App| {
+                                    let entry = entry.clone();
+                                    view.update(cx, |this, cx| {
+                                        this.set_theme_name(dark, entry, window, cx)
+                                    });
+                                },
+                            ));
+                        }
+                        menu
+                    }),
+            )
     }
 
     fn set_theme(&mut self, pref: ThemePreference, window: &mut Window, cx: &mut Context<Self>) {
@@ -3371,10 +3464,13 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut panel = div().flex().flex_col().size_full().bg(theme.sidebar);
-        panel = panel.child(self.render_panel_header("Settings", theme));
+        // flex_none: the header keeps its height when the body is taller
+        // than the panel; the body scrolls instead.
+        panel = panel.child(self.render_panel_header("Settings", theme).flex_none());
         let mut body = div()
             .flex()
             .flex_col()
+            .flex_none()
             .gap(px(SPACE_2))
             .p(px(SPACE_3))
             .child(form_label("Appearance", theme));
@@ -3429,6 +3525,13 @@ impl Workbench {
             body = body.child(row);
         }
         body = body
+            .child(div().h(px(SPACE_2)))
+            .child(self.render_theme_picker(false, theme, cx))
+            .child(self.render_theme_picker(true, theme, cx))
+            .child(caption_text(
+                "Color themes bundled from gpui-kit. Light/Dark/System above decides which one is shown.".to_string(),
+                theme,
+            ))
             .child(div().h(px(SPACE_4)))
             .child(self.render_update_settings(theme, cx))
             .child(div().h(px(SPACE_4)))
@@ -3445,7 +3548,14 @@ impl Workbench {
                 "Theme preference, saved connections, and query history are stored in your user config directory. Passwords are only saved when you tick \"Save password\", and then in the OS keychain, never in these files.".to_string(),
                 theme,
             ));
-        panel.child(body)
+        panel.child(
+            div()
+                .id("settings-scroll")
+                .flex_1()
+                .min_h(px(0.))
+                .overflow_y_scroll()
+                .child(body),
+        )
     }
 
     // ----- rendering: main column -----

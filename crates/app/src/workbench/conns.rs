@@ -163,10 +163,10 @@ impl Workbench {
         }
     }
 
-    /// Switcher pick: activate `id` and show something that runs on it.
-    /// A tab that is not bound yet (or lost its connection) is bound to
-    /// `id`; a tab of another open connection makes way for `id`'s most
-    /// recent tab, or a new query tab.
+    /// Switcher pick: activate `id` and make the active tab run on it.
+    /// A SQL tab (unbound, orphaned, or bound to another connection) is
+    /// rebound to `id`; a data tab makes way for `id`'s most recent tab,
+    /// or a new query tab.
     pub(super) fn switch_conn(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.activate_conn(id, cx);
         if self.conn.id != id || self.show_home {
@@ -179,12 +179,23 @@ impl Workbench {
         };
         match tab.conn {
             None => tab.conn = Some(id),
-            Some(_) if orphaned => {
-                tab.conn = Some(id);
-                // Its grid came from the closed connection.
-                tab.last_result = None;
-            }
             Some(current) if current == id => {}
+            // A SQL tab moves to the picked connection, like Navicat's
+            // per-tab connection picker (so does a tab whose connection
+            // was closed). Its old grid came from the other connection.
+            Some(_) if orphaned || tab.data.is_none() => {
+                tab.conn = Some(id);
+                tab.last_result = None;
+                tab.elapsed_ms = None;
+                tab.plan_nodes = None;
+                tab.plan_lines.clear();
+                tab.table_state.update(cx, |state, cx| {
+                    state.delegate_mut().set_result(QueryResult::default());
+                    state.refresh(cx);
+                });
+            }
+            // A data tab belongs to its table's connection: show a tab of
+            // the picked one instead.
             Some(_) => match self.tabs.iter().rposition(|t| t.conn == Some(id)) {
                 Some(ix) => self.activate_tab(ix, cx),
                 None => self.add_tab(window, cx),
