@@ -67,7 +67,10 @@ use data_tab::{DataTab, DataView};
 use quick_open::QuickOpen;
 use updates::UpdateState;
 
-actions!(db_explorer, [RunQuery, QuickOpenTable, CheckForUpdates]);
+actions!(
+    db_explorer,
+    [RunQuery, QuickOpenTable, CheckForUpdates, OpenSettings]
+);
 
 const MAX_MESSAGES: usize = 200;
 
@@ -4241,6 +4244,10 @@ impl Render for Workbench {
             .key_context("Workbench")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _action: &RunQuery, _, cx| this.run(cx)))
+            .on_action(cx.listener(|this, _action: &OpenSettings, _, cx| {
+                this.rail = RailPanel::Settings;
+                cx.notify();
+            }))
             .on_action(
                 cx.listener(|this, _action: &CheckForUpdates, _, cx| this.check_updates(true, cx)),
             )
