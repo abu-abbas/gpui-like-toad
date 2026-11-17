@@ -111,10 +111,6 @@ enum PendingOp {
     Explain,
     ListSchemas,
     ListObjects,
-    Describe {
-        owner: String,
-        name: String,
-    },
     /// Data tab views: the table's columns, indexes and DDL.
     DataStructure,
     DataIndexes,
@@ -285,6 +281,8 @@ pub struct Workbench {
     quick_open: Option<QuickOpen>,
     /// The cell edit dialog, while it is showing.
     cell_editor: Option<CellEditor>,
+    /// The Info panel under data / script tabs is folded to its header.
+    info_collapsed: bool,
     /// Keeps shortcuts (Quick Open, Run) working when no input has focus.
     focus_handle: gpui_kit::FocusHandle,
     tree_filter: String,
@@ -401,6 +399,7 @@ impl Workbench {
             objects: Vec::new(),
             quick_open: None,
             cell_editor: None,
+            info_collapsed: false,
             focus_handle: cx.focus_handle(),
             tree_filter: String::new(),
             messages: Vec::new(),
@@ -1389,6 +1388,19 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_table_data_in(owner, name, DataView::Data, window, cx);
+    }
+
+    /// Like [`Self::open_table_data`], starting on `view` (Describe opens
+    /// the Structure view; the rows load when Data is first shown).
+    fn open_table_data_in(
+        &mut self,
+        owner: &str,
+        name: &str,
+        start_view: DataView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.session.is_none() {
             return;
         }
@@ -1406,6 +1418,10 @@ impl Workbench {
         let view = cx.entity().downgrade();
         let editable = kind == ObjectKind::Table;
         let data = DataTab::new(owner, name, kind, window, cx);
+        let table_state = self.active_tab().table_state.clone();
+        let observe = cx.observe(&table_state, |_, _, cx| cx.notify());
+        let mut data = data;
+        data._grid_observe = Some(observe);
         let tab = self.active_tab_mut();
         tab.title = format!("{owner}.{name}");
         tab.kind = TabKind::Data;
@@ -1428,25 +1444,14 @@ impl Workbench {
             *state.delegate_mut() = delegate;
         });
         self.add_filter_row(None, None, window, cx);
-        self.reload_data(cx);
-    }
-
-    fn describe_object(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
-        if self.busy || self.session.is_none() || self.show_home {
-            return;
+        if start_view == DataView::Data {
+            self.reload_data(cx);
+        } else {
+            if let Some(data) = self.data_mut() {
+                data.view = start_view;
+            }
+            self.load_data_view(cx);
         }
-        self.status = format!("Describe {}.{}...", object.owner, object.name);
-        self.spawn_db(
-            Job::Describe {
-                owner: object.owner.clone(),
-                name: object.name.clone(),
-            },
-            PendingOp::Describe {
-                owner: object.owner,
-                name: object.name,
-            },
-            cx,
-        );
     }
 
     /// "View Script": fetch the DDL; the response opens it in a new tab.
@@ -1750,13 +1755,6 @@ impl Workbench {
                 ));
                 self.status = format!("{rows} baris diimpor ke {name} (belum commit).");
                 self.target_tab_mut().results_tab = ResultsTab::Messages;
-            }
-            (Some(PendingOp::Describe { owner, name }), Response::Described(defs)) => {
-                let result = schema::describe_to_result(&defs);
-                let count = result.row_count();
-                self.set_grid_result(result, cx);
-                self.target_tab_mut().results_tab = ResultsTab::Results;
-                self.status = format!("{owner}.{name}: {count} kolom.");
             }
             (Some(PendingOp::DataStructure), Response::Described(defs)) => {
                 let result = schema::describe_to_result(&defs);
@@ -3109,7 +3107,16 @@ impl Workbench {
             } else {
                 self.render_editor(cx).into_any_element()
             };
-            main = main.child(
+            main = main.child(if self.info_collapsed {
+                // Folded: the work area takes everything but the header.
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1().min_h(px(0.)).child(top))
+                    .child(self.render_info_panel(theme, cx))
+            } else {
                 div().flex_1().min_h(px(0.)).child(
                     v_resizable("object-split")
                         .child(resizable_panel().child(top))
@@ -3117,10 +3124,10 @@ impl Workbench {
                             resizable_panel()
                                 .size(px(150.))
                                 .size_range(px(80.)..px(400.))
-                                .child(self.render_info_panel(theme)),
+                                .child(self.render_info_panel(theme, cx)),
                         ),
-                ),
-            );
+                )
+            });
         } else {
             main = main.child(
                 div().flex_1().min_h(px(0.)).child(
@@ -3299,6 +3306,8 @@ impl Workbench {
         let grid = if tab.last_result.is_some() {
             div()
                 .flex_1()
+                .min_w(px(0.))
+                .overflow_hidden()
                 .child(
                     DataTable::new(&tab.table_state)
                         .stripe(true)
@@ -3323,6 +3332,18 @@ impl Workbench {
                     theme,
                 ))
                 .into_any_element()
+        };
+        let grid = if tab.data.as_ref().is_some_and(|d| d.show_details) {
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_w(px(0.))
+                .child(grid)
+                .child(self.render_details_panel(theme, cx))
+                .into_any_element()
+        } else {
+            grid
         };
         let view = tab.data.as_ref().map_or(DataView::Data, |d| d.view);
         let body = match (view, tab.data.as_ref()) {
@@ -3383,7 +3404,12 @@ impl Workbench {
 
     /// Info strip under a data/script tab: what the tab shows, then the
     /// latest messages with errors highlighted.
-    fn render_info_panel(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
+    fn render_info_panel(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let collapsed = self.info_collapsed;
         let tab = self.active_tab();
         let mut summary = tab.title.clone();
         if let Some(result) = &tab.last_result {
@@ -3410,6 +3436,9 @@ impl Workbench {
             .flex()
             .flex_col()
             .size_full()
+            .when(collapsed, |this| {
+                this.h(px(SUB_TAB_HEIGHT + 1.)).flex_none()
+            })
             .bg(theme.background)
             .border_t_1()
             .border_color(theme.border)
@@ -3432,30 +3461,52 @@ impl Workbench {
                             .text_color(theme.foreground)
                             .child("Info"),
                     )
-                    .child(caption_text(summary, theme)),
+                    .child(caption_text(summary, theme))
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("info-toggle")
+                            .small()
+                            .ghost()
+                            .icon(if collapsed {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .tooltip(if collapsed {
+                                "Buka panel Info"
+                            } else {
+                                "Minimize panel Info"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.info_collapsed = !this.info_collapsed;
+                                cx.notify();
+                            })),
+                    ),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .id("info-messages")
-                    .overflow_y_scroll()
-                    .px(px(SPACE_3))
-                    .py(px(SPACE_2))
-                    .child(div().flex().flex_col().gap(px(SPACE_1)).children(
-                        self.messages[start..].iter().rev().map(|m| {
-                            div()
-                                .text_size(px(FONT_LABEL))
-                                .line_height(px(LEADING_LABEL))
-                                .text_color(if is_error_message(m) {
-                                    theme.danger
-                                } else {
-                                    theme.foreground
-                                })
-                                .child(m.clone())
-                        }),
-                    )),
-            )
+            .when(!collapsed, |this| {
+                this.child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .id("info-messages")
+                        .overflow_y_scroll()
+                        .px(px(SPACE_3))
+                        .py(px(SPACE_2))
+                        .child(div().flex().flex_col().gap(px(SPACE_1)).children(
+                            self.messages[start..].iter().rev().map(|m| {
+                                div()
+                                    .text_size(px(FONT_LABEL))
+                                    .line_height(px(LEADING_LABEL))
+                                    .text_color(if is_error_message(m) {
+                                        theme.danger
+                                    } else {
+                                        theme.foreground
+                                    })
+                                    .child(m.clone())
+                            }),
+                        )),
+                )
+            })
     }
 
     fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4438,7 +4489,9 @@ fn object_menu(menu: PopupMenu, view: &Entity<Workbench>, object: &ObjectRef) ->
             "Describe",
             IconName::Columns3,
             has_data,
-            |this, o, _, cx| this.describe_object(o, cx),
+            |this, o, window, cx| {
+                this.open_table_data_in(&o.owner, &o.name, DataView::Structure, window, cx)
+            },
         ))
         .item(item(
             "View Script",

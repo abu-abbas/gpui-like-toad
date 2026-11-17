@@ -225,6 +225,19 @@ impl ResultsDelegate {
         Some(std::mem::replace(&mut row[col], value))
     }
 
+    /// Every field of the row shown at table row `row_ix`, in column
+    /// order, without the internal ROWID: the Details panel's content.
+    pub fn row_fields(&self, row_ix: usize) -> Vec<(String, Value)> {
+        let abs_row = self.absolute_row(row_ix);
+        self.result
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.name != ROWID_COLUMN)
+            .filter_map(|(ix, c)| Some((c.name.clone(), self.result.get(abs_row, ix)?.clone())))
+            .collect()
+    }
+
     /// The edit request for the cell at result row `abs_row`, column
     /// `data_col`; `None` when editing is off or the row has no ROWID.
     fn edit_request(&self, abs_row: usize, data_col: usize) -> Option<CellEditRequest> {
