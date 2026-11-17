@@ -19,6 +19,7 @@ pub mod import;
 pub mod model;
 pub mod sql;
 pub mod store;
+pub mod update;
 
 pub use client::{DbClient, DbError, DbInfo};
 pub use filter::{
