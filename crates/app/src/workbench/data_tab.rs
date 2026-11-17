@@ -91,6 +91,9 @@ pub(super) struct DataTab {
     pub(super) hidden: HashSet<String>,
     /// Cell edits staged or applied but not yet committed.
     pub(super) edits: Vec<CellEdit>,
+    /// Bottom tab to switch to once the first data fetch finishes (Describe
+    /// opens a tab on Structure).
+    pub(super) after_load: Option<DataView>,
     _page_subs: Vec<Subscription>,
 }
 
@@ -161,6 +164,7 @@ impl DataTab {
             offset_input,
             hidden: HashSet::new(),
             edits: Vec::new(),
+            after_load: None,
             _page_subs: page_subs,
         }
     }
@@ -194,7 +198,7 @@ impl DataTab {
 }
 
 impl Workbench {
-    fn data_mut(&mut self) -> Option<&mut DataTab> {
+    pub(super) fn data_mut(&mut self) -> Option<&mut DataTab> {
         self.tabs.get_mut(self.active_tab)?.data.as_mut()
     }
 

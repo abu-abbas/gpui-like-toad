@@ -111,10 +111,6 @@ enum PendingOp {
     Explain,
     ListSchemas,
     ListObjects,
-    Describe {
-        owner: String,
-        name: String,
-    },
     /// Data tab views: the table's columns, indexes and DDL.
     DataStructure,
     DataIndexes,
@@ -261,6 +257,11 @@ pub struct Workbench {
     /// Messages tab scroll; follows the newest message.
     messages_scroll: ScrollHandle,
     show_home: bool,
+    /// The Info/messages strip under object tabs is folded to its header.
+    info_collapsed: bool,
+    /// Demo database is offered in the UI only with ORA_DEMO set (kept for
+    /// screenshots and tests; real use connects to Oracle).
+    show_demo: bool,
     next_tab_id: u64,
     db: Option<DbHandle>,
     session: Option<DbInfo>,
@@ -381,6 +382,8 @@ impl Workbench {
             messages_scroll: ScrollHandle::new(),
             // Start on the Navicat-style Home page.
             show_home: true,
+            info_collapsed: false,
+            show_demo: std::env::var_os("ORA_DEMO").is_some(),
             next_tab_id: 1,
             db: None,
             session: None,
@@ -1431,22 +1434,27 @@ impl Workbench {
         self.reload_data(cx);
     }
 
-    fn describe_object(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
-        if self.busy || self.session.is_none() || self.show_home {
+    /// "Describe": show the table's columns in its data tab, on the
+    /// Structure view. A tab that is already open is reused; otherwise a new
+    /// one opens (like Open Data) and switches to Structure once loaded.
+    fn describe_object(&mut self, object: ObjectRef, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy || self.session.is_none() {
             return;
         }
-        self.status = format!("Describe {}.{}...", object.owner, object.name);
-        self.spawn_db(
-            Job::Describe {
-                owner: object.owner.clone(),
-                name: object.name.clone(),
-            },
-            PendingOp::Describe {
-                owner: object.owner,
-                name: object.name,
-            },
-            cx,
-        );
+        let existing = self.tabs.iter().position(|t| {
+            t.data
+                .as_ref()
+                .is_some_and(|d| d.owner == object.owner && d.name == object.name)
+        });
+        if let Some(ix) = existing {
+            self.activate_tab(ix, cx);
+            self.set_data_view(DataView::Structure, cx);
+            return;
+        }
+        self.open_table_data(&object.owner, &object.name, window, cx);
+        if let Some(data) = self.data_mut() {
+            data.after_load = Some(DataView::Structure);
+        }
     }
 
     /// "View Script": fetch the DDL; the response opens it in a new tab.
@@ -1663,6 +1671,15 @@ impl Workbench {
                 } else {
                     format!("{rows} baris dalam {elapsed}ms")
                 };
+                // Describe: the data tab was opened only to land on Structure.
+                let next = self
+                    .target_tab_mut()
+                    .data
+                    .as_mut()
+                    .and_then(|d| d.after_load.take());
+                if let Some(view) = next {
+                    self.set_data_view(view, cx);
+                }
             }
             (Some(PendingOp::Run), Response::Executed(affected)) => {
                 if let Some(sql) = pending_sql {
@@ -1750,13 +1767,6 @@ impl Workbench {
                 ));
                 self.status = format!("{rows} baris diimpor ke {name} (belum commit).");
                 self.target_tab_mut().results_tab = ResultsTab::Messages;
-            }
-            (Some(PendingOp::Describe { owner, name }), Response::Described(defs)) => {
-                let result = schema::describe_to_result(&defs);
-                let count = result.row_count();
-                self.set_grid_result(result, cx);
-                self.target_tab_mut().results_tab = ResultsTab::Results;
-                self.status = format!("{owner}.{name}: {count} kolom.");
             }
             (Some(PendingOp::DataStructure), Response::Described(defs)) => {
                 let result = schema::describe_to_result(&defs);
@@ -2194,13 +2204,15 @@ impl Workbench {
                                 this.open_new_connection(window, cx)
                             })),
                     )
-                    .child(
-                        Button::new("demo")
-                            .label("Demo")
-                            .icon(IconName::Play)
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
-                    ),
+                    .when(self.show_demo, |col| {
+                        col.child(
+                            Button::new("demo")
+                                .label("Demo")
+                                .icon(IconName::Play)
+                                .disabled(self.busy)
+                                .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
+                        )
+                    }),
             );
         }
         panel
@@ -3109,18 +3121,36 @@ impl Workbench {
             } else {
                 self.render_editor(cx).into_any_element()
             };
-            main = main.child(
-                div().flex_1().min_h(px(0.)).child(
-                    v_resizable("object-split")
-                        .child(resizable_panel().child(top))
+            main = if self.info_collapsed {
+                // Folded: only the Info header stays under the grid.
+                main.child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .flex()
+                        .flex_col()
+                        .child(div().flex_1().min_h(px(0.)).child(top))
                         .child(
-                            resizable_panel()
-                                .size(px(150.))
-                                .size_range(px(80.)..px(400.))
-                                .child(self.render_info_panel(theme)),
+                            div()
+                                .flex_none()
+                                .h(px(SUB_TAB_HEIGHT + 1.))
+                                .child(self.render_info_panel(theme, cx)),
                         ),
-                ),
-            );
+                )
+            } else {
+                main.child(
+                    div().flex_1().min_h(px(0.)).child(
+                        v_resizable("object-split")
+                            .child(resizable_panel().child(top))
+                            .child(
+                                resizable_panel()
+                                    .size(px(150.))
+                                    .size_range(px(80.)..px(400.))
+                                    .child(self.render_info_panel(theme, cx)),
+                            ),
+                    ),
+                )
+            };
         } else {
             main = main.child(
                 div().flex_1().min_h(px(0.)).child(
@@ -3383,7 +3413,12 @@ impl Workbench {
 
     /// Info strip under a data/script tab: what the tab shows, then the
     /// latest messages with errors highlighted.
-    fn render_info_panel(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
+    fn render_info_panel(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let collapsed = self.info_collapsed;
         let tab = self.active_tab();
         let mut summary = tab.title.clone();
         if let Some(result) = &tab.last_result {
@@ -3432,30 +3467,52 @@ impl Workbench {
                             .text_color(theme.foreground)
                             .child("Info"),
                     )
-                    .child(caption_text(summary, theme)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .child(caption_text(summary, theme)),
+                    )
+                    .child(
+                        Button::new("info-toggle")
+                            .icon(if collapsed {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.info_collapsed = !this.info_collapsed;
+                                cx.notify();
+                            })),
+                    ),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .id("info-messages")
-                    .overflow_y_scroll()
-                    .px(px(SPACE_3))
-                    .py(px(SPACE_2))
-                    .child(div().flex().flex_col().gap(px(SPACE_1)).children(
-                        self.messages[start..].iter().rev().map(|m| {
-                            div()
-                                .text_size(px(FONT_LABEL))
-                                .line_height(px(LEADING_LABEL))
-                                .text_color(if is_error_message(m) {
-                                    theme.danger
-                                } else {
-                                    theme.foreground
-                                })
-                                .child(m.clone())
-                        }),
-                    )),
-            )
+            .when(!collapsed, |panel| {
+                panel.child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .id("info-messages")
+                        .overflow_y_scroll()
+                        .px(px(SPACE_3))
+                        .py(px(SPACE_2))
+                        .child(div().flex().flex_col().gap(px(SPACE_1)).children(
+                            self.messages[start..].iter().rev().map(|m| {
+                                div()
+                                    .text_size(px(FONT_LABEL))
+                                    .line_height(px(LEADING_LABEL))
+                                    .text_color(if is_error_message(m) {
+                                        theme.danger
+                                    } else {
+                                        theme.foreground
+                                    })
+                                    .child(m.clone())
+                            }),
+                        )),
+                )
+            })
     }
 
     fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4094,28 +4151,39 @@ impl Workbench {
         };
         let mut grid = div().flex().flex_row().flex_wrap().gap(px(SPACE_3));
         let demo_connected = self.demo_mode && self.session.is_some();
-        grid = grid.child(
-            tile("home-demo-tile".to_string())
-                .child(tile_title(
-                    IconName::Database,
-                    "Demo database".to_string(),
-                    "Built-in, no Oracle needed".to_string(),
-                ))
-                .child(
-                    Button::new("home-demo")
-                        .label(if demo_connected {
-                            "Connected"
-                        } else {
-                            "Connect"
-                        })
-                        .icon(IconName::Play)
-                        .primary()
-                        .disabled(self.busy || demo_connected)
-                        .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
-                ),
-        );
+        if self.show_demo || demo_connected {
+            grid = grid.child(
+                tile("home-demo-tile".to_string())
+                    .child(tile_title(
+                        IconName::Database,
+                        "Demo database".to_string(),
+                        "Built-in, no Oracle needed".to_string(),
+                    ))
+                    .child(if demo_connected {
+                        // Connected: the tile's button turns into Disconnect.
+                        Button::new("home-demo")
+                            .label("Disconnect")
+                            .icon(IconName::LogOut)
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx)))
+                    } else {
+                        Button::new("home-demo")
+                            .label("Connect")
+                            .icon(IconName::Play)
+                            .primary()
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx)))
+                    }),
+            );
+        }
         for (ix, profile) in self.profiles.iter().enumerate() {
             let profile = profile.clone();
+            let connected_here = self.session.is_some()
+                && !self.demo_mode
+                && self
+                    .last_connection
+                    .as_ref()
+                    .is_some_and(|last| last.profile_ix == Some(ix));
             grid = grid.child(
                 tile(format!("home-profile-{ix}"))
                     .child(tile_title(
@@ -4123,7 +4191,15 @@ impl Workbench {
                         profile.name.clone(),
                         format!("{}@{}", profile.username, profile.connect_string),
                     ))
-                    .child(
+                    .child(if connected_here {
+                        // This profile is the live session: Open becomes
+                        // Disconnect once the connection succeeded.
+                        Button::new(format!("home-use-{ix}"))
+                            .label("Disconnect")
+                            .icon(IconName::LogOut)
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx)))
+                    } else {
                         Button::new(format!("home-use-{ix}"))
                             .label("Open")
                             .icon(IconName::LogIn)
@@ -4131,8 +4207,8 @@ impl Workbench {
                                 // Saved password: connect now. Otherwise
                                 // open the filled dialog for the password.
                                 this.open_profile(ix, window, cx);
-                            })),
-                    ),
+                            }))
+                    }),
             );
         }
         grid = grid.child(
@@ -4438,7 +4514,7 @@ fn object_menu(menu: PopupMenu, view: &Entity<Workbench>, object: &ObjectRef) ->
             "Describe",
             IconName::Columns3,
             has_data,
-            |this, o, _, cx| this.describe_object(o, cx),
+            |this, o, window, cx| this.describe_object(o, window, cx),
         ))
         .item(item(
             "View Script",
