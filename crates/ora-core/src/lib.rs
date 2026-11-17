@@ -12,6 +12,7 @@ pub mod client;
 pub mod completion;
 pub mod credentials;
 pub mod demo;
+pub mod edit;
 pub mod export;
 pub mod filter;
 pub mod import;
@@ -22,6 +23,7 @@ pub mod store;
 pub use client::{DbClient, DbError, DbInfo};
 pub use filter::{
     BoundQuery, FilterCondition, FilterJoin, FilterOp, TableFilter, TablePage, MAX_PAGE_LIMIT,
+    ROWID_COLUMN,
 };
 pub use model::{
     compose_easy_connect, parse_easy_connect, ColumnDef, ColumnInfo, ConnectionProfile, IndexDef,

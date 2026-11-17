@@ -6,7 +6,11 @@
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::Selectable as _;
 use ora_core::filter::select_sql;
-use ora_core::{FilterCondition, FilterJoin, FilterOp, TableFilter, TablePage, MAX_PAGE_LIMIT};
+use ora_core::{
+    FilterCondition, FilterJoin, FilterOp, TableFilter, TablePage, MAX_PAGE_LIMIT, ROWID_COLUMN,
+};
+
+use super::cell_edit::CellEdit;
 
 /// Rows shown at once in the Structure / Index grids (no paging there).
 const INFO_GRID_ROWS: usize = 1000;
@@ -85,6 +89,8 @@ pub(super) struct DataTab {
     offset_input: Entity<InputState>,
     /// Columns hidden by the Columns picker; survive refetches.
     pub(super) hidden: HashSet<String>,
+    /// Cell edits staged or applied but not yet committed.
+    pub(super) edits: Vec<CellEdit>,
     _page_subs: Vec<Subscription>,
 }
 
@@ -113,7 +119,8 @@ impl DataTab {
                 .line_number(true)
                 .folding(true)
         });
-        let page = TablePage::default();
+        // Tables also fetch each row's ROWID, which cell edits go by.
+        let page = TablePage::default().with_rowid(kind == ObjectKind::Table);
         let limit_input = cx.new(|cx| {
             InputState::new(&mut *window, cx)
                 .placeholder("Limit")
@@ -153,6 +160,7 @@ impl DataTab {
             limit_input,
             offset_input,
             hidden: HashSet::new(),
+            edits: Vec::new(),
             _page_subs: page_subs,
         }
     }
@@ -160,6 +168,7 @@ impl DataTab {
     /// Adopt the fetched column names; rows without a column yet (the
     /// initial empty row) default to the first one.
     pub(super) fn set_columns(&mut self, columns: Vec<String>) {
+        let columns: Vec<String> = columns.into_iter().filter(|c| c != ROWID_COLUMN).collect();
         if columns.is_empty() {
             return;
         }
@@ -288,6 +297,22 @@ impl Workbench {
         cx.notify();
     }
 
+    /// True (with a status message) while the active tab holds edits that
+    /// were not sent: a refetch would silently drop them.
+    fn blocked_by_staged_edits(&mut self, cx: &mut Context<Self>) -> bool {
+        let staged = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|t| t.data.as_ref())
+            .is_some_and(|d| d.edits.iter().any(|e| !e.applied));
+        if staged {
+            self.status =
+                "Ada perubahan sel yang belum dikirim: klik Apply atau Discard dulu.".to_string();
+            cx.notify();
+        }
+        staged
+    }
+
     /// Apply one row (`only`) or every checked row, then reload the grid.
     pub(super) fn apply_filters(
         &mut self,
@@ -298,6 +323,9 @@ impl Workbench {
         if self.busy {
             self.status = "Masih ada operasi berjalan.".to_string();
             cx.notify();
+            return;
+        }
+        if self.blocked_by_staged_edits(cx) {
             return;
         }
         let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
@@ -351,6 +379,9 @@ impl Workbench {
 
     /// Set the page (clamped) and reload.
     fn show_page(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blocked_by_staged_edits(cx) {
+            return;
+        }
         let Some(data) = self.data_mut() else {
             return;
         };
@@ -361,7 +392,7 @@ impl Workbench {
             .trim()
             .parse()
             .unwrap_or(data.page.limit);
-        data.page = TablePage::new(offset, limit);
+        data.page = TablePage::new(offset, limit).with_rowid(data.page.rowid);
         let (limit_input, offset_input, page) = (
             data.limit_input.clone(),
             data.offset_input.clone(),
@@ -446,6 +477,18 @@ impl Workbench {
         if self.busy || self.session.is_none() {
             return;
         }
+        // A refetch would drop the edits that exist only in the grid.
+        let staged = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|t| t.data.as_ref())
+            .is_some_and(|d| d.edits.iter().any(|e| !e.applied));
+        if staged {
+            self.status =
+                "Ada perubahan sel yang belum dikirim: klik Apply atau Discard dulu.".to_string();
+            cx.notify();
+            return;
+        }
         let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
             return;
         };
@@ -500,6 +543,69 @@ impl Workbench {
     }
 
     // ----- rendering -----
+
+    /// A strip above the grid while cell edits wait to be sent or
+    /// committed, with Apply / Discard.
+    pub(super) fn render_edit_bar(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        let data = self.active_tab().data.as_ref()?;
+        if data.edits.is_empty() {
+            return None;
+        }
+        let busy = self.busy;
+        let staged = data.edits.iter().filter(|e| !e.applied).count();
+        let sent = data.edits.len() - staged;
+        let label = match (staged, sent) {
+            (s, 0) => format!("{s} perubahan belum dikirim ke database"),
+            (0, n) => {
+                format!("{n} perubahan terkirim, belum di-commit: pakai Commit atau Rollback")
+            }
+            (s, n) => format!("{s} belum dikirim, {n} terkirim tapi belum di-commit"),
+        };
+        let tint = if staged > 0 {
+            theme.warning
+        } else {
+            theme.primary
+        };
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(SPACE_2))
+                .px(px(SPACE_3))
+                .h(px(32.))
+                .bg(tint.opacity(0.14))
+                .border_b_1()
+                .border_color(theme.border)
+                .child(div().size(px(8.)).rounded_full().bg(tint))
+                .child(caption_text(label, theme))
+                .child(div().flex_1())
+                .when(staged > 0, |this| {
+                    this.child(
+                        Button::new("edits-discard")
+                            .small()
+                            .label("Discard")
+                            .tooltip("Buang perubahan yang belum dikirim")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.discard_edits(cx))),
+                    )
+                    .child(
+                        Button::new("edits-apply")
+                            .small()
+                            .primary()
+                            .label(format!("Apply ({staged})"))
+                            .tooltip("Kirim perubahan ke database (belum commit)")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.apply_edits(cx))),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
 
     pub(super) fn render_filter_bar(
         &self,

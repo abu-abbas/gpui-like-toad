@@ -15,12 +15,32 @@ use crate::model::{
 /// names the demo catalog, so demo behavior never looks like a real result.
 pub struct DemoClient {
     connected_user: Option<String>,
+    /// Cell edits since the last commit / rollback, and the committed ones:
+    /// the demo has no SQL engine, so edits are overlaid on the canned rows.
+    staged: Vec<DemoEdit>,
+    committed: Vec<DemoEdit>,
+}
+
+/// One edited demo cell: table, row index in the canned data, column.
+#[derive(Clone)]
+struct DemoEdit {
+    table: String,
+    row: usize,
+    column: String,
+    value: Option<String>,
+}
+
+/// The demo's ROWID of canned row `row` of `table`.
+fn demo_rowid(table: &str, row: usize) -> String {
+    format!("DEMO-{}-{row}", table.to_ascii_uppercase())
 }
 
 impl DemoClient {
     pub fn new() -> Self {
         DemoClient {
             connected_user: None,
+            staged: Vec::new(),
+            committed: Vec::new(),
         }
     }
 
@@ -253,13 +273,37 @@ impl DbClient for DemoClient {
         let started = Instant::now();
         let sql = crate::filter::select_sql(owner, table, &TableFilter::default(), page).sql;
         let all = self.query(&sql, usize::MAX)?;
-        let columns = all.columns;
-        let rows: Vec<Vec<Value>> = all
-            .rows
+        let mut columns = all.columns;
+        let mut rows: Vec<(usize, Vec<Value>)> = all.rows.into_iter().enumerate().collect();
+        for edit in self.committed.iter().chain(&self.staged) {
+            if !edit.table.eq_ignore_ascii_case(table) {
+                continue;
+            }
+            let col = columns.iter().position(|c| c.name == edit.column);
+            if let (Some(col), Some((_, row))) = (col, rows.get_mut(edit.row)) {
+                row[col] = edit.value.clone().map_or(Value::Null, Value::Text);
+            }
+        }
+        let rows: Vec<Vec<Value>> = rows
             .into_iter()
-            .filter(|row| filter.matches(&columns, row))
+            .filter(|(_, row)| filter.matches(&columns, row))
             .skip(page.offset)
+            .map(|(ix, mut row)| {
+                if page.rowid {
+                    row.insert(0, Value::Text(demo_rowid(table, ix)));
+                }
+                row
+            })
             .collect();
+        if page.rowid {
+            columns.insert(
+                0,
+                ColumnInfo {
+                    name: crate::ROWID_COLUMN.to_string(),
+                    data_type: "ROWID".to_string(),
+                },
+            );
+        }
         let mut result = finish(columns, rows, page.limit);
         result.elapsed = started.elapsed();
         Ok(result)
@@ -277,12 +321,40 @@ impl DbClient for DemoClient {
         }
     }
 
+    fn update_cell(
+        &mut self,
+        _owner: &str,
+        table: &str,
+        column: &str,
+        rowid: &str,
+        value: Option<&str>,
+    ) -> Result<(), DbError> {
+        self.require_connected()?;
+        let prefix = format!("DEMO-{}-", table.to_ascii_uppercase());
+        let row: usize = rowid
+            .strip_prefix(&prefix)
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| DbError::new("baris tidak ditemukan lagi"))?;
+        self.staged.push(DemoEdit {
+            table: table.to_string(),
+            row,
+            column: column.to_string(),
+            value: value.map(str::to_string),
+        });
+        Ok(())
+    }
+
     fn commit(&mut self) -> Result<(), DbError> {
-        self.require_connected()
+        self.require_connected()?;
+        let staged = std::mem::take(&mut self.staged);
+        self.committed.extend(staged);
+        Ok(())
     }
 
     fn rollback(&mut self) -> Result<(), DbError> {
-        self.require_connected()
+        self.require_connected()?;
+        self.staged.clear();
+        Ok(())
     }
 
     fn list_objects(&mut self, owner: &str) -> Result<Vec<SchemaObject>, DbError> {
@@ -588,6 +660,47 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn demo_cell_edits_follow_commit_and_rollback() {
+        let page = TablePage::new(0, 100).with_rowid(true);
+        let filter = TableFilter::default();
+        let first_name = |client: &mut DemoClient| {
+            let r = client
+                .query_table("HR", "EMPLOYEES", &filter, page)
+                .unwrap();
+            assert_eq!(r.columns[0].name, crate::ROWID_COLUMN);
+            let col = r
+                .columns
+                .iter()
+                .position(|c| c.name == "FIRST_NAME")
+                .unwrap();
+            r.rows[0][col].display()
+        };
+        let mut client = connected();
+        let r = client
+            .query_table("HR", "EMPLOYEES", &filter, page)
+            .unwrap();
+        let rowid = r.rows[0][0].display();
+        let original = first_name(&mut client);
+
+        client
+            .update_cell("HR", "EMPLOYEES", "FIRST_NAME", &rowid, Some("Zed"))
+            .unwrap();
+        assert_eq!(first_name(&mut client), "Zed");
+        client.rollback().unwrap();
+        assert_eq!(first_name(&mut client), original);
+
+        client
+            .update_cell("HR", "EMPLOYEES", "FIRST_NAME", &rowid, None)
+            .unwrap();
+        client.commit().unwrap();
+        client.rollback().unwrap();
+        assert_eq!(first_name(&mut client), "");
+        assert!(client
+            .update_cell("HR", "EMPLOYEES", "FIRST_NAME", "bogus", Some("x"))
+            .is_err());
     }
 
     #[test]

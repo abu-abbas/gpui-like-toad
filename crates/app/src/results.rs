@@ -8,7 +8,7 @@
 //! page boundaries stay consistent while paging.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
@@ -19,7 +19,7 @@ use gpui_kit::{
     div, px, App, Context, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
     SharedString, Styled as _, Window,
 };
-use ora_core::{FilterCondition, FilterOp, QueryResult, Value};
+use ora_core::{FilterCondition, FilterOp, QueryResult, Value, ROWID_COLUMN};
 
 use crate::theme::{FONT_GRID, LEADING_GRID};
 
@@ -48,9 +48,34 @@ pub struct ResultsDelegate {
     right_col: Option<usize>,
     /// Set on data tabs: called when a Quick Filter menu entry is picked.
     on_quick_filter: Option<QuickFilterHandler>,
+    /// Set on editable data tabs: called for double click / "Edit nilai".
+    on_edit: Option<EditHandler>,
+    /// Result column holding each row's ROWID (never shown), if fetched.
+    rowid_col: Option<usize>,
+    /// Edited cells by (ROWID, column name), tinted until commit.
+    pending: HashMap<(String, String), CellMark>,
 }
 
 pub type QuickFilterHandler = Rc<dyn Fn(FilterCondition, &mut Window, &mut App)>;
+
+/// A request to edit one cell: its row, column and current value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CellEditRequest {
+    pub rowid: String,
+    pub column: String,
+    pub value: Value,
+}
+
+pub type EditHandler = Rc<dyn Fn(CellEditRequest, &mut Window, &mut App)>;
+
+/// Where an edited cell stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellMark {
+    /// Changed in the grid only; not sent to the database yet.
+    Staged,
+    /// Sent (UPDATE ran) but not committed yet.
+    Applied,
+}
 
 /// Longest cell value shown inside a Quick Filter menu label.
 const MENU_VALUE_CHARS: usize = 32;
@@ -151,6 +176,9 @@ impl ResultsDelegate {
             page_size: PAGE_SIZE,
             right_col: None,
             on_quick_filter: None,
+            on_edit: None,
+            rowid_col: None,
+            pending: HashMap::new(),
         }
     }
 
@@ -171,6 +199,42 @@ impl ResultsDelegate {
     pub fn with_quick_filter(mut self, handler: QuickFilterHandler) -> Self {
         self.on_quick_filter = Some(handler);
         self
+    }
+
+    /// Let cells be edited (double click or the context menu).
+    pub fn with_cell_edit(mut self, handler: EditHandler) -> Self {
+        self.on_edit = Some(handler);
+        self
+    }
+
+    /// Replace the set of tinted (edited) cells.
+    pub fn set_pending(&mut self, pending: HashMap<(String, String), CellMark>) {
+        self.pending = pending;
+    }
+
+    /// Show `value` in the cell of the row with `rowid` (an edit that has
+    /// not been refetched). Returns the value it replaced.
+    pub fn set_cell(&mut self, rowid: &str, column: &str, value: Value) -> Option<Value> {
+        let rowid_col = self.rowid_col?;
+        let col = self.result.columns.iter().position(|c| c.name == column)?;
+        let row = self
+            .result
+            .rows
+            .iter_mut()
+            .find(|r| r.get(rowid_col).is_some_and(|v| v.display() == rowid))?;
+        Some(std::mem::replace(&mut row[col], value))
+    }
+
+    /// The edit request for the cell at result row `abs_row`, column
+    /// `data_col`; `None` when editing is off or the row has no ROWID.
+    fn edit_request(&self, abs_row: usize, data_col: usize) -> Option<CellEditRequest> {
+        self.on_edit.as_ref()?;
+        let rowid = self.result.get(abs_row, self.rowid_col?)?.display();
+        Some(CellEditRequest {
+            rowid,
+            column: self.result.columns.get(data_col)?.name.clone(),
+            value: self.result.get(abs_row, data_col)?.clone(),
+        })
     }
 
     /// Table column index to result column index; `None` is the gutter.
@@ -205,7 +269,7 @@ impl ResultsDelegate {
         }
         self.visible.clear();
         for (i, c) in self.result.columns.iter().enumerate() {
-            if self.hidden.contains(&c.name) {
+            if c.name == ROWID_COLUMN || self.hidden.contains(&c.name) {
                 continue;
             }
             self.visible.push(i);
@@ -226,6 +290,7 @@ impl ResultsDelegate {
 
     pub fn set_result(&mut self, result: QueryResult) {
         self.numeric = numeric_columns(&result);
+        self.rowid_col = result.columns.iter().position(|c| c.name == ROWID_COLUMN);
         self.result = result;
         self.rebuild_columns();
         self.page = 0;
@@ -364,6 +429,30 @@ impl TableDelegate for ResultsDelegate {
                 .text_color(cx.theme().muted_foreground)
                 .child((abs_row + 1).to_string());
         };
+        let request = self.edit_request(abs_row, data_col);
+        // Edited cells are tinted: amber until sent, blue once sent but
+        // not yet committed.
+        let mark = request
+            .as_ref()
+            .and_then(|r| self.pending.get(&(r.rowid.clone(), r.column.clone())))
+            .copied();
+        let theme = cx.theme();
+        let cell = match mark {
+            Some(CellMark::Staged) => cell.bg(theme.warning.opacity(0.28)),
+            Some(CellMark::Applied) => cell.bg(theme.primary.opacity(0.22)),
+            None => cell,
+        };
+        let cell = match (self.on_edit.clone(), request) {
+            (Some(handler), Some(request)) => cell.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_, event: &gpui_kit::MouseDownEvent, window, cx| {
+                    if event.click_count >= 2 {
+                        handler(request.clone(), window, cx);
+                    }
+                }),
+            ),
+            _ => cell,
+        };
         let is_null = self
             .result
             .get(abs_row, data_col)
@@ -387,13 +476,25 @@ impl TableDelegate for ResultsDelegate {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
-        let Some(handler) = self.on_quick_filter.clone() else {
-            return menu;
-        };
         let Some(data_col) = self.right_col.and_then(|c| self.data_col(c)) else {
             return menu;
         };
         let abs_row = self.absolute_row(row_ix);
+        if let (Some(handler), Some(request)) =
+            (self.on_edit.clone(), self.edit_request(abs_row, data_col))
+        {
+            menu = menu.item(
+                PopupMenuItem::new("Edit nilai…").on_click(move |_, window, cx| {
+                    handler(request.clone(), window, cx);
+                }),
+            );
+            if self.on_quick_filter.is_some() {
+                menu = menu.separator();
+            }
+        }
+        let Some(handler) = self.on_quick_filter.clone() else {
+            return menu;
+        };
         let (Some(column), Some(value)) = (
             self.result.columns.get(data_col),
             self.result.get(abs_row, data_col),

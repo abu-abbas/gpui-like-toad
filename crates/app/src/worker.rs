@@ -64,6 +64,15 @@ impl Password {
     }
 }
 
+/// One cell edit of a data tab: the row (by ROWID), the column and the new
+/// value (`None` = NULL).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellUpdate {
+    pub rowid: String,
+    pub column: String,
+    pub value: Option<String>,
+}
+
 pub enum Job {
     Connect {
         profile: ConnectionProfile,
@@ -89,6 +98,13 @@ pub enum Job {
         name: String,
         filter: TableFilter,
         page: TablePage,
+    },
+    /// Data tab cell edits: one `UPDATE` per cell, in order, stopping at
+    /// the first failure. Not committed.
+    UpdateCells {
+        owner: String,
+        name: String,
+        edits: Vec<CellUpdate>,
     },
     Commit,
     Rollback,
@@ -152,6 +168,12 @@ pub enum Response {
         truncated: bool,
     },
     Imported(u64),
+    /// How many of the cell edits went through, and why the next one
+    /// failed, if one did.
+    CellsUpdated {
+        done: usize,
+        error: Option<String>,
+    },
     Described(Vec<ColumnDef>),
     Indexes(Vec<IndexDef>),
     Plan(Vec<String>),
@@ -283,6 +305,30 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                 Ok(result) => Response::QueryDone(result),
                 Err(err) => Response::Failed(err.to_string()),
             },
+            None => Response::Failed("not connected".to_string()),
+        },
+        Job::UpdateCells { owner, name, edits } => match client.as_mut() {
+            Some(client) => {
+                let mut done = 0;
+                let mut error = None;
+                for edit in &edits {
+                    let result = client.update_cell(
+                        &owner,
+                        &name,
+                        &edit.column,
+                        &edit.rowid,
+                        edit.value.as_deref(),
+                    );
+                    match result {
+                        Ok(()) => done += 1,
+                        Err(err) => {
+                            error = Some(format!("{}: {err}", edit.column));
+                            break;
+                        }
+                    }
+                }
+                Response::CellsUpdated { done, error }
+            }
             None => Response::Failed("not connected".to_string()),
         },
         Job::Commit => match client.as_mut() {
