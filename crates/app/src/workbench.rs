@@ -2612,7 +2612,8 @@ impl Workbench {
                             .on_click(move |_, window, cx: &mut App| {
                                 toggle_view.update(cx, |this, cx| {
                                     if this.conn.session.is_some() {
-                                        this.disconnect(cx);
+                                        let id = this.conn.id;
+                                        this.request_disconnect(id, window, cx);
                                     } else {
                                         this.reconnect_last(window, cx);
                                     }
@@ -3492,7 +3493,6 @@ impl Workbench {
             .child(
                 Button::new("new-sql")
                     .small()
-                    .label("New SQL")
                     .icon(IconName::SquarePen)
                     .disabled(no_session)
                     .tooltip("Buka tab SQL editor baru")
@@ -3502,7 +3502,6 @@ impl Workbench {
             .child(
                 Button::new("run")
                     .small()
-                    .label(if data_tab { "Refresh" } else { "Run" })
                     .icon(if data_tab {
                         IconName::RefreshCw
                     } else {
@@ -3511,14 +3510,17 @@ impl Workbench {
                     .primary()
                     .loading(self.conn.busy)
                     .disabled(on_home || no_session)
-                    .tooltip("Run (Cmd/Ctrl+Enter atau F5)")
+                    .tooltip(if data_tab {
+                        "Refresh data (Cmd/Ctrl+Enter atau F5)"
+                    } else {
+                        "Run (Cmd/Ctrl+Enter atau F5)"
+                    })
                     .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
             )
             .when(!data_tab, |bar| {
                 bar.child(
                     Button::new("run-current")
                         .small()
-                        .label("Run Current")
                         .icon(IconName::ListEnd)
                         .disabled(on_home || no_session || self.conn.busy)
                         .tooltip("Jalankan seleksi, atau statement di posisi kursor (dipisah ;)")
@@ -3529,7 +3531,7 @@ impl Workbench {
                 bar.child(
                     Button::new("explain")
                         .small()
-                        .label("Explain")
+                        .tooltip("Explain plan")
                         .icon(IconName::ChartColumn)
                         .disabled(on_home || no_session || self.conn.busy)
                         .on_click(cx.listener(|this, _, _, cx| this.explain(cx))),
@@ -3539,7 +3541,7 @@ impl Workbench {
                 bar.child(
                     Button::new("format")
                         .small()
-                        .label("Beautify")
+                        .tooltip("Beautify SQL")
                         .icon(IconName::WandSparkles)
                         .disabled(on_home || no_session)
                         .on_click(
@@ -3550,7 +3552,7 @@ impl Workbench {
             .child(
                 Button::new("stop")
                     .small()
-                    .label("Stop")
+                    .tooltip("Stop (respons operasi yang berjalan diabaikan)")
                     .icon(IconName::Square)
                     .disabled(no_session || !self.conn.busy)
                     .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
@@ -3558,7 +3560,7 @@ impl Workbench {
             .child(
                 Button::new("commit")
                     .small()
-                    .label("Commit")
+                    .tooltip("Commit")
                     .icon(IconName::Check)
                     .ghost()
                     .disabled(no_session || self.conn.busy)
@@ -3567,7 +3569,7 @@ impl Workbench {
             .child(
                 Button::new("rollback")
                     .small()
-                    .label("Rollback")
+                    .tooltip("Rollback")
                     .icon(IconName::Undo2)
                     .ghost()
                     .disabled(no_session || self.conn.busy)
@@ -4447,30 +4449,31 @@ impl Workbench {
             })
         };
         // An open connection's tile: switch to it (Buka) or close it.
-        let open_actions = |key: String, id: u64, cx: &mut Context<Self>| {
-            div()
-                .flex()
-                .flex_row()
-                .gap(px(SPACE_2))
-                .child(
-                    Button::new(format!("{key}-open"))
-                        .flex_1()
-                        .label("Buka")
-                        .icon(IconName::LogIn)
-                        .on_click(
-                            cx.listener(move |this, _, window, cx| {
+        let open_actions =
+            |key: String, id: u64, cx: &mut Context<Self>| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(SPACE_2))
+                    .child(
+                        Button::new(format!("{key}-open"))
+                            .flex_1()
+                            .label("Buka")
+                            .icon(IconName::LogIn)
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 this.switch_conn(id, window, cx)
-                            }),
-                        ),
-                )
-                .child(
-                    Button::new(format!("{key}-disconnect"))
-                        .label("Disconnect")
-                        .icon(IconName::LogOut)
-                        .disabled(self.conn_by_id(id).is_some_and(|c| c.busy))
-                        .on_click(cx.listener(move |this, _, _, cx| this.disconnect_conn(id, cx))),
-                )
-        };
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("{key}-disconnect"))
+                            .label("Disconnect")
+                            .icon(IconName::LogOut)
+                            .disabled(self.conn_by_id(id).is_some_and(|c| c.busy))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.request_disconnect(id, window, cx)
+                            })),
+                    )
+            };
         let demo_open = self.find_open_conn(None, true);
         if self.show_demo || demo_open.is_some() {
             grid = grid.child(
@@ -4716,9 +4719,10 @@ impl Render for Workbench {
                     this.reconnect_last(window, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &DisconnectSession, _, cx| {
+            .on_action(cx.listener(|this, _: &DisconnectSession, window, cx| {
                 if this.conn.session.is_some() && !this.conn.busy {
-                    this.disconnect(cx);
+                    let id = this.conn.id;
+                    this.request_disconnect(id, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &RefreshSchema, _, cx| {

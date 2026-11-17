@@ -355,8 +355,11 @@ impl Workbench {
                 PopupMenuItem::new("Disconnect koneksi ini")
                     .icon(Icon::new(IconName::LogOut))
                     .disabled(!connected || busy)
-                    .on_click(move |_, _, cx: &mut App| {
-                        disconnect_view.update(cx, |this, cx| this.disconnect(cx));
+                    .on_click(move |_, window, cx: &mut App| {
+                        disconnect_view.update(cx, |this, cx| {
+                            let id = this.conn.id;
+                            this.request_disconnect(id, window, cx)
+                        });
                     }),
             )
         })
@@ -428,5 +431,131 @@ impl Workbench {
         if let Some(prev) = back_to {
             self.activate_conn(prev, cx);
         }
+    }
+}
+
+impl Workbench {
+    /// Disconnect from the UI: close connection `id` together with its
+    /// tabs. SQL tabs that hold text are offered for saving first (Save
+    /// asks for a file per tab; Cancel at any point keeps the connection).
+    pub(super) fn request_disconnect(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let scripts: Vec<(u64, String)> = self
+            .tabs
+            .iter()
+            .filter(|t| t.conn == Some(id) && t.data.is_none())
+            .filter(|t| !t.editor.read(cx).value().trim().is_empty())
+            .map(|t| (t.id, t.title.clone()))
+            .collect();
+        if scripts.is_empty() {
+            self.finish_disconnect(id, cx);
+            return;
+        }
+        let label = self.conn_by_id(id).map_or_else(String::new, |c| c.label());
+        let names = scripts
+            .iter()
+            .map(|(_, title)| title.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let answer = window.prompt(
+            gpui_kit::PromptLevel::Warning,
+            &format!("Simpan script sebelum disconnect {label}?"),
+            Some(&format!("Tab ini akan ditutup: {names}")),
+            &["Simpan…", "Jangan simpan", "Batal"],
+            cx,
+        );
+        cx.spawn(async move |view, cx| {
+            match answer.await {
+                Ok(0) => {}
+                Ok(1) => {
+                    let _ = view.update(cx, |this, cx| this.finish_disconnect(id, cx));
+                    return;
+                }
+                _ => return,
+            }
+            for (tab_id, _) in scripts {
+                let request = view.update(cx, |this, cx| {
+                    let tab = this.tabs.iter().find(|t| t.id == tab_id)?;
+                    let text = tab.editor.read(cx).value().to_string();
+                    let name = script_filename(&tab.title);
+                    let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                    let prompt = cx.prompt_for_new_path(&dir, Some(&name));
+                    Some((tab.title.clone(), text, dir.join(name), prompt))
+                });
+                let Ok(Some((title, text, fallback, prompt))) = request else {
+                    continue;
+                };
+                let path = match prompt.await {
+                    Ok(Ok(Some(path))) => path,
+                    // Cancelled: keep the connection and its tabs.
+                    Ok(Ok(None)) => return,
+                    // No file dialog on this platform.
+                    _ => fallback,
+                };
+                let written = std::fs::write(&path, text);
+                let ok = written.is_ok();
+                let _ = view.update(cx, |this, cx| {
+                    match written {
+                        Ok(()) => this
+                            .push_message(format!("Script {title} tersimpan: {}", path.display())),
+                        Err(err) => this.push_message(format!(
+                            "Gagal menyimpan {title}: {err}. Disconnect dibatalkan."
+                        )),
+                    }
+                    cx.notify();
+                });
+                if !ok {
+                    return;
+                }
+            }
+            let _ = view.update(cx, |this, cx| this.finish_disconnect(id, cx));
+        })
+        .detach();
+    }
+
+    /// Close connection `id` (if still open) and every tab bound to it.
+    fn finish_disconnect(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.conn_by_id(id).is_some_and(|c| c.is_open()) {
+            self.disconnect_conn(id, cx);
+        }
+        self.close_tabs_where(|_, t, _| t.conn == Some(id), cx);
+        self.follow_tab_conn(cx);
+        cx.notify();
+    }
+}
+
+/// File name offered when saving a tab's script: its title, `.sql`
+/// added unless already there, path separators replaced.
+fn script_filename(title: &str) -> String {
+    let base: String = title
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if base.to_ascii_lowercase().ends_with(".sql") {
+        base
+    } else {
+        format!("{base}.sql")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::script_filename;
+
+    #[test]
+    fn script_filename_adds_sql_once_and_strips_separators() {
+        assert_eq!(script_filename("Query 2"), "Query 2.sql");
+        assert_eq!(script_filename("EMPLOYEES.sql"), "EMPLOYEES.sql");
+        assert_eq!(script_filename("HR/EMP:x"), "HR_EMP_x.sql");
     }
 }
