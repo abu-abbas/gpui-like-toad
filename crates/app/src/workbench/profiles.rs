@@ -11,6 +11,7 @@ pub(super) struct ConnectionForm {
     /// Connection dialog mode: separate host/port/service (Basic) or one
     /// TNS alias / connect descriptor.
     pub(super) use_tns: bool,
+    pub(super) show_advanced: bool,
     /// Feedback shown inside the connection dialog: (is_error, text).
     pub(super) form_notice: Option<(bool, String)>,
     pub(super) password_input: Entity<InputState>,
@@ -52,6 +53,7 @@ impl ConnectionForm {
             service_input,
             tns_input,
             use_tns: false,
+            show_advanced: false,
             form_notice: None,
             password_input,
             save_password: false,
@@ -216,6 +218,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.connection_form.show_advanced = false;
         Self::set_input(
             &self.connection_form.name_input.clone(),
             profile.name.clone(),
@@ -309,6 +312,7 @@ impl Workbench {
     fn new_profile_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.connection_form.editing_profile = None;
         self.connection_form.use_tns = false;
+        self.connection_form.show_advanced = false;
         self.connection_form.form_notice = None;
         self.conn.connect_error = None;
         Self::set_input(
@@ -398,6 +402,7 @@ impl Workbench {
         let username = Self::input_text(&self.connection_form.user_input, cx);
         let connect_string = self.form_connect_string(cx);
         if username.is_empty() || connect_string.is_empty() {
+            self.connection_form.show_advanced = false;
             self.connection_form.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
             cx.notify();
             return false;
