@@ -645,7 +645,7 @@ impl Render for Workbench {
                             .child(
                                 resizable_panel()
                                     .size(px(EXPLORER_WIDTH))
-                                    .size_range(px(190.)..px(440.))
+                                    .size_range(px(190.)..px(560.))
                                     .child(secondary),
                             )
                             .child(resizable_panel().child(main))

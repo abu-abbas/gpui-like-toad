@@ -19,6 +19,30 @@ impl Render for ProfileDrag {
     }
 }
 
+#[derive(Clone)]
+struct FolderDrag {
+    path: String,
+}
+
+impl Render for FolderDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .px(px(SPACE_2))
+            .py(px(SPACE_1))
+            .rounded(px(RADIUS_MD))
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .child(
+                self.path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&self.path)
+                    .to_owned(),
+            )
+    }
+}
+
 fn folder_color(name: &str, theme: &gpui_kit::component::Theme) -> Hsla {
     theme::ACCENTS
         .iter()
@@ -376,7 +400,71 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Move folder `from` (with everything in it) under `target`
+    /// (`""` = top level). Refuses its own subtree and name clashes.
+    fn move_folder(&mut self, from: &str, target: &str, cx: &mut Context<Self>) {
+        let name = from.rsplit('/').next().unwrap_or(from);
+        let parent = from.rsplit_once('/').map_or("", |(p, _)| p);
+        if target == parent {
+            return;
+        }
+        if store::folder_in(target, from) {
+            self.conn.status = "A folder cannot go inside itself.".into();
+            cx.notify();
+            return;
+        }
+        let new_path = if target.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{target}/{name}")
+        };
+        if self.all_folder_paths().contains(&new_path) {
+            self.conn.status = format!("'{name}' already exists in that folder.");
+            cx.notify();
+            return;
+        }
+        match self.rebase_folders(from, &new_path, false) {
+            Ok(()) => {
+                self.collapsed_connection_folders.remove(target);
+                self.side_conn_folded = false;
+            }
+            Err(err) => self.push_message(format!("Could not move folder: {err}")),
+        }
+        cx.notify();
+    }
+
+    /// The connections tree inside a scroll area in both directions: deep
+    /// nesting can outgrow the column, then a horizontal scrollbar appears.
     pub(super) fn render_profile_list(
+        &self,
+        keyboard: bool,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let depth = self
+            .all_folder_paths()
+            .iter()
+            .map(|f| f.split('/').count())
+            .max()
+            .unwrap_or(0);
+        let min_width = EXPLORER_WIDTH + 28. * depth as f32;
+        div()
+            .id("connections-scroll")
+            .flex()
+            .flex_col()
+            .min_h(px(0.))
+            .overflow_scroll()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .min_w(px(min_width))
+                    .child(self.render_profile_tree(keyboard, theme, cx)),
+            )
+    }
+
+    fn render_profile_tree(
         &self,
         keyboard: bool,
         theme: &gpui_kit::component::Theme,
@@ -384,12 +472,7 @@ impl Workbench {
     ) -> impl IntoElement {
         let profiles = self.profiles.len();
         let folded = self.side_conn_folded;
-        let mut tree = div()
-            .id("connections-tree")
-            .flex()
-            .flex_col()
-            .min_h(px(0.))
-            .overflow_y_scroll();
+        let mut tree = div().id("connections-tree").flex().flex_col().min_h(px(0.));
         let drop_highlight = theme.accent;
         let root_view = cx.entity();
         tree = tree.child(
@@ -399,6 +482,10 @@ impl Workbench {
                 .drag_over::<ProfileDrag>(move |style, _, _, _| style.bg(drop_highlight))
                 .on_drop(cx.listener(|this, drag: &ProfileDrag, _, cx| {
                     this.move_profile_to_folder(&drag.id, "", cx);
+                }))
+                .drag_over::<FolderDrag>(move |style, _, _, _| style.bg(drop_highlight))
+                .on_drop(cx.listener(|this, drag: &FolderDrag, _, cx| {
+                    this.move_folder(&drag.path, "", cx);
                 }))
                 .context_menu(move |menu, _, _| menu.item(new_folder_item(&root_view, "")))
                 .child(
@@ -550,6 +637,8 @@ impl Workbench {
             let indent = 12. * (parts.len() - 1) as f32;
             let collapsed = self.collapsed_connection_folders.contains(&name);
             let drop_folder = name.clone();
+            let drop_into = name.clone();
+            let drag_path = name.clone();
             let menu_folder = name.clone();
             let view = cx.entity();
             let color = folder_color(
@@ -566,6 +655,14 @@ impl Workbench {
                     .drag_over::<ProfileDrag>(move |style, _, _, _| style.bg(drop_highlight))
                     .on_drop(cx.listener(move |this, drag: &ProfileDrag, _, cx| {
                         this.move_profile_to_folder(&drag.id, &drop_folder, cx);
+                    }))
+                    .on_drag(FolderDrag { path: drag_path }, |drag, _, _, cx| {
+                        let preview = drag.clone();
+                        cx.new(|_| preview)
+                    })
+                    .drag_over::<FolderDrag>(move |style, _, _, _| style.bg(drop_highlight))
+                    .on_drop(cx.listener(move |this, drag: &FolderDrag, _, cx| {
+                        this.move_folder(&drag.path, &drop_into, cx);
                     }))
                     .context_menu(move |menu, window, cx| {
                         let folder = menu_folder.clone();
