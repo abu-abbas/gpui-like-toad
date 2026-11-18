@@ -368,6 +368,8 @@ pub struct Workbench {
     rail: RailPanel,
     sidebar_compact: bool,
     folder_draft: Option<(String, Entity<InputState>)>,
+    folder_rename: Option<(String, Entity<InputState>)>,
+    folder_delete: Option<connection_tree::FolderDelete>,
     collapsed_connection_folders: HashSet<String>,
     connection_folder_colors: std::collections::BTreeMap<String, String>,
     focused_profile_id: Option<String>,
@@ -457,6 +459,8 @@ impl Workbench {
             rail: RailPanel::Connections,
             sidebar_compact: false,
             folder_draft: None,
+            folder_rename: None,
+            folder_delete: None,
             collapsed_connection_folders: HashSet::new(),
             connection_folder_colors: store::load_connection_folder_colors(),
             focused_profile_id: None,
@@ -663,6 +667,9 @@ impl Render for Workbench {
             })
             .when(self.disconnect_prompt.is_some(), |this| {
                 this.child(self.render_disconnect_prompt(&theme, cx))
+            })
+            .when(self.folder_delete.is_some(), |this| {
+                this.child(self.render_folder_delete(&theme, cx))
             })
             .when(self.settings.open, |this| {
                 this.child(self.render_settings_dialog(&theme, cx))

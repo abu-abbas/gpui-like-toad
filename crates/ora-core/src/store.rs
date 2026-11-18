@@ -613,6 +613,29 @@ pub fn save_profiles(profiles: &[SavedProfile]) -> std::io::Result<()> {
     save_profiles_in(&config_dir(), profiles)
 }
 
+/// Whether `folder` is `root` or lies somewhere below it.
+pub fn folder_in(folder: &str, root: &str) -> bool {
+    folder == root
+        || folder
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Re-root `folder` from `from` to `to` (`to` empty means the top level):
+/// `a/b/c` moved from `a/b` to `x` becomes `x/c`, and `a/b` itself becomes
+/// `x`. `None` when `folder` is not inside `from`.
+pub fn folder_rebase(folder: &str, from: &str, to: &str) -> Option<String> {
+    if !folder_in(folder, from) {
+        return None;
+    }
+    let rest = folder[from.len()..].trim_start_matches('/');
+    Some(match (to.is_empty(), rest.is_empty()) {
+        (true, _) => rest.to_owned(),
+        (false, true) => to.to_owned(),
+        (false, false) => format!("{to}/{rest}"),
+    })
+}
+
 /// Local colors for sidebar folders. A color can outlive a folder becoming
 /// empty so it is restored when a connection is moved back into that folder.
 pub fn load_connection_folder_colors() -> BTreeMap<String, String> {
@@ -1020,6 +1043,17 @@ pub fn save_update_prefs(prefs: &UpdatePrefs) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn folder_paths_rebase() {
+        use super::{folder_in, folder_rebase};
+        assert!(folder_in("a/b", "a") && !folder_in("ab", "a") && folder_in("a", "a"));
+        assert_eq!(folder_rebase("a/b/c", "a/b", "x").as_deref(), Some("x/c"));
+        assert_eq!(folder_rebase("a/b", "a/b", "x").as_deref(), Some("x"));
+        assert_eq!(folder_rebase("a/b", "a/b", "").as_deref(), Some(""));
+        assert_eq!(folder_rebase("a/b/c", "a/b", "").as_deref(), Some("c"));
+        assert_eq!(folder_rebase("ab", "a", "x"), None);
+    }
+
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
