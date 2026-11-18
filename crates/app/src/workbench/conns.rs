@@ -665,6 +665,7 @@ impl Workbench {
             let username = Self::input_text(&self.connection_form.user_input, cx);
             let connect_string = self.form_connect_string(cx);
             if username.is_empty() || connect_string.is_empty() {
+                self.connection_form.show_advanced = false;
                 self.connection_form.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
                 cx.notify();
                 return;
@@ -805,6 +806,7 @@ impl Workbench {
         let username = Self::input_text(&self.connection_form.user_input, cx);
         let connect_string = self.form_connect_string(cx);
         if username.is_empty() || connect_string.is_empty() {
+            self.connection_form.show_advanced = false;
             self.connection_form.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
             cx.notify();
             return;
