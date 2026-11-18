@@ -1,164 +1,6 @@
 use super::*;
 
-impl Workbench {
-    /// One "Light theme" / "Dark theme" picker: Ora first, then the
-    /// bundled gpui-kit themes for that mode.
-    fn render_theme_picker(
-        &self,
-        dark: bool,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let names = theme::theme_names(cx);
-        let current = if dark { names.dark } else { names.light };
-        let options = theme::theme_names_for(dark, cx);
-        // A saved name that no longer exists shows (and acts) as Ora.
-        let current = current.filter(|c| options.contains(c));
-        let label = current
-            .clone()
-            .unwrap_or_else(|| theme::ORA_THEME_LABEL.to_string());
-        let view = cx.entity();
-        let id = if dark {
-            "theme-dark-select"
-        } else {
-            "theme-light-select"
-        };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(SPACE_1))
-            .child(caption_text(
-                if dark { "Dark theme" } else { "Light theme" }.to_string(),
-                theme,
-            ))
-            .child(
-                Button::new(id)
-                    .child(select_trigger(label, theme))
-                    .w_full()
-                    .dropdown_menu(move |menu, _, _| {
-                        let mut menu = menu.scrollable(true).max_h(px(360.)).min_w(px(220.));
-                        let entries =
-                            std::iter::once(None).chain(options.iter().cloned().map(Some));
-                        for entry in entries {
-                            let view = view.clone();
-                            let checked = entry == current;
-                            let text = entry
-                                .clone()
-                                .unwrap_or_else(|| theme::ORA_THEME_LABEL.to_string());
-                            menu = menu.item(PopupMenuItem::new(text).checked(checked).on_click(
-                                move |_, window, cx: &mut App| {
-                                    let entry = entry.clone();
-                                    view.update(cx, |this, cx| {
-                                        this.set_theme_name(dark, entry, window, cx)
-                                    });
-                                },
-                            ));
-                        }
-                        menu
-                    }),
-            )
-    }
-
-    pub(super) fn render_settings_panel(
-        &self,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut panel = div().flex().flex_col().size_full().bg(theme.sidebar);
-        // flex_none: the header keeps its height when the body is taller
-        // than the panel; the body scrolls instead.
-        panel = panel.child(self.render_panel_header("Settings", theme).flex_none());
-        let mut body = div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .gap(px(SPACE_2))
-            .p(px(SPACE_3))
-            .child(form_label("Appearance", theme));
-        for (pref, icon_name, label) in [
-            (ThemePreference::Light, IconName::Sun, "Light"),
-            (ThemePreference::Dark, IconName::Moon, "Dark"),
-            (ThemePreference::System, IconName::Monitor, "System"),
-        ] {
-            let selected = self.theme_pref == pref;
-            let mut row = div()
-                .id(format!("theme-{label}"))
-                .flex()
-                .flex_row()
-                .items_center()
-                .h(px(TOOLBAR_HEIGHT))
-                .gap(px(SPACE_2))
-                .px(px(SPACE_2))
-                .rounded(px(RADIUS_MD))
-                .on_click(cx.listener(move |this, _, window, cx| this.set_theme(pref, window, cx)));
-            if selected {
-                row = row.bg(theme.accent);
-            } else {
-                row = row.hover(|this| this.bg(theme.secondary));
-            }
-            let color = if selected {
-                theme.accent_foreground
-            } else {
-                theme.foreground
-            };
-            row = row
-                .child(icon(
-                    icon_name,
-                    16.,
-                    if selected {
-                        theme.primary
-                    } else {
-                        theme.muted_foreground
-                    },
-                ))
-                .child(
-                    div()
-                        .text_size(px(FONT_LABEL))
-                        .line_height(px(LEADING_LABEL))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(color)
-                        .child(label),
-                )
-                .child(div().flex_1());
-            if selected {
-                row = row.child(icon(IconName::Check, 14., theme.primary));
-            }
-            body = body.child(row);
-        }
-        body = body
-            .child(div().h(px(SPACE_2)))
-            .child(self.render_theme_picker(false, theme, cx))
-            .child(self.render_theme_picker(true, theme, cx))
-            .child(caption_text(
-                "Color themes bundled from gpui-kit. Light/Dark/System above decides which one is shown.".to_string(),
-                theme,
-            ))
-            .child(div().h(px(SPACE_4)))
-            .child(self.render_update_settings(theme, cx))
-            .child(div().h(px(SPACE_4)))
-            .child(form_label("About", theme))
-            .child(body_text(
-                format!(concat!(app_name!(), " {}"), env!("CARGO_PKG_VERSION")),
-                theme,
-            ))
-            .child(caption_text(
-                "Oracle database client built with GPUI + Rust.".to_string(),
-                theme,
-            ))
-            .child(caption_text(
-                "Theme preference, saved connections, and query history are stored in your user config directory. Passwords are only saved when you tick \"Save password\", and then in the OS keychain, never in these files.".to_string(),
-                theme,
-            ));
-        panel.child(
-            div()
-                .id("settings-scroll")
-                .flex_1()
-                .min_h(px(0.))
-                .overflow_y_scroll()
-                .child(body),
-        )
-    }
-}
+mod appearance;
 
 impl Workbench {
     /// Pick the color theme for light (`dark == false`) or dark mode;
@@ -177,7 +19,7 @@ impl Workbench {
             names.light = name;
         }
         theme::set_theme_names(names.clone(), cx);
-        theme::apply_preference(self.theme_pref, window, cx);
+        theme::apply_preference(theme::preference(cx), window, cx);
         if let Err(err) = store::save_theme_names(&names) {
             self.push_message(format!("Gagal menyimpan pilihan tema: {err}"));
         }
@@ -185,11 +27,272 @@ impl Workbench {
     }
 
     fn set_theme(&mut self, pref: ThemePreference, window: &mut Window, cx: &mut Context<Self>) {
-        self.theme_pref = pref;
         theme::apply_preference(pref, window, cx);
         if let Err(err) = store::save_theme_preference(pref) {
             self.push_message(format!("Gagal menyimpan preferensi tema: {err}"));
         }
         cx.notify();
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsPage {
+    Appearance,
+    Updates,
+    About,
+}
+
+impl SettingsPage {
+    const ALL: [Self; 3] = [Self::Appearance, Self::Updates, Self::About];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Appearance => "Appearance",
+            Self::Updates => "Updates",
+            Self::About => "About Ora",
+        }
+    }
+
+    fn keywords(self) -> &'static str {
+        match self {
+            Self::Appearance => "appearance theme light dark system color accent font size motion",
+            Self::Updates => "updates check download version",
+            Self::About => "about ora version",
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::Appearance => IconName::Sun,
+            Self::Updates => IconName::Download,
+            Self::About => IconName::Info,
+        }
+    }
+}
+
+pub(super) struct SettingsState {
+    pub(super) open: bool,
+    page: SettingsPage,
+    pub(super) search: Entity<InputState>,
+    previous_focus: Option<gpui_kit::FocusHandle>,
+}
+
+impl SettingsState {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<Workbench>) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
+        Self {
+            open: false,
+            page: SettingsPage::Appearance,
+            search,
+            previous_focus: None,
+        }
+    }
+}
+
+impl Workbench {
+    pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.open {
+            return;
+        }
+        self.settings.previous_focus = window.focused(cx);
+        self.settings.open = true;
+        Self::set_input(&self.settings.search, String::new(), window, cx);
+        self.settings
+            .search
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings.open = false;
+        let focus = self
+            .settings
+            .previous_focus
+            .take()
+            .unwrap_or_else(|| self.focus_handle.clone());
+        focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn update_appearance(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut store::AppearancePrefs),
+    ) {
+        let mut prefs = theme::appearance(cx);
+        change(&mut prefs);
+        if let Err(err) = store::save_appearance(&prefs) {
+            self.push_message(format!("Gagal menyimpan pengaturan tampilan: {err}"));
+        }
+        theme::set_appearance(prefs, cx);
+        theme::apply_preference(theme::preference(cx), window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn render_settings_dialog(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let filter = Self::input_text(&self.settings.search, cx).to_lowercase();
+        let pages: Vec<_> = SettingsPage::ALL
+            .into_iter()
+            .filter(|page| page.keywords().contains(&filter))
+            .collect();
+        let page = pages
+            .contains(&self.settings.page)
+            .then_some(self.settings.page)
+            .or_else(|| pages.first().copied());
+
+        let mut nav = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .h_full()
+            .w(px(224.))
+            .bg(theme.sidebar)
+            .p(px(SPACE_3))
+            .gap(px(SPACE_2))
+            .child(
+                div()
+                    .px(px(SPACE_1))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(theme::ui_size(theme, FONT_HEADING_MD))
+                    .child("Settings"),
+            )
+            .child(Input::new(&self.settings.search).small().w_full());
+        for entry in pages {
+            let selected = page == Some(entry);
+            nav = nav.child(
+                Button::new(entry.label())
+                    .small()
+                    .ghost()
+                    .w_full()
+                    .when(selected, |button| button.bg(theme.accent))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings.page = entry;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .w_full()
+                            .items_center()
+                            .gap(px(SPACE_2))
+                            .child(icon(
+                                entry.icon(),
+                                16.,
+                                if selected {
+                                    theme.primary
+                                } else {
+                                    theme.muted_foreground
+                                },
+                            ))
+                            .child(entry.label()),
+                    ),
+            );
+        }
+
+        let content = div()
+            .id("settings-content")
+            .flex_1()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .p(px(SPACE_6))
+                    .gap(px(SPACE_4))
+                    .child(
+                        div()
+                            .pr(px(36.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(theme::ui_size(theme, FONT_HEADING_XL))
+                            .child(page.map_or("No matching settings", SettingsPage::label)),
+                    )
+                    .children(match page {
+                        Some(SettingsPage::Appearance) => {
+                            Some(self.render_appearance(theme, cx).into_any_element())
+                        }
+                        Some(SettingsPage::Updates) => {
+                            Some(self.render_update_settings(theme, cx).into_any_element())
+                        }
+                        Some(SettingsPage::About) => Some(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(SPACE_2))
+                                .child(format!(
+                                    concat!(app_name!(), " {}"),
+                                    env!("CARGO_PKG_VERSION")
+                                ))
+                                .child(caption_text(
+                                    "Oracle database client built with GPUI and Rust.".into(),
+                                    theme,
+                                ))
+                                .into_any_element(),
+                        ),
+                        None => None,
+                    }),
+            );
+        div()
+            .id("settings-scrim")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui_kit::black().opacity(0.32))
+            .p(px(SPACE_4))
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.close_settings(window, cx)),
+            )
+            .on_key_down(
+                cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        cx.stop_propagation();
+                        this.close_settings(window, cx);
+                    }
+                }),
+            )
+            .child(
+                div()
+                    .id("settings-dialog")
+                    .relative()
+                    .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation()
+                    })
+                    .flex()
+                    .size_full()
+                    .max_w(px(920.))
+                    .max_h(px(690.))
+                    .overflow_hidden()
+                    .rounded(px(12.))
+                    .shadow_lg()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    .child(nav)
+                    .child(content)
+                    .child(
+                        div().absolute().top(px(SPACE_3)).right(px(SPACE_3)).child(
+                            Button::new("close-settings")
+                                .small()
+                                .ghost()
+                                .icon(IconName::X)
+                                .tooltip("Close Settings")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.close_settings(window, cx)
+                                })),
+                        ),
+                    ),
+            )
     }
 }

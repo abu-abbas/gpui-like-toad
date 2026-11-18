@@ -25,7 +25,7 @@ use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, ShowCompleti
 use gpui_kit::prelude::*;
 use gpui_kit::{
     actions, application, assets, init, App, Bounds, KeyBinding, Menu, MenuItem, OsAction, Point,
-    Size, SystemMenuType, TitlebarOptions, WindowBounds, WindowOptions,
+    Size, SystemMenuType, WindowBounds,
 };
 
 actions!(
@@ -42,10 +42,7 @@ actions!(
     ]
 );
 
-/// Font family for ALL UI text, per the design system (spec §2): JetBrains
-/// Mono everywhere, including toolbar, tree, grid, and status bar. The TTFs
-/// are bundled under `assets/fonts/` so the UI renders identically with or
-/// without the font installed.
+/// Bundled font used by the SQL editor.
 pub const MONO_FONT_FAMILY: &str = "JetBrains Mono";
 
 fn main() {
@@ -83,6 +80,7 @@ fn main() {
         for err in theme::register_bundled_themes(cx) {
             eprintln!("warning: bundled theme failed to load: {err}");
         }
+        theme::init_appearance(cx);
         theme::set_theme_names(ora_core::store::load_theme_names(), cx);
         // Cmd/Ctrl+Enter and F5 run the active query. "cmd" is the
         // platform modifier (Command on macOS, Super/Win elsewhere);
@@ -98,6 +96,7 @@ fn main() {
             // provider react, i.e. the SQL tabs.
             KeyBinding::new("ctrl-space", ShowCompletions, Some("Input")),
             KeyBinding::new("cmd-,", workbench::OpenSettings, None),
+            KeyBinding::new("ctrl-,", workbench::OpenSettings, None),
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-h", Hide, None),
             KeyBinding::new("alt-cmd-h", HideOthers, None),
@@ -180,7 +179,7 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&mut gpui_kit::Window)) {
 /// reopen handler when every window has been closed.
 fn open_main_window(cx: &mut App) {
     let pref = ora_core::store::load_theme_preference();
-    let mut options = WindowOptions::default();
+    let mut options = gpui_kit::component::TitleBar::window_options();
     options.window_bounds = Some(WindowBounds::Windowed(Bounds::new(
         Point::default(),
         Size {
@@ -204,11 +203,9 @@ fn open_main_window(cx: &mut App) {
     {
         options.icon = linux_window_icon();
     }
-    options.titlebar = Some(TitlebarOptions {
-        title: Some(app_name!().into()),
-        appears_transparent: false,
-        traffic_light_position: None,
-    });
+    if let Some(titlebar) = &mut options.titlebar {
+        titlebar.title = Some(app_name!().into());
+    }
     // `gpui_kit::open_window` wraps the content in a Root, which owns the
     // tooltip layer; with a bare `cx.open_window` no tooltip ever shows.
     if let Err(err) = gpui_kit::open_window(options, cx, |window, cx| {

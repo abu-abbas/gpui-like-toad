@@ -129,7 +129,7 @@ impl Workbench {
                 .h(px(TREE_ROW_HEIGHT))
                 .px(px(SPACE_2))
                 .rounded(px(RADIUS_SM))
-                .text_size(px(FONT_LABEL))
+                .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                 .line_height(px(LEADING_LABEL))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.confirm_quick_open(Some(ix), window, cx)

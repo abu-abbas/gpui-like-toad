@@ -336,7 +336,7 @@ impl Workbench {
                     .items_center()
                     .border_b_1()
                     .border_color(theme.border)
-                    .text_size(px(FONT_BODY))
+                    .text_size(crate::theme::ui_size(&theme, FONT_BODY))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(format!("Edit {}", request.column)),
             )

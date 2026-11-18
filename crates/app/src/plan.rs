@@ -114,7 +114,7 @@ fn render_node(
             .flex_1()
             .min_w_0()
             .truncate()
-            .text_size(px(FONT_LABEL))
+            .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
             .line_height(px(18.))
             .text_color(theme.foreground)
             .child(node.label()),
@@ -128,7 +128,7 @@ fn render_node(
         row = row.child(
             div()
                 .flex_none()
-                .text_size(px(FONT_CAPTION))
+                .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
                 .line_height(px(16.))
                 .text_color(theme.muted_foreground)
                 .child(cost_text),

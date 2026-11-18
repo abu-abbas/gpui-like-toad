@@ -1,6 +1,137 @@
 use super::*;
 
 impl Workbench {
+    pub(super) fn render_title_bar(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use gpui_kit::component::TitleBar;
+
+        TitleBar::new().child(
+            div()
+                .flex()
+                .items_center()
+                .h_full()
+                .gap(px(SPACE_2))
+                .px(px(SPACE_2))
+                .child(
+                    Button::new("toggle-sidebar")
+                        .ghost()
+                        .small()
+                        .icon(IconName::PanelLeft)
+                        .tooltip(if self.sidebar_compact {
+                            "Expand connections sidebar"
+                        } else {
+                            "Collapse connections sidebar"
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.sidebar_compact = !this.sidebar_compact;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(crate::theme::ui_size(&theme, FONT_BODY))
+                        .text_color(theme.foreground)
+                        .child(app_name!()),
+                ),
+        )
+    }
+
+    pub(super) fn render_disconnected(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        if self.whats_new_active() {
+            return div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .min_w(px(0.))
+                .child(
+                    div().p(px(SPACE_2)).child(
+                        Button::new("back-to-connections")
+                            .small()
+                            .ghost()
+                            .icon(IconName::ChevronLeft)
+                            .label("Connections")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.leave_whats_new();
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .child(self.render_whats_new_page(theme, cx))
+                .into_any_element();
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .gap(px(SPACE_2))
+            .p(px(SPACE_4))
+            .bg(theme.table_even)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(48.))
+                    .rounded(px(12.))
+                    .bg(theme.secondary)
+                    .child(icon(IconName::Database, 24., theme.muted_foreground)),
+            )
+            .child(
+                div()
+                    .text_size(crate::theme::ui_size(&theme, FONT_HEADING_MD))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("No active connection"),
+            )
+            .child(
+                div()
+                    .max_w(px(270.))
+                    .text_center()
+                    .text_color(theme.muted_foreground)
+                    .child("Pick a connection on the left to browse schemas and open tables."),
+            )
+            .children(self.conn.connect_error.as_ref().map(|err| {
+                div()
+                    .max_w(px(360.))
+                    .text_center()
+                    .text_color(theme.danger)
+                    .child(err.clone())
+            }))
+            .child(
+                Button::new("empty-new-connection")
+                    .small()
+                    .label("New connection")
+                    .icon(IconName::Plus)
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_new_connection(window, cx)),
+                    ),
+            )
+            .when(self.show_demo && self.sidebar_compact, |view| {
+                view.child(
+                    Button::new("empty-demo")
+                        .small()
+                        .ghost()
+                        .icon(IconName::Play)
+                        .label("Demo")
+                        .disabled(self.conn.busy)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.connect(true, window, cx)),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
     pub(super) fn conn_status(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -27,7 +158,11 @@ impl Workbench {
                 "lihat Messages".to_string(),
             );
         }
-        (theme.muted_foreground, "Disconnected", String::new())
+        (
+            theme.muted_foreground,
+            "Disconnected",
+            "No active connection".to_string(),
+        )
     }
 
     pub(super) fn render_main(
@@ -46,10 +181,6 @@ impl Workbench {
             .min_w(px(0.))
             .overflow_hidden()
             .bg(theme.background);
-        // The tab strip lives at the top of the main column only (right of
-        // the sidebar), above the toolbar — as in the design. No spacer
-        // above the rail/sidebar: the design shares the top row between
-        // the first rail item, the sidebar header, and the tab strip.
         main = main.child(self.render_tab_bar(theme, cx));
         main = main.child(self.render_toolbar(theme, cx));
         // The split wrappers below take `min_h(0)`: as flex items they
@@ -110,120 +241,146 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let no_session = self.conn.session.is_none();
         let on_home = self.show_home;
+        let tab = self.active_tab();
+        let is_data_tab = !on_home && tab.kind == TabKind::Data;
+        let busy = self.conn.busy;
         let mut bar = div()
+            .id("toolbar-actions")
             .flex()
-            .flex_row()
             .flex_none()
             .items_center()
             .h(px(TOOLBAR_HEIGHT))
-            .gap(px(SPACE_2))
-            .px(px(SPACE_3))
+            .gap(px(SPACE_1))
+            .px(px(SPACE_2))
+            .overflow_x_scroll()
             .bg(theme.background)
             .border_b_1()
-            .border_color(theme.border);
-        let data_tab = !on_home && self.active_tab().kind == TabKind::Data;
-        // The buttons scroll sideways in a narrow window instead of pushing
-        // the connection pill past the edge.
-        let actions = div()
-            .id("toolbar-actions")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(SPACE_2))
-            .flex_shrink(1.)
-            .min_w(px(0.))
-            .overflow_x_scroll()
-            // Like Navicat's "New Query" / Toad's "Editor": always opens a
-            // fresh SQL editor tab, from any tab including Home.
-            .child(
-                Button::new("new-sql")
-                    .small()
-                    .icon(IconName::SquarePen)
-                    .disabled(no_session)
-                    .tooltip("Buka tab SQL editor baru")
-                    .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx))),
-            )
-            .child(div().w(px(1.)).h(px(20.)).bg(theme.border))
-            .child(
-                Button::new("run")
-                    .small()
-                    .icon(if data_tab {
-                        IconName::RefreshCw
-                    } else {
-                        IconName::Play
-                    })
-                    .primary()
-                    .loading(self.conn.busy)
-                    .disabled(on_home || no_session)
-                    .tooltip(if data_tab {
-                        "Refresh data (Cmd/Ctrl+Enter atau F5)"
-                    } else {
-                        "Run (Cmd/Ctrl+Enter atau F5)"
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
-            )
-            .when(!data_tab, |bar| {
-                bar.child(
-                    Button::new("run-current")
+            .border_color(theme.border)
+            .child(self.render_conn_pill(theme, cx))
+            .child(self.schema_picker("toolbar-schema", theme, cx));
+        if is_data_tab {
+            let data_view = tab
+                .data
+                .as_ref()
+                .is_some_and(|data| data.view == DataView::Data);
+            let filters_visible = tab.data.as_ref().is_some_and(|data| data.show_filters);
+            bar = bar
+                .child(
+                    Button::new("refresh-data")
                         .small()
-                        .icon(IconName::ListEnd)
-                        .disabled(on_home || no_session || self.conn.busy)
-                        .tooltip("Jalankan seleksi, atau statement di posisi kursor (dipisah ;)")
-                        .on_click(cx.listener(|this, _, _, cx| this.run_current(cx))),
+                        .primary()
+                        .icon(IconName::RefreshCw)
+                        .loading(busy)
+                        .tooltip("Refresh data")
+                        .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
                 )
-            })
-            .when(!data_tab, |bar| {
-                bar.child(
-                    Button::new("explain")
+                .child(
+                    Button::new("toggle-data-filters")
                         .small()
-                        .tooltip("Explain plan")
-                        .icon(IconName::ChartColumn)
-                        .disabled(on_home || no_session || self.conn.busy)
-                        .on_click(cx.listener(|this, _, _, cx| this.explain(cx))),
+                        .ghost()
+                        .icon(IconName::Funnel)
+                        .disabled(!data_view)
+                        .when(filters_visible, |button| button.bg(theme.accent))
+                        .tooltip(if filters_visible {
+                            "Hide table filters"
+                        } else {
+                            "Show table filters"
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(data) = this.data_mut() {
+                                data.show_filters = !data.show_filters;
+                                cx.notify();
+                            }
+                        })),
+                );
+        } else if !on_home {
+            bar = bar
+                .child(
+                    Button::new("save-sql")
+                        .small()
+                        .ghost()
+                        .icon(IconName::Save)
+                        .tooltip("Save SQL")
+                        .on_click(cx.listener(|this, _, _, cx| this.save_active_script(cx))),
                 )
-            })
-            .when(!data_tab, |bar| {
-                bar.child(
+                .child(
                     Button::new("format")
                         .small()
-                        .tooltip("Beautify SQL")
+                        .ghost()
                         .icon(IconName::WandSparkles)
-                        .disabled(on_home || no_session)
+                        .tooltip("Beautify SQL")
                         .on_click(
                             cx.listener(|this, _, window, cx| this.format_editor(window, cx)),
                         ),
                 )
-            })
-            .child(
-                Button::new("stop")
-                    .small()
-                    .tooltip("Stop (respons operasi yang berjalan diabaikan)")
-                    .icon(IconName::Square)
-                    .disabled(no_session || !self.conn.busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
-            )
-            .child(
-                Button::new("commit")
-                    .small()
-                    .tooltip("Commit")
-                    .icon(Icon::new(IconName::Check).text_color(theme.success))
-                    .ghost()
-                    .disabled(no_session || self.conn.busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.commit(cx))),
-            )
-            .child(
-                Button::new("rollback")
-                    .small()
-                    .tooltip("Rollback")
-                    .icon(Icon::new(IconName::Undo2).text_color(theme.danger))
-                    .ghost()
-                    .disabled(no_session || self.conn.busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.rollback(cx))),
-            );
-        bar = bar.child(actions).child(div().flex_1().min_w(px(SPACE_2)));
-        bar.child(self.render_conn_pill(theme, cx))
+                .child(
+                    Button::new("run")
+                        .small()
+                        .primary()
+                        .icon(IconName::Play)
+                        .loading(busy)
+                        .tooltip("Run (Cmd/Ctrl+Enter or F5)")
+                        .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
+                );
+        }
+
+        bar = bar.child(
+            Button::new("stop")
+                .small()
+                .ghost()
+                .icon(IconName::Square)
+                .disabled(!busy)
+                .tooltip("Stop (ignore the current operation’s response)")
+                .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
+        );
+        if !on_home && !is_data_tab {
+            bar = bar
+                .child(
+                    Button::new("explain")
+                        .small()
+                        .ghost()
+                        .icon(IconName::ChartColumn)
+                        .disabled(busy)
+                        .tooltip("Explain plan")
+                        .on_click(cx.listener(|this, _, _, cx| this.explain(cx))),
+                )
+                .child(
+                    Button::new("run-current")
+                        .small()
+                        .ghost()
+                        .icon(IconName::ListEnd)
+                        .disabled(busy)
+                        .tooltip("Run selection or current statement")
+                        .on_click(cx.listener(|this, _, _, cx| this.run_current(cx))),
+                );
+        }
+        bar.child(
+            div()
+                .w(px(1.))
+                .h(px(18.))
+                .mx(px(SPACE_1))
+                .flex_none()
+                .bg(theme.border),
+        )
+        .child(
+            Button::new("commit")
+                .small()
+                .ghost()
+                .icon(Icon::new(IconName::Check).text_color(theme.success))
+                .disabled(busy)
+                .tooltip("Commit")
+                .on_click(cx.listener(|this, _, _, cx| this.commit(cx))),
+        )
+        .child(
+            Button::new("rollback")
+                .small()
+                .ghost()
+                .icon(Icon::new(IconName::Undo2).text_color(theme.danger))
+                .disabled(busy)
+                .tooltip("Rollback")
+                .on_click(cx.listener(|this, _, _, cx| this.rollback(cx))),
+        )
     }
 
     pub(super) fn render_status_bar(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
@@ -255,7 +412,7 @@ impl Workbench {
                     div()
                         .min_w(px(0.))
                         .truncate()
-                        .text_size(px(FONT_CAPTION))
+                        .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
                         .line_height(px(LEADING_CAPTION))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.foreground)

@@ -102,7 +102,10 @@ impl Workbench {
                 .flex_1()
                 .min_h(px(0.))
                 .overflow_hidden()
-                .child(self.render_filter_bar(theme, cx))
+                .when(
+                    tab.data.as_ref().is_some_and(|data| data.show_filters),
+                    |body| body.child(self.render_filter_bar(theme, cx)),
+                )
                 .children(self.render_edit_bar(theme, cx))
                 .child(
                     div()
@@ -178,7 +181,7 @@ impl Workbench {
                     .child(icon(IconName::Info, 14., theme.muted_foreground))
                     .child(
                         div()
-                            .text_size(px(FONT_LABEL))
+                            .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                             .line_height(px(LEADING_LABEL))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
@@ -218,7 +221,7 @@ impl Workbench {
                         .child(div().flex().flex_col().gap(px(SPACE_1)).children(
                             self.messages[start..].iter().rev().map(|m| {
                                 div()
-                                    .text_size(px(FONT_LABEL))
+                                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                                     .line_height(px(LEADING_LABEL))
                                     .text_color(if is_error_message(m) {
                                         theme.danger
@@ -237,6 +240,26 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        if self.plan_collapsed {
+            return div()
+                .flex()
+                .size_full()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(self.render_results_column(theme, cx)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(34.))
+                        .border_l_1()
+                        .border_color(theme.border)
+                        .child(self.plan_toggle(theme, cx)),
+                )
+                .into_any_element();
+        }
         h_resizable("bottom-split")
             .child(resizable_panel().child(self.render_results_column(theme, cx)))
             .child(
@@ -245,6 +268,7 @@ impl Workbench {
                     .size_range(px(240.)..px(560.))
                     .child(self.render_plan_panel(theme, cx)),
             )
+            .into_any_element()
     }
 
     fn render_results_column(
@@ -335,7 +359,7 @@ impl Workbench {
             bar = bar.child(
                 item.child(
                     div()
-                        .text_size(px(FONT_LABEL))
+                        .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                         .line_height(px(LEADING_LABEL))
                         .font_weight(FontWeight::MEDIUM)
                         .child(label),
@@ -441,19 +465,15 @@ impl Workbench {
                         .id("plan-text-scroll")
                         .overflow_y_scroll()
                         .p(px(SPACE_3))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .font_family(crate::MONO_FONT_FAMILY)
-                                .children(tab.plan_lines.iter().map(|line| {
-                                    div()
-                                        .text_size(px(FONT_LABEL))
-                                        .line_height(px(LEADING_LABEL))
-                                        .text_color(theme.foreground)
-                                        .child(line.clone())
-                                })),
-                        )
+                        .child(div().flex().flex_col().children(tab.plan_lines.iter().map(
+                            |line| {
+                                div()
+                                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
+                                    .line_height(px(LEADING_LABEL))
+                                    .text_color(theme.foreground)
+                                    .child(line.clone())
+                            },
+                        )))
                         .into_any_element()
                 }
             }
@@ -479,7 +499,7 @@ impl Workbench {
                         .child(div().flex().flex_col().gap(px(SPACE_1)).children(
                             self.messages[start..].iter().map(|m| {
                                 div()
-                                    .text_size(px(FONT_LABEL))
+                                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                                     .line_height(px(LEADING_LABEL))
                                     .text_color(theme.foreground)
                                     .child(m.clone())
@@ -570,7 +590,7 @@ impl Workbench {
                     row = row.child(
                         button.child(
                             div()
-                                .text_size(px(FONT_LABEL))
+                                .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                                 .line_height(px(LEADING_LABEL))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(if active {
@@ -644,6 +664,31 @@ impl Workbench {
             ))
     }
 
+    fn plan_toggle(&self, theme: &gpui_kit::component::Theme, cx: &mut Context<Self>) -> Button {
+        let label = if self.plan_collapsed {
+            "Expand Explain Plan"
+        } else {
+            "Minimize Explain Plan"
+        };
+        Button::new("toggle-plan-panel")
+            .small()
+            .ghost()
+            .tooltip(label)
+            .child(icon(
+                if self.plan_collapsed {
+                    IconName::ChevronLeft
+                } else {
+                    IconName::ChevronRight
+                },
+                14.,
+                theme.muted_foreground,
+            ))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.plan_collapsed = !this.plan_collapsed;
+                cx.notify();
+            }))
+    }
+
     fn render_plan_panel(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -667,12 +712,14 @@ impl Workbench {
                     .px(px(SPACE_3))
                     .child(
                         div()
-                            .text_size(px(FONT_CAPTION))
+                            .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
                             .line_height(px(LEADING_CAPTION))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child("EXPLAIN PLAN"),
-                    ),
+                    )
+                    .child(div().flex_1())
+                    .child(self.plan_toggle(theme, cx)),
             )
             .child(div().px(px(SPACE_3)).pb(px(SPACE_2)).child(caption_text(
                 "Estimated plan (EXPLAIN PLAN), not runtime statistics.".to_string(),
@@ -700,7 +747,7 @@ impl Workbench {
                         .child(div().flex().flex_col().children(tab.plan_lines.iter().map(
                             |line| {
                                 div()
-                                    .text_size(px(FONT_LABEL))
+                                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                                     .line_height(px(LEADING_LABEL))
                                     .text_color(theme.foreground)
                                     .child(line.clone())

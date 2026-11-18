@@ -10,7 +10,7 @@ pub(super) fn status_dot(color: Hsla) -> gpui_kit::Div {
 
 pub(super) fn caption_text(text: String, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
     div()
-        .text_size(px(FONT_CAPTION))
+        .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
         .line_height(px(LEADING_CAPTION))
         .text_color(theme.muted_foreground)
         .child(text)
@@ -18,7 +18,7 @@ pub(super) fn caption_text(text: String, theme: &gpui_kit::component::Theme) -> 
 
 pub(super) fn body_text(text: String, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
     div()
-        .text_size(px(FONT_BODY))
+        .text_size(crate::theme::ui_size(&theme, FONT_BODY))
         .line_height(px(LEADING_BODY))
         .text_color(theme.foreground)
         .child(text)
@@ -26,7 +26,7 @@ pub(super) fn body_text(text: String, theme: &gpui_kit::component::Theme) -> gpu
 
 pub(super) fn form_label(text: &str, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
     div()
-        .text_size(px(FONT_LABEL))
+        .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
         .line_height(px(LEADING_LABEL))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.foreground)
@@ -35,7 +35,7 @@ pub(super) fn form_label(text: &str, theme: &gpui_kit::component::Theme) -> gpui
 
 pub(super) fn empty_state_text(text: String, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
     div()
-        .text_size(px(FONT_LABEL))
+        .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
         .line_height(px(LEADING_LABEL))
         .text_color(theme.muted_foreground)
         .child(text)

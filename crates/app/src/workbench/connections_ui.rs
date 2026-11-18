@@ -1,82 +1,36 @@
 use super::*;
 
 impl Workbench {
-    pub(super) fn render_connections_panel(
+    pub(super) fn render_connection_explorer(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // `min_w(0)` + clip: the panel can be as narrow as its resize
-        // minimum, and nothing in it may push past the split edge.
-        let mut panel = div()
+        div()
             .flex()
             .flex_col()
             .size_full()
             .min_w(px(0.))
+            .min_h(px(0.))
             .overflow_hidden()
-            .bg(theme.sidebar);
-        let mut header = self.render_panel_header("Connections", theme);
-        header = header.child(div().flex_1()).child(
-            div()
-                .id("profile-new")
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .h(px(28.))
-                .w(px(28.))
-                .rounded(px(RADIUS_MD))
-                .hover(|this| this.bg(theme.secondary))
-                .on_click(cx.listener(|this, _, window, cx| this.open_new_connection(window, cx)))
-                .child(icon(IconName::Plus, 16., theme.muted_foreground)),
-        );
-        panel = panel.child(header);
-        // Only the active connection: the toolbar pill switches.
-        panel = panel.child(self.render_session_card(theme, cx));
-        // Navicat-style: saved connections are listed while disconnected
-        // (click one to open its dialog); once connected the panel belongs
-        // to the explorer. New/edit connection happens in a modal.
-        if self.conn.session.is_some() {
-            panel = panel.child(self.render_explorer(theme, cx));
-        } else {
-            panel = panel.child(self.render_profile_list(theme, cx));
-            panel = panel.child(
-                // Wraps onto a second line when the panel is narrow.
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .gap(px(SPACE_2))
-                    .px(px(SPACE_3))
-                    .pt(px(SPACE_3))
-                    .child(
-                        Button::new("side-new-connection")
-                            .label("New connection")
-                            .icon(IconName::Plus)
-                            .primary()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_new_connection(window, cx)
-                            })),
-                    )
-                    .when(self.show_demo, |col| {
-                        col.child(
-                            Button::new("demo")
-                                .label("Demo")
-                                .icon(IconName::Play)
-                                .disabled(self.conn.busy)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.connect(true, window, cx)
-                                })),
-                        )
-                    }),
-            );
-        }
-        panel
+            .bg(theme.sidebar)
+            .border_r_1()
+            .border_color(theme.border)
+            .child(self.render_session_card(theme, cx))
+            .child(
+                div().px(px(SPACE_2)).pt(px(SPACE_1)).flex_none().child(
+                    Button::new("explorer-new-sql")
+                        .small()
+                        .w_full()
+                        .icon(IconName::SquarePen)
+                        .label("New SQL editor")
+                        .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx))),
+                ),
+            )
+            .child(self.render_explorer(theme, cx))
     }
 
-    /// Minimal connection row: status dot (green connected, red not),
-    /// connection name, and a ⋮ menu with Refresh, Connect/Disconnect,
-    /// and Edit connection.
+    /// Connection name and session actions above the explorer.
     fn render_session_card(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -158,20 +112,16 @@ impl Workbench {
             .flex_row()
             .items_center()
             .gap(px(SPACE_2))
-            .mx(px(SPACE_3))
-            .mt(px(SPACE_2))
-            .pl(px(SPACE_2))
+            .flex_none()
+            .px(px(SPACE_2))
             .h(px(TOOLBAR_HEIGHT))
-            .rounded(px(RADIUS_MD))
-            .border_1()
-            .border_color(theme.border)
             .child(status_dot(dot))
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.))
                     .truncate()
-                    .text_size(px(FONT_LABEL))
+                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                     .line_height(px(LEADING_LABEL))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.foreground)
@@ -181,126 +131,166 @@ impl Workbench {
             .into_any_element()
     }
 
-    fn render_profile_list(
+    pub(super) fn render_profile_list(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        if self.profiles.is_empty() {
-            return div().into_any_element();
-        }
-        // Wake-style group: a small muted heading with a fold chevron and
-        // a count, then single-line rows; the open one is a rounded shade.
+        let profiles = self.profiles.len();
         let folded = self.side_conn_folded;
-        let mut list = div()
+        let mut tree = div()
+            .id("connections-tree")
             .flex()
             .flex_col()
-            .px(px(SPACE_2))
-            .pt(px(SPACE_3))
-            .gap(px(2.))
-            .child(
-                div()
-                    .id("side-conn-fold")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(SPACE_1))
-                    .h(px(28.))
-                    .px(px(SPACE_2))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.side_conn_folded = !this.side_conn_folded;
+            .min_h(px(0.))
+            .overflow_y_scroll();
+        tree = tree.child(
+            Button::new("saved-connections")
+                .small()
+                .ghost()
+                .w_full()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.side_conn_folded = !this.side_conn_folded;
+                    cx.notify();
+                }))
+                .child(connection_tree_label(
+                    if folded {
+                        IconName::ChevronRight
+                    } else {
+                        IconName::ChevronDown
+                    },
+                    "My Connections".into(),
+                    Some(profiles),
+                    theme,
+                )),
+        );
+        if folded {
+            return tree;
+        }
+
+        let mut folders = std::collections::BTreeMap::<&str, Vec<usize>>::new();
+        for (ix, profile) in self.profiles.iter().enumerate() {
+            if profile.folder.is_empty() {
+                tree = tree.child(self.render_profile_row(ix, false, theme, cx));
+            } else {
+                folders.entry(&profile.folder).or_default().push(ix);
+            }
+        }
+        for (folder, entries) in folders {
+            let name = folder.to_owned();
+            let collapsed = self.collapsed_connection_folders.contains(&name);
+            tree = tree.child(
+                Button::new(format!("connection-folder-{name}"))
+                    .small()
+                    .ghost()
+                    .w_full()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.collapsed_connection_folders.remove(&name) {
+                            this.collapsed_connection_folders.insert(name.clone());
+                        }
                         cx.notify();
                     }))
-                    .child(
-                        div()
-                            .text_size(px(FONT_CAPTION))
-                            .line_height(px(LEADING_CAPTION))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.muted_foreground)
-                            .child("Saved connections"),
-                    )
-                    .child(icon(
-                        if folded {
-                            IconName::ChevronRight
+                    .child(connection_tree_label(
+                        if collapsed {
+                            IconName::Folder
                         } else {
-                            IconName::ChevronDown
+                            IconName::FolderOpen
                         },
-                        12.,
-                        theme.muted_foreground,
-                    ))
-                    .child(div().flex_1())
+                        folder.to_owned(),
+                        None,
+                        theme,
+                    )),
+            );
+            if !collapsed {
+                for ix in entries {
+                    tree = tree.child(self.render_profile_row(ix, true, theme, cx));
+                }
+            }
+        }
+        if self.show_demo {
+            let active = self.conn.session.is_some() && self.conn.demo_mode;
+            tree = tree.child(
+                Button::new("demo")
+                    .small()
+                    .ghost()
+                    .w_full()
+                    .disabled(self.conn.busy)
+                    .when(active, |button| button.bg(theme.accent))
+                    .on_click(cx.listener(|this, _, window, cx| this.connect(true, window, cx)))
                     .child(
-                        div()
-                            .text_size(px(FONT_CAPTION))
-                            .line_height(px(LEADING_CAPTION))
-                            .text_color(theme.muted_foreground)
-                            .child(self.profiles.len().to_string()),
+                        connection_tree_label(IconName::Database, "Demo".into(), None, theme)
+                            .when(active, |row| row.child(status_dot(theme.success))),
                     ),
             );
-        if folded {
-            return list.into_any_element();
         }
-        for (ix, profile) in self.profiles.iter().enumerate() {
-            let selected = self.connection_form.editing_profile == Some(ix);
-            let mut row = div()
-                .group("profile-row")
-                .flex()
-                .flex_row()
-                .items_center()
-                .h(px(TOOLBAR_HEIGHT))
-                .rounded(px(RADIUS_MD));
-            if selected {
-                row = row.bg(theme.accent);
-            } else {
-                row = row.hover(|this| this.bg(theme.background.opacity(0.7)));
-            }
-            list = list.child(
-                row.child(
-                    div()
-                        .id(format!("profile-{ix}"))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(SPACE_2))
-                        .flex_1()
-                        .min_w(px(0.))
-                        .h(relative(1.0))
-                        .px(px(SPACE_2))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.edit_profile(ix, window, cx);
-                        }))
-                        .child(icon(IconName::Database, 14., theme.muted_foreground))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .text_size(px(FONT_LABEL))
-                                .line_height(px(LEADING_LABEL))
-                                .text_color(theme.foreground)
-                                .truncate()
-                                .child(profile.name.clone()),
-                        ),
+        tree
+    }
+
+    fn render_profile_row(
+        &self,
+        ix: usize,
+        in_folder: bool,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let profile = &self.profiles[ix];
+        let active = self.conn.session.is_some()
+            && self
+                .conn
+                .last_connection
+                .as_ref()
+                .and_then(|last| last.profile_ix)
+                == Some(ix);
+        let view = cx.entity();
+        let edit_view = view.clone();
+        div()
+            .id(("profile-row", ix))
+            .flex()
+            .items_center()
+            .flex_none()
+            .pl(px(if in_folder { 14. } else { 4. }))
+            .rounded(px(RADIUS_MD))
+            .when(active, |row| row.bg(theme.accent))
+            .context_menu(move |menu, _, _| {
+                let edit_view = edit_view.clone();
+                let view = view.clone();
+                menu.item(
+                    PopupMenuItem::new("Edit connection")
+                        .icon(Icon::new(IconName::SquarePen))
+                        .on_click(move |_, window, cx| {
+                            edit_view.update(cx, |this, cx| this.edit_profile(ix, window, cx));
+                        }),
                 )
-                .child(
-                    div()
-                        .id(format!("profile-remove-{ix}"))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_center()
-                        .h(px(28.))
-                        .w(px(28.))
-                        .mr(px(SPACE_1))
-                        .rounded(px(RADIUS_MD))
-                        .hover(|this| this.bg(theme.danger))
-                        .flex_none()
-                        .on_click(cx.listener(move |this, _, _, cx| this.remove_profile(ix, cx)))
-                        .child(icon(IconName::Trash, 14., theme.muted_foreground)),
-                ),
-            );
-        }
-        list.into_any_element()
+                .item(
+                    PopupMenuItem::new("Remove connection")
+                        .icon(Icon::new(IconName::Trash))
+                        .on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| this.remove_profile(ix, cx));
+                        }),
+                )
+            })
+            .child(
+                Button::new(("profile", ix))
+                    .small()
+                    .ghost()
+                    .w_full()
+                    .tooltip(profile.name.clone())
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.open_profile(ix, window, cx)),
+                    )
+                    .child(
+                        connection_tree_label(
+                            IconName::Database,
+                            profile.name.clone(),
+                            None,
+                            theme,
+                        )
+                        .when(active, |row| {
+                            row.text_color(theme.accent_foreground)
+                                .child(status_dot(theme.success))
+                        }),
+                    ),
+            )
     }
 
     /// The New/Edit connection dialog, drawn as a modal over the whole
@@ -328,7 +318,7 @@ impl Workbench {
                 .flex_1()
                 .h(px(28.))
                 .rounded(px(RADIUS_SM))
-                .text_size(px(FONT_LABEL))
+                .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                 .font_weight(FontWeight::MEDIUM)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.connection_form.use_tns = tns;
@@ -356,7 +346,23 @@ impl Workbench {
             .flex_col()
             .gap(px(SPACE_3))
             .p(px(SPACE_4))
-            .child(field("Connection name", &self.connection_form.name_input))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(SPACE_2))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(field("Connection name", &self.connection_form.name_input)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(field("Folder", &self.connection_form.folder_input)),
+                    ),
+            )
             .child(
                 div()
                     .flex()
@@ -438,7 +444,7 @@ impl Workbench {
                 div()
                     .p(px(SPACE_2))
                     .rounded(px(RADIUS_SM))
-                    .text_size(px(FONT_CAPTION))
+                    .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
                     .line_height(px(LEADING_CAPTION))
                     .text_color(if is_error {
                         theme.danger
@@ -547,7 +553,7 @@ impl Workbench {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(FONT_BODY))
+                            .text_size(crate::theme::ui_size(&theme, FONT_BODY))
                             .line_height(px(LEADING_BODY))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
@@ -584,4 +590,28 @@ impl Workbench {
             .occlude()
             .child(card)
     }
+}
+
+fn connection_tree_label(
+    symbol: IconName,
+    text: String,
+    count: Option<usize>,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
+    div()
+        .flex()
+        .items_center()
+        .w_full()
+        .min_w(px(0.))
+        .gap(px(6.))
+        .child(icon(symbol, 14., theme.muted_foreground))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .text_left()
+                .truncate()
+                .child(text),
+        )
+        .children(count.map(|count| caption_text(count.to_string(), theme)))
 }

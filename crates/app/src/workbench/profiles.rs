@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) struct ConnectionForm {
     pub(super) name_input: Entity<InputState>,
+    pub(super) folder_input: Entity<InputState>,
     pub(super) user_input: Entity<InputState>,
     pub(super) host_input: Entity<InputState>,
     pub(super) port_input: Entity<InputState>,
@@ -26,6 +27,8 @@ impl ConnectionForm {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Workbench>) -> Self {
         let name_input =
             cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Nama koneksi (opsional)"));
+        let folder_input =
+            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Folder (optional)"));
         let user_input =
             cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Username, mis. HR"));
         let host_input =
@@ -41,6 +44,7 @@ impl ConnectionForm {
         let password_input = cx.new(|cx| InputState::new(&mut *window, cx).masked(true));
         Self {
             name_input,
+            folder_input,
             user_input,
             host_input,
             port_input,
@@ -177,6 +181,12 @@ impl Workbench {
             window,
             cx,
         );
+        Self::set_input(
+            &self.connection_form.folder_input,
+            profile.folder.clone(),
+            window,
+            cx,
+        );
         // Easy Connect strings split into the Basic fields; descriptors and
         // TNS aliases open in TNS mode unchanged.
         match parse_easy_connect(&profile.connect_string) {
@@ -253,6 +263,12 @@ impl Workbench {
         self.connection_form.use_tns = false;
         self.connection_form.form_notice = None;
         self.conn.connect_error = None;
+        Self::set_input(
+            &self.connection_form.folder_input,
+            String::new(),
+            window,
+            cx,
+        );
         Self::set_input(
             &self.connection_form.name_input.clone(),
             String::new(),
@@ -355,6 +371,7 @@ impl Workbench {
             },
             username,
             connect_string,
+            folder: Self::input_text(&self.connection_form.folder_input, cx),
             save_password: self.connection_form.save_password,
         };
         let action =

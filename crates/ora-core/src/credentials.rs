@@ -152,6 +152,7 @@ mod tests {
             name: "HR".to_string(),
             username: "hr".to_string(),
             connect_string: "db:1521/X".to_string(),
+            folder: String::new(),
             save_password: save,
         }
     }

@@ -50,10 +50,10 @@ use crate::plan;
 use crate::results::ResultsDelegate;
 use crate::schema::{self, ObjectCategory};
 use crate::theme::{
-    self, FONT_BODY, FONT_CAPTION, FONT_HEADING_MD, FONT_HEADING_XL, FONT_LABEL, FONT_RAIL,
-    GRID_ROW_HEIGHT, LEADING_BODY, LEADING_CAPTION, LEADING_HEADING_MD, LEADING_HEADING_XL,
-    LEADING_LABEL, LEADING_RAIL, PAGINATION_HEIGHT, PLAN_PANEL_WIDTH, RADIUS_MD, RADIUS_SM,
-    RAIL_BUTTON_HEIGHT, RAIL_WIDTH, SIDE_PANEL_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6,
+    self, CONNECTIONS_WIDTH, EXPLORER_WIDTH, FONT_BODY, FONT_CAPTION, FONT_HEADING_MD,
+    FONT_HEADING_XL, FONT_LABEL, GRID_ROW_HEIGHT, LEADING_BODY, LEADING_CAPTION,
+    LEADING_HEADING_MD, LEADING_HEADING_XL, LEADING_LABEL, PAGINATION_HEIGHT, PLAN_PANEL_WIDTH,
+    RADIUS_MD, RADIUS_SM, RAIL_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6,
     STATUS_BAR_HEIGHT, SUB_TAB_HEIGHT, TAB_BAR_HEIGHT, TOOLBAR_HEIGHT, TREE_ROW_HEIGHT,
 };
 use crate::worker::{DbHandle, ExportFormat, Job, Password, Response};
@@ -133,7 +133,6 @@ enum RailPanel {
     Connections,
     History,
     Favorites,
-    Settings,
 }
 
 #[derive(Clone)]
@@ -354,9 +353,11 @@ pub struct Workbench {
     connection_form: ConnectionForm,
     search_input: Entity<InputState>,
     rail: RailPanel,
+    sidebar_compact: bool,
+    collapsed_connection_folders: HashSet<String>,
+    settings: settings::SettingsState,
     profiles: Vec<SavedProfile>,
     history: Vec<HistoryEntry>,
-    theme_pref: ThemePreference,
     tabs: Vec<QueryTab>,
     active_tab: usize,
     /// Stand-in used while every tab is closed (only Home is left), so
@@ -365,6 +366,8 @@ pub struct Workbench {
     /// Horizontal scroll of the tab strip, so tabs past the right edge
     /// stay reachable and a newly opened/activated tab scrolls into view.
     tab_scroll: ScrollHandle,
+    tab_overflow: bool,
+    plan_collapsed: bool,
     /// Messages tab scroll; follows the newest message.
     messages_scroll: ScrollHandle,
     show_home: bool,
@@ -410,7 +413,7 @@ impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let connection_form = ConnectionForm::new(window, cx);
         let search_input =
-            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Filter objects..."));
+            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Filter…"));
         let catalog = Rc::new(RefCell::new(Catalog::new()));
         let workbench = cx.weak_entity();
         let completion = Rc::new(SqlCompletionProvider::new(
@@ -442,17 +445,28 @@ impl Workbench {
         let appearance_sub = window
             .observe_window_appearance(|window, cx| theme::sync_system_appearance(window, cx));
 
+        let settings = settings::SettingsState::new(window, cx);
+        let settings_search_sub = cx.subscribe(&settings.search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+
         Workbench {
             connection_form,
             search_input,
             rail: RailPanel::Connections,
+            sidebar_compact: false,
+            collapsed_connection_folders: HashSet::new(),
+            settings,
             profiles: store::load_profiles(),
             history: store::load_history(),
-            theme_pref: theme::preference(cx),
             tabs: vec![first_tab],
             active_tab: 0,
             scratch_tab,
             tab_scroll: ScrollHandle::new(),
+            tab_overflow: false,
+            plan_collapsed: false,
             messages_scroll: ScrollHandle::new(),
             // Start on the Navicat-style Home page.
             show_home: true,
@@ -476,7 +490,7 @@ impl Workbench {
             catalog,
             completion,
             updates: UpdateState::load(),
-            _subscriptions: vec![search_sub, appearance_sub],
+            _subscriptions: vec![search_sub, appearance_sub, settings_search_sub],
         }
     }
 
@@ -537,13 +551,21 @@ impl Render for Workbench {
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .text_size(theme.font_size)
             .key_context("Workbench")
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|this, _action: &RunQuery, _, cx| this.run(cx)))
-            .on_action(cx.listener(|this, _: &RunCurrent, _, cx| this.run_current(cx)))
-            .on_action(cx.listener(|this, _action: &OpenSettings, _, cx| {
-                this.rail = RailPanel::Settings;
-                cx.notify();
+            .on_action(cx.listener(|this, _: &RunQuery, _, cx| {
+                if !this.settings.open {
+                    this.run(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &RunCurrent, _, cx| {
+                if !this.settings.open {
+                    this.run_current(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.open_settings(window, cx);
             }))
             .on_action(
                 cx.listener(|this, _action: &CheckForUpdates, _, cx| this.check_updates(true, cx)),
@@ -577,29 +599,29 @@ impl Render for Workbench {
                 this.toggle_quick_open(window, cx)
             }))
             .relative()
+            .child(self.render_title_bar(&theme, cx))
             .children(self.render_update_banner(&theme, cx))
             .child(
-                // The rail sits outside the resizable group: as a fixed
-                // panel it was padded up to the group's minimum panel
-                // width, leaving an empty strip next to it.
                 div()
-                    .flex_1()
                     .flex()
-                    .flex_row()
+                    .flex_1()
                     .min_h(px(0.))
-                    .child(self.render_rail(&theme, cx))
-                    .child(
-                        div().flex_1().min_w(px(0.)).child(
-                            h_resizable("main-split")
+                    .child(self.render_navigation(&theme, cx))
+                    .child(div().flex().flex_1().min_w(px(0.)).child(
+                        if self.conn.session.is_some() {
+                            h_resizable("workbench-explorer")
                                 .child(
                                     resizable_panel()
-                                        .size(px(SIDE_PANEL_WIDTH))
-                                        .size_range(px(220.)..px(440.))
-                                        .child(self.render_side_panel(&theme, cx)),
+                                        .size(px(EXPLORER_WIDTH))
+                                        .size_range(px(190.)..px(440.))
+                                        .child(self.render_connection_explorer(&theme, cx)),
                                 )
-                                .child(resizable_panel().child(self.render_main(&theme, cx))),
-                        ),
-                    ),
+                                .child(resizable_panel().child(self.render_main(&theme, cx)))
+                                .into_any_element()
+                        } else {
+                            self.render_disconnected(&theme, cx).into_any_element()
+                        },
+                    )),
             )
             .child(self.render_status_bar(&theme))
             .when(self.connection_form.show_connection_form, |this| {
@@ -613,6 +635,9 @@ impl Render for Workbench {
             })
             .when(self.disconnect_prompt.is_some(), |this| {
                 this.child(self.render_disconnect_prompt(&theme, cx))
+            })
+            .when(self.settings.open, |this| {
+                this.child(self.render_settings_dialog(&theme, cx))
             })
     }
 }

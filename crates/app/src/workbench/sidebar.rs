@@ -1,104 +1,135 @@
 use super::*;
 
 impl Workbench {
-    pub(super) fn render_rail(
+    pub(super) fn render_navigation(
         &self,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let items = [
-            (RailPanel::Connections, IconName::Database, "Connections"),
-            (RailPanel::History, IconName::Clock, "History"),
-            (RailPanel::Favorites, IconName::Star, "Favorites"),
-            (RailPanel::Settings, IconName::Settings, "Settings"),
-        ];
-        let mut rail = div()
+        let compact = self.sidebar_compact;
+        let favorites = self.history.iter().filter(|entry| entry.favorite).count();
+        let history = self.history.len();
+        let mut nav = div()
             .flex()
             .flex_col()
-            .items_center()
-            .w(px(RAIL_WIDTH))
+            .flex_none()
+            .min_h(px(0.))
+            .w(px(if compact {
+                RAIL_WIDTH
+            } else {
+                CONNECTIONS_WIDTH
+            }))
+            .bg(theme.sidebar.blend(theme.foreground.opacity(0.06)))
             .py(px(SPACE_2))
-            .gap(px(SPACE_1))
-            // One step further from the content than the side panel, so
-            // the rail, the panel and the work area are three shades.
-            .bg(theme.sidebar.blend(theme.foreground.opacity(0.06)));
-        for (panel, icon_name, label) in items {
-            let active = self.rail == panel;
-            let mut button = div()
-                .id(format!("rail-{label}"))
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .w(px(RAIL_WIDTH - 6.))
-                .h(px(RAIL_BUTTON_HEIGHT))
-                .gap(px(SPACE_1))
-                .rounded(px(RADIUS_MD))
+            .px(px(if compact { 5. } else { 6. }))
+            .gap(px(SPACE_1));
+
+        for (panel, symbol, label, count) in [
+            (
+                RailPanel::Connections,
+                IconName::Database,
+                "Connections",
+                None,
+            ),
+            (
+                RailPanel::Favorites,
+                IconName::Star,
+                "Favorites",
+                Some(favorites),
+            ),
+            (
+                RailPanel::History,
+                IconName::Clock,
+                "History",
+                Some(history),
+            ),
+        ] {
+            let selected = self.rail == panel;
+            let button = Button::new(label)
+                .ghost()
+                .small()
+                .tooltip(label)
+                .w_full()
+                .h(px(if compact { 34. } else { 30. }))
+                .when(selected, |button| button.bg(theme.accent))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.rail = panel;
+                    this.sidebar_compact = false;
                     cx.notify();
-                }));
-            if active {
-                button = button.bg(theme.accent);
-            } else {
-                button = button.hover(|this| this.bg(theme.secondary));
-            }
-            let color = if active {
-                theme.primary
-            } else {
-                theme.muted_foreground
-            };
-            rail = rail.child(
-                button.child(icon(icon_name, 20., color)).child(
+                }))
+                .child(
                     div()
-                        .text_size(px(FONT_RAIL))
-                        .line_height(px(LEADING_RAIL))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(color)
-                        .child(label),
+                        .flex()
+                        .items_center()
+                        .w_full()
+                        .gap(px(6.))
+                        .when(compact, |row| row.justify_center())
+                        .child(icon(
+                            symbol,
+                            16.,
+                            if selected {
+                                theme.primary
+                            } else {
+                                theme.muted_foreground
+                            },
+                        ))
+                        .when(!compact, |row| {
+                            row.child(div().flex_1().text_left().child(label))
+                                .children(count.map(|count| caption_text(count.to_string(), theme)))
+                        }),
+                );
+            let mut heading = div()
+                .flex()
+                .items_center()
+                .flex_none()
+                .gap(px(2.))
+                .child(div().flex_1().child(button));
+            if panel == RailPanel::Connections && !compact {
+                heading = heading.child(
+                    Button::new("profile-new")
+                        .small()
+                        .ghost()
+                        .icon(IconName::Plus)
+                        .tooltip("New connection")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_new_connection(window, cx)),
+                        ),
+                );
+            }
+            nav = nav.child(heading);
+            if selected && !compact {
+                nav = nav.child(match panel {
+                    RailPanel::Connections => {
+                        self.render_profile_list(theme, cx).into_any_element()
+                    }
+                    RailPanel::Favorites => self
+                        .render_history_panel(true, theme, cx)
+                        .into_any_element(),
+                    RailPanel::History => self
+                        .render_history_panel(false, theme, cx)
+                        .into_any_element(),
+                });
+            }
+        }
+        nav.child(div().flex_1().min_h(px(0.))).child(
+            Button::new("sidebar-settings")
+                .small()
+                .ghost()
+                .w_full()
+                .h(px(34.))
+                .tooltip("Settings")
+                .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .w_full()
+                        .gap(px(6.))
+                        .when(compact, |row| row.justify_center())
+                        .child(icon(IconName::Settings, 16., theme.muted_foreground))
+                        .when(!compact, |row| row.child("Settings")),
                 ),
-            );
-        }
-        rail
-    }
-
-    pub(super) fn render_side_panel(
-        &self,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        match self.rail {
-            RailPanel::Connections => self.render_connections_panel(theme, cx).into_any_element(),
-            RailPanel::History => self
-                .render_history_panel(false, theme, cx)
-                .into_any_element(),
-            RailPanel::Favorites => self
-                .render_history_panel(true, theme, cx)
-                .into_any_element(),
-            RailPanel::Settings => self.render_settings_panel(theme, cx).into_any_element(),
-        }
-    }
-
-    pub(super) fn render_panel_header(
-        &self,
-        title: &str,
-        theme: &gpui_kit::component::Theme,
-    ) -> gpui_kit::Div {
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .h(px(TOOLBAR_HEIGHT))
-            .px(px(SPACE_3))
-            .gap(px(SPACE_2))
-            .child(
-                div()
-                    .text_size(px(FONT_BODY))
-                    .line_height(px(LEADING_BODY))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.foreground)
-                    .child(title.to_string()),
-            )
+        )
     }
 
     fn render_history_panel(
@@ -107,15 +138,10 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let title = if favorites_only {
-            "Favorites"
-        } else {
-            "History"
-        };
-        let mut panel = div().flex().flex_col().size_full().bg(theme.sidebar);
-        let mut header = self.render_panel_header(title, theme);
+        let mut panel = div().flex().flex_col().min_h(px(0.)).overflow_hidden();
+        let mut header = div().flex().items_center().flex_none().px(px(SPACE_1));
         if !favorites_only {
-            header = header.child(div().flex_1()).child(
+            header = header.justify_end().child(
                 div()
                     .id("history-clear")
                     .flex()
@@ -129,8 +155,8 @@ impl Workbench {
                     .on_click(cx.listener(|this, _, _, cx| this.clear_history(cx)))
                     .child(icon(IconName::Trash, 14., theme.muted_foreground)),
             );
+            panel = panel.child(header);
         }
-        panel = panel.child(header);
         let entries: Vec<(usize, &HistoryEntry)> = self
             .history
             .iter()
@@ -201,7 +227,7 @@ impl Workbench {
                             }))
                             .child(
                                 div()
-                                    .text_size(px(FONT_LABEL))
+                                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                                     .line_height(px(LEADING_LABEL))
                                     .text_color(theme.foreground)
                                     .truncate()

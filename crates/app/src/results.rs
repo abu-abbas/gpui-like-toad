@@ -478,7 +478,8 @@ impl TableDelegate for ResultsDelegate {
     ) -> impl IntoElement {
         // Header-only column dividers: the body has none, and the table's
         // own handles only show on hover.
-        let divider = cx.theme().border;
+        let theme = cx.theme();
+        let divider = theme.border;
         div()
             .w_full()
             .h_full()
@@ -491,6 +492,7 @@ impl TableDelegate for ResultsDelegate {
                 self.columns[col_ix].align == gpui_kit::TextAlign::Right,
                 |this| this.justify_end(),
             )
+            .text_size(crate::theme::ui_size(theme, FONT_GRID))
             .child(self.columns[col_ix].name.clone())
     }
 
@@ -501,9 +503,7 @@ impl TableDelegate for ResultsDelegate {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        // Explicit 12px/20px: the table's own cell size would render 14px
-        // text, but the spec fixes the data grid at 12px. Monospace keeps
-        // digits and codes aligned down a column.
+        let theme = cx.theme();
         let cell = div()
             .w_full()
             .on_mouse_down(
@@ -512,9 +512,7 @@ impl TableDelegate for ResultsDelegate {
                     table.delegate_mut().right_col = Some(col_ix);
                 }),
             )
-            .font_family(crate::MONO_FONT_FAMILY)
-            .font_features(gpui_kit::FontFeatures::disable_ligatures())
-            .text_size(px(FONT_GRID))
+            .text_size(crate::theme::ui_size(theme, FONT_GRID))
             .line_height(px(LEADING_GRID))
             .truncate();
         let abs_row = self.absolute_row(row_ix);

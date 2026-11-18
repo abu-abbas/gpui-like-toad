@@ -4,7 +4,6 @@
 //! module only holds the UI state and renders the bar.
 
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::Selectable as _;
 use ora_core::filter::select_sql;
 use ora_core::{
     FilterCondition, FilterJoin, FilterOp, TableFilter, TablePage, MAX_PAGE_LIMIT, ROWID_COLUMN,
@@ -83,6 +82,7 @@ pub(super) struct DataTab {
     /// The filter the grid currently reflects (what Refresh re-runs).
     pub(super) applied: TableFilter,
     show_sql: bool,
+    pub(super) show_filters: bool,
     /// The row Details panel on the right of the grid.
     pub(super) show_details: bool,
     /// Redraws the workbench when the grid's selected row changes.
@@ -160,6 +160,7 @@ impl DataTab {
             join: FilterJoin::And,
             applied: TableFilter::default(),
             show_sql: false,
+            show_filters: false,
             show_details: false,
             _grid_observe: None,
             next_row_id: 0,
@@ -267,8 +268,9 @@ impl Workbench {
             return;
         };
         let only_empty_row = data.rows.len() == 1 && !data.rows[0].condition(cx).is_complete();
-        if only_empty_row {
-            if let Some(data) = self.data_mut() {
+        if let Some(data) = self.data_mut() {
+            data.show_filters = true;
+            if only_empty_row {
                 data.rows.clear();
             }
         }
@@ -663,9 +665,7 @@ impl Workbench {
                     .child(caption_text(name, theme))
                     .child(
                         div()
-                            .font_family(crate::MONO_FONT_FAMILY)
-                            .font_features(gpui_kit::FontFeatures::disable_ligatures())
-                            .text_size(px(FONT_GRID))
+                            .text_size(crate::theme::ui_size(&theme, FONT_GRID))
                             .line_height(px(LEADING_GRID))
                             .text_color(if is_null {
                                 theme.muted_foreground.opacity(0.6)
@@ -841,10 +841,9 @@ impl Workbench {
                     .p(px(SPACE_2))
                     .rounded(px(RADIUS_SM))
                     .bg(theme.secondary)
-                    .font_family(crate::MONO_FONT_FAMILY)
                     // No ligatures: `>=` must not render as one glyph.
                     .font_features(gpui_kit::FontFeatures::disable_ligatures())
-                    .text_size(px(FONT_LABEL))
+                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                     .line_height(px(LEADING_LABEL))
                     .children(preview.lines().map(|line| {
                         div()

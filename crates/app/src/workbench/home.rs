@@ -26,7 +26,7 @@ impl Workbench {
                     .gap(px(SPACE_1))
                     .child(
                         div()
-                            .text_size(px(FONT_HEADING_XL))
+                            .text_size(crate::theme::ui_size(&theme, FONT_HEADING_XL))
                             .line_height(px(LEADING_HEADING_XL))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
@@ -153,7 +153,7 @@ impl Workbench {
                         .overflow_hidden()
                         .child(
                             div()
-                                .text_size(px(FONT_BODY))
+                                .text_size(crate::theme::ui_size(&theme, FONT_BODY))
                                 .line_height(px(LEADING_BODY))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.foreground)
@@ -162,7 +162,7 @@ impl Workbench {
                         )
                         .child(
                             div()
-                                .text_size(px(FONT_CAPTION))
+                                .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
                                 .line_height(px(LEADING_CAPTION))
                                 .text_color(theme.muted_foreground)
                                 .truncate()
@@ -313,7 +313,7 @@ impl Workbench {
             }))
             .child(
                 div()
-                    .text_size(px(FONT_HEADING_MD))
+                    .text_size(crate::theme::ui_size(&theme, FONT_HEADING_MD))
                     .line_height(px(LEADING_HEADING_MD))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.foreground)
@@ -356,7 +356,7 @@ impl Workbench {
                 .min_w(px(0.))
                 .w(relative(flex))
                 .truncate()
-                .text_size(px(FONT_LABEL))
+                .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                 .line_height(px(LEADING_LABEL))
                 .font_weight(weight)
                 .text_color(color)
@@ -534,7 +534,7 @@ impl Workbench {
                     .child(icon(IconName::Clock, 14., theme.muted_foreground))
                     .child(
                         div()
-                            .text_size(px(FONT_LABEL))
+                            .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                             .line_height(px(LEADING_LABEL))
                             .text_color(theme.foreground)
                             .truncate()

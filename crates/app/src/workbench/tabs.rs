@@ -10,6 +10,15 @@ impl Workbench {
         // between scroll sideways (mouse wheel or trackpad) when they no
         // longer fit. `flex_none` keeps the bar at its full height: as a
         // flex child it used to shrink when the content below was tall.
+        let view = cx.weak_entity();
+        let scroll = self.tab_scroll.clone();
+        let was_overflowing = self.tab_overflow;
+        const SCROLL_CONTROLS_WIDTH: f32 = 52.;
+        let overflow_threshold = px(if was_overflowing {
+            SCROLL_CONTROLS_WIDTH + SPACE_1
+        } else {
+            0.
+        });
         let mut strip = div()
             .id("tab-strip")
             .flex()
@@ -29,6 +38,26 @@ impl Workbench {
         if self.show_whats_new_tab() {
             strip = strip.child(self.render_whats_new_tab(theme, cx));
         }
+        let strip = div()
+            .flex()
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .on_children_prepainted(move |_, window, cx| {
+                let overflowing = scroll.max_offset().x > overflow_threshold;
+                if overflowing != was_overflowing {
+                    let view = view.clone();
+                    window.defer(cx, move |_, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            if this.tab_overflow != overflowing {
+                                this.tab_overflow = overflowing;
+                                cx.notify();
+                            }
+                        });
+                    });
+                }
+            })
+            .child(strip);
         div()
             .flex()
             .flex_row()
@@ -57,6 +86,38 @@ impl Workbench {
                     .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx)))
                     .child(icon(IconName::Plus, 16., theme.muted_foreground)),
             )
+            .when(self.tab_overflow, |bar| {
+                let mut controls = div()
+                    .flex()
+                    .items_center()
+                    .flex_none()
+                    .w(px(SCROLL_CONTROLS_WIDTH));
+                for (id, symbol, delta) in [
+                    ("tabs-scroll-left", IconName::ChevronLeft, 150.),
+                    ("tabs-scroll-right", IconName::ChevronRight, -150.),
+                ] {
+                    controls = controls.child(
+                        Button::new(id)
+                            .small()
+                            .ghost()
+                            .icon(symbol)
+                            .w(px(26.))
+                            .tooltip(if delta > 0. {
+                                "Scroll tabs left"
+                            } else {
+                                "Scroll tabs right"
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let mut offset = this.tab_scroll.offset();
+                                offset.x = (offset.x + px(delta))
+                                    .clamp(-this.tab_scroll.max_offset().x, px(0.));
+                                this.tab_scroll.set_offset(offset);
+                                cx.notify();
+                            })),
+                    );
+                }
+                bar.child(controls)
+            })
     }
 
     fn render_home_tab(
@@ -102,7 +163,7 @@ impl Workbench {
         ))
         .child(
             div()
-                .text_size(px(FONT_LABEL))
+                .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                 .line_height(px(LEADING_LABEL))
                 .font_weight(FontWeight::MEDIUM)
                 .child("Home"),
@@ -212,7 +273,7 @@ impl Workbench {
                     ))
                     .child(
                         div()
-                            .text_size(px(FONT_LABEL))
+                            .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                             .line_height(px(LEADING_LABEL))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(label_color)
@@ -233,7 +294,7 @@ impl Workbench {
                                 } else {
                                     theme.secondary
                                 })
-                                .text_size(px(FONT_CAPTION))
+                                .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
                                 .line_height(px(LEADING_CAPTION))
                                 .text_color(if closed {
                                     theme.danger

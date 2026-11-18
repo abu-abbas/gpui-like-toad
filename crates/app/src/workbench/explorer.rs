@@ -1,22 +1,22 @@
 use super::*;
 
 impl Workbench {
-    /// Toad-style object browser: schema dropdown, category tabs, filter
-    /// box, and a flat virtualized list of objects with a context menu.
-    pub(super) fn render_explorer(
+    pub(super) fn schema_picker(
         &self,
+        id: &'static str,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let view = cx.entity();
         let schemas = self.conn.schemas.clone();
         let current = self.conn.current_schema.clone();
-        let schema_button = Button::new("schema-select")
+        Button::new(id)
             .child(select_trigger(
                 current.clone().unwrap_or_else(|| "(schema)".to_string()),
                 theme,
             ))
-            .w_full()
+            .small()
+            .when(id == "schema-select", |button| button.w_full())
             .disabled(self.conn.schemas.is_empty())
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.scrollable(true).max_h(px(360.)).min_w(px(220.));
@@ -33,8 +33,16 @@ impl Workbench {
                     );
                 }
                 menu
-            });
+            })
+    }
 
+    /// Toad-style object browser: schema and category selectors, filter
+    /// box, and a flat virtualized list of objects with a context menu.
+    pub(super) fn render_explorer(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let view = cx.entity();
         let counts: Vec<(ObjectCategory, usize)> = ObjectCategory::ALL
             .iter()
@@ -123,46 +131,35 @@ impl Workbench {
 
         div()
             .flex_1()
+            .min_h(px(0.))
             .flex()
             .flex_col()
-            .gap(px(SPACE_2))
-            .pt(px(SPACE_3))
+            .gap(px(6.))
+            .pt(px(6.))
             .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(SPACE_2))
-                    .px(px(SPACE_3))
+                    .px(px(SPACE_2))
+                    .flex_none()
                     .child(
                         div()
-                            .w(px(60.))
-                            .whitespace_nowrap()
-                            .flex_none()
-                            .child(form_label("Schema", theme)),
-                    )
-                    .child(div().flex_1().min_w(px(0.)).child(schema_button)),
+                            .flex()
+                            .child(self.schema_picker("schema-select", theme, cx)),
+                    ),
             )
             .child(
                 div()
                     .flex()
-                    .flex_row()
                     .items_center()
-                    .gap(px(SPACE_2))
-                    .px(px(SPACE_3))
+                    .gap(px(6.))
+                    .px(px(SPACE_2))
+                    .flex_none()
+                    .child(div().w(px(108.)).flex_none().child(category_button))
                     .child(
                         div()
-                            .w(px(60.))
-                            .whitespace_nowrap()
-                            .flex_none()
-                            .child(form_label("Objects", theme)),
-                    )
-                    .child(div().flex_1().min_w(px(0.)).child(category_button)),
-            )
-            .child(
-                div()
-                    .px(px(SPACE_3))
-                    .child(Input::new(&self.search_input).w_full()),
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(Input::new(&self.search_input).small().w_full()),
+                    ),
             )
             .child(list)
     }
@@ -200,7 +197,7 @@ fn render_object_row(
         .h(px(TREE_ROW_HEIGHT))
         .px(px(SPACE_2))
         .rounded(px(RADIUS_SM))
-        .text_size(px(FONT_LABEL))
+        .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
         .line_height(px(LEADING_LABEL))
         .on_click(cx.listener(move |this, event, window, cx| {
             this.on_object_click(click_object.clone(), event, window, cx);

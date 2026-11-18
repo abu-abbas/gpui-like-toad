@@ -31,6 +31,8 @@ pub struct SavedProfile {
     pub name: String,
     pub username: String,
     pub connect_string: String,
+    /// Optional folder in the Connections tree.
+    pub folder: String,
     /// The user ticked "Save password": connect without asking.
     pub save_password: bool,
 }
@@ -513,6 +515,7 @@ fn profile_to_json(p: &SavedProfile) -> Json {
             "connect_string".to_string(),
             Json::Str(p.connect_string.clone()),
         ),
+        ("folder".to_string(), Json::Str(p.folder.clone())),
         ("save_password".to_string(), Json::Bool(p.save_password)),
     ])
 }
@@ -530,6 +533,12 @@ fn profile_from_json(v: &Json) -> Option<SavedProfile> {
         name: v.get("name")?.as_str()?.to_string(),
         username: v.get("username")?.as_str()?.to_string(),
         connect_string: v.get("connect_string")?.as_str()?.to_string(),
+        folder: v
+            .get("folder")
+            .and_then(Json::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
         save_password: v
             .get("save_password")
             .and_then(Json::as_bool)
@@ -727,6 +736,80 @@ pub fn save_theme_preference(pref: ThemePreference) -> std::io::Result<()> {
 // Update-check preferences
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppearancePrefs {
+    pub accent: String,
+    pub ui_font_size: u8,
+    pub sql_font_size: u8,
+    /// None follows the platform default.
+    pub reduce_motion: Option<bool>,
+}
+
+impl Default for AppearancePrefs {
+    fn default() -> Self {
+        Self {
+            accent: "Violet".into(),
+            ui_font_size: 13,
+            sql_font_size: 13,
+            reduce_motion: None,
+        }
+    }
+}
+
+fn read_appearance(dir: &Path) -> AppearancePrefs {
+    let default = AppearancePrefs::default();
+    let Some(settings) = read_json_file(&dir.join("settings.json")) else {
+        return default;
+    };
+    let size = |key, default| {
+        settings
+            .get(key)
+            .and_then(Json::as_u64)
+            .filter(|size| (10..=20).contains(size))
+            .map_or(default, |size| size as u8)
+    };
+    AppearancePrefs {
+        accent: settings
+            .get("accent")
+            .and_then(Json::as_str)
+            .map_or(default.accent, str::to_owned),
+        ui_font_size: size("ui_font_size", default.ui_font_size),
+        sql_font_size: size("sql_font_size", default.sql_font_size),
+        reduce_motion: settings.get("reduce_motion").and_then(Json::as_bool),
+    }
+}
+
+pub fn load_appearance() -> AppearancePrefs {
+    read_appearance(&config_dir())
+}
+
+fn write_appearance(dir: &Path, prefs: &AppearancePrefs) -> std::io::Result<()> {
+    let mut pairs: BTreeMap<String, Json> = match read_json_file(&dir.join("settings.json")) {
+        Some(Json::Obj(pairs)) => pairs.into_iter().collect(),
+        _ => BTreeMap::new(),
+    };
+    pairs.insert("accent".into(), Json::Str(prefs.accent.clone()));
+    pairs.insert("ui_font_size".into(), Json::Num(prefs.ui_font_size.into()));
+    pairs.insert(
+        "sql_font_size".into(),
+        Json::Num(prefs.sql_font_size.into()),
+    );
+    if let Some(reduce_motion) = prefs.reduce_motion {
+        pairs.insert("reduce_motion".into(), Json::Bool(reduce_motion));
+    } else {
+        pairs.remove("reduce_motion");
+    }
+    write_json_file(
+        dir,
+        "settings.json",
+        &Json::Obj(pairs.into_iter().collect()),
+    )
+}
+
+pub fn save_appearance(prefs: &AppearancePrefs) -> std::io::Result<()> {
+    write_appearance(&config_dir(), prefs)
+}
+
 /// Settings for the GitHub Releases update check, kept in `settings.json`
 /// next to the theme. Nothing here identifies the user or the machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -815,6 +898,23 @@ mod tests {
     }
 
     #[test]
+    fn appearance_round_trips_alongside_theme_preference() {
+        let dir = scratch("appearance");
+        let prefs = AppearancePrefs {
+            accent: "Teal".into(),
+            ui_font_size: 15,
+            sql_font_size: 17,
+            reduce_motion: Some(true),
+        };
+        assert_eq!(read_appearance(&dir), AppearancePrefs::default());
+        save_theme_preference_in(&dir, ThemePreference::Dark).unwrap();
+        write_appearance(&dir, &prefs).unwrap();
+        assert_eq!(read_appearance(&dir), prefs);
+        assert_eq!(load_theme_preference_in(&dir), ThemePreference::Dark);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn json_round_trip() {
         let value = Json::Obj(vec![
             ("name".to_string(), Json::Str("HR \"prod\"".to_string())),
@@ -883,6 +983,7 @@ mod tests {
                 name: "HR Local".to_string(),
                 username: "hr".to_string(),
                 connect_string: "localhost:1521/FREEPDB1".to_string(),
+                folder: "Work".into(),
                 save_password: true,
             },
             SavedProfile {
@@ -890,6 +991,7 @@ mod tests {
                 name: "Prod \"A\"".to_string(),
                 username: "app".to_string(),
                 connect_string: "db:1521/PROD".to_string(),
+                folder: String::new(),
                 save_password: false,
             },
         ];
@@ -916,6 +1018,7 @@ mod tests {
             name: "HR".to_string(),
             username: "hr".to_string(),
             connect_string: "db:1521/X".to_string(),
+            folder: String::new(),
             save_password: true,
         }];
         save_profiles_in(&dir, &profiles).unwrap();

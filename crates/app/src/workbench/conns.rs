@@ -265,14 +265,10 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (dot_color, _, conn_detail) = self.conn_status(theme);
+        let (dot_color, _, _) = self.conn_status(theme);
         let others = self.open_conn_count() - usize::from(self.conn.is_open());
-        // With several open, the short profile name keeps the pill from
-        // squeezing Commit/Rollback off the toolbar.
-        let pill_label = if self.conn.session.is_some() && others > 0 {
+        let pill_label = if self.conn.session.is_some() {
             self.conn.label()
-        } else if self.conn.session.is_some() {
-            conn_detail
         } else {
             "Not connected".to_string()
         };
@@ -310,7 +306,7 @@ impl Workbench {
                 div()
                     .min_w(px(0.))
                     .truncate()
-                    .text_size(px(FONT_LABEL))
+                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                     .line_height(px(LEADING_LABEL))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
@@ -324,7 +320,7 @@ impl Workbench {
                     .px(px(SPACE_1))
                     .rounded(px(RADIUS_SM))
                     .bg(theme.secondary)
-                    .text_size(px(FONT_CAPTION))
+                    .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
                     .line_height(px(LEADING_CAPTION))
                     .text_color(theme.muted_foreground)
                     .child(format!("+{others}")),
@@ -532,7 +528,7 @@ impl Workbench {
                     .p(px(SPACE_4))
                     .child(
                         div()
-                            .text_size(px(FONT_HEADING_MD))
+                            .text_size(crate::theme::ui_size(&theme, FONT_HEADING_MD))
                             .line_height(px(LEADING_HEADING_MD))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
@@ -540,7 +536,7 @@ impl Workbench {
                     )
                     .child(
                         div()
-                            .text_size(px(FONT_BODY))
+                            .text_size(crate::theme::ui_size(&theme, FONT_BODY))
                             .line_height(px(LEADING_BODY))
                             .text_color(theme.muted_foreground)
                             .child(text),
@@ -609,7 +605,7 @@ impl Workbench {
 
 /// File name offered when saving a tab's script: its title, `.sql`
 /// added unless already there, path separators replaced.
-fn script_filename(title: &str) -> String {
+pub(super) fn script_filename(title: &str) -> String {
     let base: String = title
         .chars()
         .map(|c| {
@@ -851,6 +847,7 @@ impl Workbench {
                     name: last.profile.name.clone(),
                     username: last.profile.username.clone(),
                     connect_string: last.profile.connect_string.clone(),
+                    folder: String::new(),
                     save_password: false,
                 };
                 self.connection_form.editing_profile = None;

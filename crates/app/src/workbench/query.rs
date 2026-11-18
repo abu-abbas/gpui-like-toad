@@ -33,6 +33,40 @@ impl Workbench {
 }
 
 impl Workbench {
+    pub(super) fn save_active_script(&mut self, cx: &mut Context<Self>) {
+        let tab = self.active_tab();
+        let sql = tab.editor.read(cx).value().to_string();
+        let name = conns::script_filename(&tab.title);
+        let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let prompt = cx.prompt_for_new_path(&dir, Some(&name));
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |view, cx| {
+            let path = match prompt.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) => return,
+                _ => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.push_message("Gagal membuka dialog simpan SQL.".into());
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let display = path.display().to_string();
+            let written = executor
+                .spawn(async move { std::fs::write(path, sql) })
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                this.push_message(match written {
+                    Ok(()) => format!("SQL tersimpan: {display}"),
+                    Err(err) => format!("Gagal menyimpan SQL: {err}"),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn editor_text(&self, cx: &App) -> String {
         self.active_tab().editor.read(cx).value().to_string()
     }
