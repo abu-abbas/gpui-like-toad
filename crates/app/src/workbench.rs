@@ -363,6 +363,7 @@ pub struct Workbench {
     rail: RailPanel,
     sidebar_compact: bool,
     collapsed_connection_folders: HashSet<String>,
+    connection_folder_colors: std::collections::BTreeMap<String, String>,
     focused_profile_id: Option<String>,
     settings: settings::SettingsState,
     profiles: Vec<SavedProfile>,
@@ -449,6 +450,7 @@ impl Workbench {
             rail: RailPanel::Connections,
             sidebar_compact: false,
             collapsed_connection_folders: HashSet::new(),
+            connection_folder_colors: store::load_connection_folder_colors(),
             focused_profile_id: None,
             settings,
             profiles: store::load_profiles(),
@@ -606,6 +608,16 @@ impl Render for Workbench {
                             } else {
                                 "expanded-workbench-explorer"
                             })
+                            .with_handle_appearance(Rc::new(|handle, window, cx| {
+                                use gpui_kit::base::ResizeHandleState;
+                                if handle.state() == ResizeHandleState::Idle {
+                                    Some(div().into_any_element())
+                                } else {
+                                    gpui_kit::component::resizable::resize_handle_appearance()(
+                                        handle, window, cx,
+                                    )
+                                }
+                            }))
                             .child(
                                 resizable_panel()
                                     .size(px(EXPLORER_WIDTH))

@@ -222,21 +222,9 @@ impl Workbench {
                         Some(SettingsPage::Updates) => {
                             Some(self.render_update_settings(theme, cx).into_any_element())
                         }
-                        Some(SettingsPage::About) => Some(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(SPACE_2))
-                                .child(format!(
-                                    concat!(app_name!(), " {}"),
-                                    env!("CARGO_PKG_VERSION")
-                                ))
-                                .child(caption_text(
-                                    "Oracle database client built with GPUI and Rust.".into(),
-                                    theme,
-                                ))
-                                .into_any_element(),
-                        ),
+                        Some(SettingsPage::About) => {
+                            Some(crate::about::content(theme).into_any_element())
+                        }
                         None => None,
                     }),
             );

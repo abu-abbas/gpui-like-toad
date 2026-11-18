@@ -613,6 +613,31 @@ pub fn save_profiles(profiles: &[SavedProfile]) -> std::io::Result<()> {
     save_profiles_in(&config_dir(), profiles)
 }
 
+/// Local colors for sidebar folders. A color can outlive a folder becoming
+/// empty so it is restored when a connection is moved back into that folder.
+pub fn load_connection_folder_colors() -> BTreeMap<String, String> {
+    match read_json_file(&config_dir().join("connection-folder-colors.json")) {
+        Some(Json::Obj(entries)) => entries
+            .into_iter()
+            .filter_map(|(name, value)| Some((name, value.as_str()?.to_owned())))
+            .collect(),
+        _ => BTreeMap::new(),
+    }
+}
+
+pub fn save_connection_folder_colors(colors: &BTreeMap<String, String>) -> std::io::Result<()> {
+    write_json_file(
+        &config_dir(),
+        "connection-folder-colors.json",
+        &Json::Obj(
+            colors
+                .iter()
+                .map(|(folder, color)| (folder.clone(), Json::Str(color.clone())))
+                .collect(),
+        ),
+    )
+}
+
 /// A portable list of connection settings. Keychain IDs and the saved
 /// password flag stay machine-local.
 pub fn export_connection_profiles(profiles: &[SavedProfile]) -> String {

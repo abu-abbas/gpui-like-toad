@@ -9,6 +9,7 @@ macro_rules! app_name {
     };
 }
 
+mod about;
 mod completion;
 mod crash_log;
 mod keychain;
@@ -24,8 +25,8 @@ use std::borrow::Cow;
 use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, ShowCompletions, Undo};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    actions, application, assets, init, App, Bounds, KeyBinding, Menu, MenuItem, OsAction, Point,
-    Size, SystemMenuType, WindowBounds,
+    actions, application, init, App, Bounds, KeyBinding, Menu, MenuItem, OsAction, Point, Size,
+    SystemMenuType, WindowBounds,
 };
 
 actions!(
@@ -36,6 +37,7 @@ actions!(
         HideOthers,
         ShowAll,
         NewWindow,
+        OpenAbout,
         Minimize,
         Zoom,
         ToggleFullScreen
@@ -58,7 +60,7 @@ fn main() {
         // icons in default-icons.txt, so every other Lucide icon used by
         // this app (Database, Clock, Table, House, ChartColumn, ...) silently
         // rendered blank. AllAssets embeds the full catalog.
-        .with_assets(assets::AllAssets);
+        .with_assets(about::OraAssets);
     // macOS keeps the process alive after its last window is closed (red
     // button), with the icon still in the Dock. Without this handler a Dock
     // click did nothing and the only way back was Dock > Quit and relaunch.
@@ -122,14 +124,14 @@ fn install_menus(cx: &mut App) {
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
     cx.on_action(|_: &NewWindow, cx| open_main_window(cx));
+    cx.on_action(|_: &OpenAbout, cx| about::open(cx));
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |w| w.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |w| w.zoom_window()));
     cx.on_action(|_: &ToggleFullScreen, cx| with_active_window(cx, |w| w.toggle_fullscreen()));
 
     cx.set_menus([
         Menu::new(app_name!()).items([
-            // "About" opens Settings, whose About section shows the version.
-            MenuItem::action(concat!("About ", app_name!()), workbench::OpenSettings),
+            MenuItem::action(concat!("About ", app_name!()), OpenAbout),
             MenuItem::separator(),
             MenuItem::action("Settings…", workbench::OpenSettings),
             MenuItem::action("Check for Updates…", workbench::CheckForUpdates),

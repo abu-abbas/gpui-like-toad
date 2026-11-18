@@ -1,7 +1,12 @@
 use super::*;
 
 pub(super) fn sql_editor(state: &Entity<EditorState>) -> Editor {
-    Editor::new(state).flex_1().px(px(SPACE_2)).py(px(SPACE_1))
+    Editor::new(state)
+        .bordered(false)
+        .rounded_none()
+        .flex_1()
+        .px(px(SPACE_2))
+        .py(px(SPACE_1))
 }
 
 impl Workbench {
