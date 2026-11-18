@@ -391,9 +391,11 @@ impl DbClient for DemoClient {
     }
 
     fn delete_grid_row(&mut self, owner: &str, table: &str, rowid: &str) -> Result<(), DbError> {
-        let mut page = TablePage::default();
-        page.rowid = true;
-        page.limit = usize::MAX;
+        let page = TablePage {
+            rowid: true,
+            limit: usize::MAX,
+            ..TablePage::default()
+        };
         let result = self.query_table(owner, table, &TableFilter::default(), page)?;
         if !result.rows.iter().any(|row| row[0].display() == rowid) {
             return Err(DbError::new("Unknown ROWID"));
