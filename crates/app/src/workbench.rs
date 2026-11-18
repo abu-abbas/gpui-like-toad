@@ -52,27 +52,31 @@ use crate::results::ResultsDelegate;
 use crate::schema::{self, ObjectCategory};
 use crate::theme::{
     self, CONNECTIONS_WIDTH, EXPLORER_WIDTH, FONT_BODY, FONT_CAPTION, FONT_HEADING_MD,
-    FONT_HEADING_XL, FONT_LABEL, GRID_ROW_HEIGHT, LEADING_BODY, LEADING_CAPTION,
-    LEADING_HEADING_MD, LEADING_HEADING_XL, LEADING_LABEL, PAGINATION_HEIGHT, PLAN_PANEL_WIDTH,
-    RADIUS_MD, RADIUS_SM, RAIL_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6,
-    STATUS_BAR_HEIGHT, SUB_TAB_HEIGHT, TAB_BAR_HEIGHT, TOOLBAR_HEIGHT, TREE_ROW_HEIGHT,
+    FONT_HEADING_XL, FONT_LABEL, LEADING_BODY, LEADING_CAPTION, LEADING_HEADING_MD,
+    LEADING_HEADING_XL, LEADING_LABEL, PAGINATION_HEIGHT, PLAN_PANEL_WIDTH, RADIUS_MD, RADIUS_SM,
+    RAIL_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6, STATUS_BAR_HEIGHT, SUB_TAB_HEIGHT,
+    TAB_BAR_HEIGHT, TOOLBAR_HEIGHT, TREE_ROW_HEIGHT,
 };
 use crate::worker::{DbHandle, ExportFormat, Job, Password, Response};
 
 mod cell_edit;
 mod chrome;
 mod completion_catalog;
+mod connection_tree;
 mod connections_ui;
 mod conns;
 mod data_tab;
 mod db_events;
 mod explorer;
+mod grid_clipboard;
 mod profiles;
 mod query;
 mod quick_open;
 mod results;
+mod results_grid;
 mod settings;
 mod sidebar;
+mod splash;
 mod tabs;
 mod ui_helpers;
 mod updates;
@@ -359,9 +363,11 @@ impl QueryTab {
 }
 
 pub struct Workbench {
+    splash_visible: bool,
     connection_form: ConnectionForm,
     rail: RailPanel,
     sidebar_compact: bool,
+    folder_draft: Option<(String, Entity<InputState>)>,
     collapsed_connection_folders: HashSet<String>,
     connection_folder_colors: std::collections::BTreeMap<String, String>,
     focused_profile_id: Option<String>,
@@ -446,9 +452,11 @@ impl Workbench {
         });
 
         Workbench {
+            splash_visible: false,
             connection_form,
             rail: RailPanel::Connections,
             sidebar_compact: false,
+            folder_draft: None,
             collapsed_connection_folders: HashSet::new(),
             connection_folder_colors: store::load_connection_folder_colors(),
             focused_profile_id: None,
@@ -528,6 +536,9 @@ impl Workbench {
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        if self.splash_visible {
+            return splash::screen(&theme).into_any_element();
+        }
         // Match the app's default layout at 13px and pass changes through to
         // GPUI controls whose text and row dimensions use rem units.
         window.set_rem_size(theme::ui_size(&theme, 16.));
@@ -627,16 +638,6 @@ impl Render for Workbench {
                             } else {
                                 "expanded-workbench-explorer"
                             })
-                            .with_handle_appearance(Rc::new(|handle, window, cx| {
-                                use gpui_kit::base::ResizeHandleState;
-                                if handle.state() == ResizeHandleState::Idle {
-                                    Some(div().into_any_element())
-                                } else {
-                                    gpui_kit::component::resizable::resize_handle_appearance()(
-                                        handle, window, cx,
-                                    )
-                                }
-                            }))
                             .child(
                                 resizable_panel()
                                     .size(px(EXPLORER_WIDTH))
@@ -667,6 +668,7 @@ impl Render for Workbench {
                 this.child(self.render_settings_dialog(&theme, cx))
             })
             .children(self.render_update_check(&theme, cx))
+            .into_any_element()
     }
 }
 

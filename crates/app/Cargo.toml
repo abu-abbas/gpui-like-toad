@@ -29,6 +29,7 @@ gpui-updater-core = "0.4"
 # Keychain, Windows Credential Manager, Secret Service on Linux (pure-Rust
 # D-Bus via zbus, so no libdbus needed at build time).
 keyring = "4.2"
+rodio = { version = "0.20.1", default-features = false, features = ["wav"] }
 
 # Linux: decode the PNG used as the X11 window icon. Same major as gpui's
 # own `image`, so no second copy is built.

@@ -25,7 +25,7 @@ use std::borrow::Cow;
 use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, ShowCompletions, Undo};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    actions, application, init, App, Bounds, KeyBinding, Menu, MenuItem, OsAction, Point, Size,
+    actions, application, init, App, Bounds, KeyBinding, Menu, MenuItem, OsAction, Size,
     SystemMenuType, WindowBounds,
 };
 
@@ -72,7 +72,7 @@ fn main() {
             let _ = window.update(cx, |_, window, _| window.activate_window());
             cx.activate(true);
         } else {
-            open_main_window(cx);
+            open_main_window(cx, false);
         }
     });
     app.run(|cx: &mut App| {
@@ -88,6 +88,10 @@ fn main() {
         // platform modifier (Command on macOS, Super/Win elsewhere);
         // the explicit ctrl-enter binding covers Windows/Linux Ctrl.
         cx.bind_keys([
+            KeyBinding::new("cmd-c", Copy, Some("OraDataGrid")),
+            KeyBinding::new("ctrl-c", Copy, Some("OraDataGrid")),
+            KeyBinding::new("cmd-v", Paste, Some("OraDataGrid")),
+            KeyBinding::new("ctrl-v", Paste, Some("OraDataGrid")),
             KeyBinding::new("cmd-enter", workbench::RunQuery, Some("Workbench")),
             KeyBinding::new("ctrl-enter", workbench::RunQuery, Some("Workbench")),
             KeyBinding::new("f5", workbench::RunQuery, Some("Workbench")),
@@ -109,7 +113,7 @@ fn main() {
         // GPUI installs no menu bar by default, so on macOS the top bar
         // showed only the app name and Cmd+Q / Cmd+H did nothing.
         install_menus(cx);
-        open_main_window(cx);
+        open_main_window(cx, true);
         cx.activate(true);
     });
 }
@@ -123,7 +127,7 @@ fn install_menus(cx: &mut App) {
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-    cx.on_action(|_: &NewWindow, cx| open_main_window(cx));
+    cx.on_action(|_: &NewWindow, cx| open_main_window(cx, false));
     cx.on_action(|_: &OpenAbout, cx| about::open(cx));
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |w| w.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |w| w.zoom_window()));
@@ -179,15 +183,16 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&mut gpui_kit::Window)) {
 
 /// Open the main workbench window. Used at launch and again from the macOS
 /// reopen handler when every window has been closed.
-fn open_main_window(cx: &mut App) {
+fn open_main_window(cx: &mut App, show_launch_splash: bool) {
     let pref = ora_core::store::load_theme_preference();
     let mut options = gpui_kit::component::TitleBar::window_options();
-    options.window_bounds = Some(WindowBounds::Windowed(Bounds::new(
-        Point::default(),
+    options.window_bounds = Some(WindowBounds::Windowed(Bounds::centered(
+        None,
         Size {
             width: gpui_kit::px(1280.),
             height: gpui_kit::px(800.),
         },
+        cx,
     )));
     // Below this the rail, the side panel's minimum width and the
     // toolbar no longer fit side by side, and content gets clipped.
@@ -216,6 +221,9 @@ fn open_main_window(cx: &mut App) {
         theme::remember_ui_font(window.text_style().font_family);
         theme::apply_preference(pref, window, cx);
         let view = cx.new(|cx| workbench::Workbench::new(window, cx));
+        if show_launch_splash {
+            view.update(cx, |this, cx| this.show_launch_splash(window, cx));
+        }
         // Background, rate-limited, silent on failure.
         view.update(cx, |this, cx| this.auto_check_updates(cx));
         if let Some(panic) = crash_log::take_previous() {

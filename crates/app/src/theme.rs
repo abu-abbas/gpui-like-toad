@@ -37,8 +37,6 @@ pub const TOOLBAR_HEIGHT: f32 = 36.0;
 pub const TAB_BAR_HEIGHT: f32 = 36.0;
 /// Schema tree row height.
 pub const TREE_ROW_HEIGHT: f32 = 28.0;
-/// Data grid row height (also the DataTable `Small` row height).
-pub const GRID_ROW_HEIGHT: f32 = 30.0;
 /// Status bar height.
 pub const STATUS_BAR_HEIGHT: f32 = 26.0;
 /// Width of the compact icon rail.
@@ -473,7 +471,8 @@ fn apply_dark(theme: &mut Theme) {
 
     let editor = &mut std::sync::Arc::make_mut(&mut theme.highlight_theme).style;
     editor.editor_background = Some(hex(0x1E1E1E));
-    editor.editor_gutter_background = Some(panel);
+    // A continuous editing surface keeps the first glyph clear of a contrasting gutter edge.
+    editor.editor_gutter_background = editor.editor_background;
     editor.editor_foreground = Some(text);
     editor.editor_active_line = Some(hex(0x252525));
     editor.editor_line_number = Some(subtle_text);

@@ -5,7 +5,8 @@ pub(super) fn sql_editor(state: &Entity<EditorState>) -> Editor {
         .bordered(false)
         .rounded_none()
         .flex_1()
-        .px(px(SPACE_2))
+        .pl(px(SPACE_4))
+        .pr(px(SPACE_2))
         .py(px(SPACE_1))
 }
 

@@ -11,9 +11,11 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::Sizable as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     div, px, App, ClipboardItem, Context, InteractiveElement as _, IntoElement, MouseButton,
@@ -29,7 +31,12 @@ pub const PAGE_SIZE: usize = 10;
 /// Width of the row-number gutter: fits "1000" at the grid font.
 const GUTTER_WIDTH: f32 = 52.;
 
+pub type InsertRow = Vec<(String, gpui_kit::Entity<InputState>)>;
+pub type InsertRows = Rc<Vec<InsertRow>>;
+
 pub struct ResultsDelegate {
+    pub(crate) insert_rows: InsertRows,
+    pub(crate) insert_disabled: bool,
     result: QueryResult,
     columns: Vec<Column>,
     /// Per result column: right-align its cells (numeric types).
@@ -171,6 +178,8 @@ fn numeric_columns(result: &QueryResult) -> Vec<bool> {
 impl ResultsDelegate {
     pub fn empty() -> Self {
         ResultsDelegate {
+            insert_rows: Default::default(),
+            insert_disabled: false,
             result: QueryResult::default(),
             columns: Vec::new(),
             numeric: Vec::new(),
@@ -236,6 +245,9 @@ impl ResultsDelegate {
     /// Every field of the row shown at table row `row_ix`, in column
     /// order, without the internal ROWID: the Details panel's content.
     pub fn row_fields(&self, row_ix: usize) -> Vec<(String, Value)> {
+        if self.is_insert_row(row_ix) {
+            return Vec::new();
+        }
         let abs_row = self.absolute_row(row_ix);
         self.result
             .columns
@@ -289,6 +301,11 @@ impl ResultsDelegate {
             ora_core::copy::join_values(&refs, ", ")
         };
         let menu = menu
+            .when(self.row_numbers, |menu| {
+                menu.item(PopupMenuItem::new("Copy rows").on_click(clipboard(
+                    self.selected_tsv(Some(row_ix)).unwrap_or_default(),
+                )))
+            })
             .item(PopupMenuItem::new("Copy").on_click(clipboard(value_list)))
             .item(PopupMenuItem::new("Copy Cell").on_click(clipboard(cell)))
             .item(PopupMenuItem::new("Copy Field Name").on_click(clipboard(name_list)));
@@ -397,6 +414,41 @@ impl ResultsDelegate {
         self.page = 0;
     }
 
+    pub fn selected_tsv(&self, fallback: Option<usize>) -> Option<String> {
+        let row_text = |row: usize| {
+            let row = self.result.rows.get(row)?;
+            Some(
+                self.visible
+                    .iter()
+                    .map(|&column| {
+                        let text = row
+                            .get(column)
+                            .map(ora_core::copy::plain)
+                            .unwrap_or_default();
+                        if text.contains(['\t', '\r', '\n', '"']) {
+                            format!("\"{}\"", text.replace('"', "\"\""))
+                        } else {
+                            text
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\t"),
+            )
+        };
+        if self.selected_rows.is_empty() {
+            return fallback
+                .filter(|&ix| ix < self.page_rows())
+                .and_then(|ix| row_text(self.absolute_row(ix)));
+        }
+        Some(
+            self.selected_rows
+                .iter()
+                .filter_map(|&ix| row_text(ix))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
     pub fn selected_rowids(&self) -> Vec<String> {
         let Some(column) = self.rowid_col else {
             return Vec::new();
@@ -414,6 +466,16 @@ impl ResultsDelegate {
 
     pub fn set_page(&mut self, page: usize) {
         self.page = page.min(self.total_pages().saturating_sub(1));
+    }
+
+    pub fn page_rows(&self) -> usize {
+        self.total_rows()
+            .saturating_sub(self.page * self.page_size)
+            .min(self.page_size)
+    }
+
+    fn is_insert_row(&self, row: usize) -> bool {
+        (self.page_rows()..self.page_rows() + self.insert_rows.len()).contains(&row)
     }
 
     pub fn total_rows(&self) -> usize {
@@ -481,6 +543,15 @@ impl TableDelegate for ResultsDelegate {
     ) -> gpui_kit::Stateful<gpui_kit::Div> {
         let row = div().id(("row", ix));
         let absolute = self.absolute_row(ix);
+        if self.is_insert_row(ix) {
+            return row.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|table, _, _, cx| {
+                    table.delegate_mut().selected_rows.clear();
+                    cx.notify();
+                }),
+            );
+        }
         if !self.row_numbers || absolute >= self.total_rows() {
             return row;
         }
@@ -533,9 +604,7 @@ impl TableDelegate for ResultsDelegate {
     }
 
     fn rows_count(&self, _: &App) -> usize {
-        self.total_rows()
-            .saturating_sub(self.page * self.page_size)
-            .min(self.page_size)
+        self.page_rows() + self.insert_rows.len()
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
@@ -557,8 +626,7 @@ impl TableDelegate for ResultsDelegate {
             .h_full()
             .flex()
             .items_center()
-            .border_l_1()
-            .border_color(divider)
+            .when(col_ix > 0, |cell| cell.border_l_1().border_color(divider))
             .pl(px(4.))
             .when(
                 self.columns[col_ix].align == gpui_kit::TextAlign::Right,
@@ -587,6 +655,23 @@ impl TableDelegate for ResultsDelegate {
             .text_size(crate::theme::ui_size(theme, FONT_GRID))
             .line_height(crate::theme::ui_size(theme, LEADING_GRID))
             .truncate();
+        if self.is_insert_row(row_ix) {
+            let Some(column) = self.data_col(col_ix) else {
+                return cell.text_right().text_color(theme.primary).child("+");
+            };
+            let name = &self.result.columns[column].name;
+            return cell.children(
+                self.insert_rows[row_ix - self.page_rows()]
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, field)| {
+                        Input::new(field)
+                            .xsmall()
+                            .bordered(false)
+                            .disabled(self.insert_disabled)
+                    }),
+            );
+        }
         let abs_row = self.absolute_row(row_ix);
         let Some(data_col) = self.data_col(col_ix) else {
             return cell
@@ -641,6 +726,9 @@ impl TableDelegate for ResultsDelegate {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
+        if self.is_insert_row(row_ix) {
+            return menu;
+        }
         let Some(data_col) = self.right_col.and_then(|c| self.data_col(c)) else {
             return menu;
         };
@@ -684,6 +772,9 @@ impl TableDelegate for ResultsDelegate {
     }
 
     fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
+        if self.is_insert_row(row_ix) {
+            return None;
+        }
         let abs_row = self.absolute_row(row_ix);
         Some(match self.data_col(col_ix) {
             Some(data_col) => self.cell_text(abs_row, data_col).into(),
@@ -786,6 +877,25 @@ mod tests {
             elapsed: Default::default(),
             fetch_time: None,
         }
+    }
+
+    #[test]
+    fn copies_selected_visible_cells_as_spreadsheet_rows() {
+        let mut result = result_with_rows(3);
+        result.columns.push(ColumnInfo {
+            name: "Text".into(),
+            data_type: "VARCHAR2".into(),
+        });
+        for row in &mut result.rows {
+            row.push(text("a\tb\n\"c\""));
+        }
+        let mut delegate = ResultsDelegate::empty().with_row_numbers();
+        delegate.set_result(result);
+        delegate.set_hidden(["N".to_owned()].into_iter().collect());
+        delegate.selected_rows.extend([0, 2]);
+        let pasted =
+            ora_core::import::clipboard_rows(&delegate.selected_tsv(None).unwrap()).unwrap();
+        assert_eq!(pasted, vec![vec!["a\tb\n\"c\""]; 2]);
     }
 
     #[test]

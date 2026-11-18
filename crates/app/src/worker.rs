@@ -112,7 +112,7 @@ pub enum Job {
         name: String,
         edits: Vec<CellUpdate>,
         deletes: Vec<String>,
-        insert: Vec<(String, String)>,
+        inserts: Vec<Vec<(String, String)>>,
     },
     Commit,
     Rollback,
@@ -493,7 +493,7 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             name,
             edits,
             deletes,
-            insert,
+            inserts,
         } => match client.as_mut() {
             Some(client) => {
                 let mut done = 0;
@@ -523,7 +523,10 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                         Err(err) => error = Some(err.to_string()),
                     }
                 }
-                if error.is_none() && !insert.is_empty() {
+                for insert in inserts {
+                    if error.is_some() {
+                        break;
+                    }
                     match client.insert_grid_row(&owner, &name, &insert) {
                         Ok(()) => done += 1,
                         Err(err) => error = Some(err.to_string()),

@@ -182,11 +182,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         let mut colors = self.connection_folder_colors.clone();
-        if color.is_empty() {
-            colors.remove(folder);
-        } else {
-            colors.insert(folder.to_owned(), color.to_owned());
-        }
+        colors.insert(folder.to_owned(), color.to_owned());
         match store::save_connection_folder_colors(&colors) {
             Ok(()) => self.connection_folder_colors = colors,
             Err(err) => self.push_message(format!("Could not save folder color: {err}")),
