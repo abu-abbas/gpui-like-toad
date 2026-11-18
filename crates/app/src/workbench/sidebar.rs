@@ -134,18 +134,8 @@ impl Workbench {
                 );
             }
             nav = nav.child(heading);
-            if selected && !compact {
-                nav = nav.child(match panel {
-                    RailPanel::Connections => self
-                        .render_profile_list(keyboard, theme, cx)
-                        .into_any_element(),
-                    RailPanel::Favorites => self
-                        .render_history_panel(true, theme, cx)
-                        .into_any_element(),
-                    RailPanel::History => self
-                        .render_history_panel(false, theme, cx)
-                        .into_any_element(),
-                });
+            if selected && !compact && panel == RailPanel::Connections {
+                nav = nav.child(self.render_profile_list(keyboard, theme, cx));
             }
         }
         nav.child(div().flex_1().min_h(px(0.))).child(
@@ -168,31 +158,45 @@ impl Workbench {
         )
     }
 
-    fn render_history_panel(
+    pub(super) fn render_history_panel(
         &self,
         favorites_only: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut panel = div().flex().flex_col().min_h(px(0.)).overflow_hidden();
-        let mut header = div().flex().items_center().flex_none().px(px(SPACE_1));
-        if !favorites_only {
-            header = header.justify_end().child(
-                div()
-                    .id("history-clear")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .h(px(28.))
-                    .w(px(28.))
-                    .rounded(px(RADIUS_MD))
-                    .hover(|this| this.bg(theme.secondary))
-                    .on_click(cx.listener(|this, _, _, cx| this.clear_history(cx)))
-                    .child(icon(IconName::Trash, 14., theme.muted_foreground)),
-            );
-            panel = panel.child(header);
-        }
+        let title = if favorites_only {
+            "Favorites"
+        } else {
+            "History"
+        };
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .flex_none()
+            .h(px(TOOLBAR_HEIGHT))
+            .px(px(SPACE_3))
+            .child(form_label(title, theme))
+            .when(!favorites_only, |header| {
+                header.child(
+                    Button::new("history-clear")
+                        .small()
+                        .ghost()
+                        .icon(IconName::Trash)
+                        .tooltip("Clear history")
+                        .disabled(self.history.is_empty())
+                        .on_click(cx.listener(|this, _, _, cx| this.clear_history(cx))),
+                )
+            });
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .overflow_hidden()
+            .bg(theme.sidebar)
+            .child(header);
         let entries: Vec<(usize, &HistoryEntry)> = self
             .history
             .iter()
@@ -229,21 +233,26 @@ impl Workbench {
             } else {
                 "history-scroll"
             })
+            .min_h(px(0.))
             .overflow_y_scroll()
             .p(px(SPACE_2));
-        let mut zebra = 0usize;
-        for (ix, entry) in entries {
+        for (visible_ix, (ix, entry)) in entries.into_iter().enumerate() {
             let preview = entry.sql.split_whitespace().collect::<Vec<_>>().join(" ");
             let sql = entry.sql.clone();
             let favorite = entry.favorite;
-            zebra += 1;
             list = list.child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .rounded(px(RADIUS_MD))
-                    .when(zebra % 2 == 1, |row| row.bg(theme.table_even))
+                    .rounded(px(RADIUS_SM))
+                    .h(px(TREE_ROW_HEIGHT))
+                    .flex_none()
+                    .bg(if visible_ix % 2 == 0 {
+                        theme.table_even
+                    } else {
+                        theme.table
+                    })
                     .hover(|this| this.bg(theme.secondary))
                     .child(
                         div()

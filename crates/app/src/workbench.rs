@@ -598,11 +598,30 @@ impl Render for Workbench {
                     .flex_1()
                     .min_h(px(0.))
                     .child(self.render_navigation(window.last_input_was_keyboard(), &theme, cx))
-                    .child(div().flex().flex_1().min_w(px(0.)).child(
-                        if self.conn.session.is_some() {
-                            // Each layout starts with the same explorer width.
-                            // The resizable group otherwise scales both panels
-                            // when the navigation rail changes width.
+                    .child(div().flex().flex_1().min_w(px(0.)).child({
+                        let connected = self.conn.session.is_some();
+                        let secondary = match self.rail {
+                            RailPanel::Connections if connected => Some(
+                                self.render_connection_explorer(&theme, cx)
+                                    .into_any_element(),
+                            ),
+                            RailPanel::Connections => None,
+                            RailPanel::Favorites | RailPanel::History => Some(
+                                self.render_history_panel(
+                                    self.rail == RailPanel::Favorites,
+                                    &theme,
+                                    cx,
+                                )
+                                .into_any_element(),
+                            ),
+                        };
+                        let main = if connected {
+                            self.render_main(&theme, cx).into_any_element()
+                        } else {
+                            self.render_disconnected(&theme, cx).into_any_element()
+                        };
+                        if let Some(secondary) = secondary {
+                            // Use the same resizable column for all three sidebar pages.
                             h_resizable(if self.sidebar_compact {
                                 "compact-workbench-explorer"
                             } else {
@@ -622,14 +641,14 @@ impl Render for Workbench {
                                 resizable_panel()
                                     .size(px(EXPLORER_WIDTH))
                                     .size_range(px(190.)..px(440.))
-                                    .child(self.render_connection_explorer(&theme, cx)),
+                                    .child(secondary),
                             )
-                            .child(resizable_panel().child(self.render_main(&theme, cx)))
+                            .child(resizable_panel().child(main))
                             .into_any_element()
                         } else {
-                            self.render_disconnected(&theme, cx).into_any_element()
-                        },
-                    )),
+                            main
+                        }
+                    })),
             )
             .child(self.render_status_bar(&theme))
             .when(self.connection_form.show_connection_form, |this| {
