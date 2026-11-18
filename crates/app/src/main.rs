@@ -88,6 +88,10 @@ fn main() {
         // platform modifier (Command on macOS, Super/Win elsewhere);
         // the explicit ctrl-enter binding covers Windows/Linux Ctrl.
         cx.bind_keys([
+            KeyBinding::new("cmd-c", Copy, Some("OraDataGrid")),
+            KeyBinding::new("ctrl-c", Copy, Some("OraDataGrid")),
+            KeyBinding::new("cmd-v", Paste, Some("OraDataGrid")),
+            KeyBinding::new("ctrl-v", Paste, Some("OraDataGrid")),
             KeyBinding::new("cmd-enter", workbench::RunQuery, Some("Workbench")),
             KeyBinding::new("ctrl-enter", workbench::RunQuery, Some("Workbench")),
             KeyBinding::new("f5", workbench::RunQuery, Some("Workbench")),

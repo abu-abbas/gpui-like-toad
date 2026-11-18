@@ -133,7 +133,19 @@ impl Workbench {
                         }),
                 );
             }
-            nav = nav.child(heading);
+            if panel == RailPanel::Connections {
+                let view = cx.entity();
+                nav = nav.child(
+                    div()
+                        .id("connections-heading-menu")
+                        .child(heading)
+                        .context_menu(move |menu, _, _| {
+                            menu.item(connection_tree::new_folder_item(&view, ""))
+                        }),
+                );
+            } else {
+                nav = nav.child(heading);
+            }
             if selected && !compact && panel == RailPanel::Connections {
                 nav = nav.child(self.render_profile_list(keyboard, theme, cx));
             }

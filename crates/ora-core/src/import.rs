@@ -21,7 +21,7 @@ pub struct CsvData {
 /// whose field count differs from the header (the message names the line).
 pub fn parse_csv(text: &str) -> Result<CsvData, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let records = split_records(text)?;
+    let records = split_records(text, ',')?;
     let mut records = records.into_iter();
     let Some((_, headers)) = records.next() else {
         return Err("file CSV kosong".to_string());
@@ -48,8 +48,15 @@ pub fn parse_csv(text: &str) -> Result<CsvData, String> {
     Ok(CsvData { headers, rows })
 }
 
-/// Split into records of fields, each tagged with its 1-based starting line.
-fn split_records(text: &str) -> Result<Vec<(usize, Vec<String>)>, String> {
+/// Read spreadsheet clipboard rows, preserving quoted tabs and line breaks.
+pub fn clipboard_rows(text: &str) -> Result<Vec<Vec<String>>, String> {
+    Ok(split_records(text, '\t')?
+        .into_iter()
+        .map(|(_, fields)| fields)
+        .collect())
+}
+
+fn split_records(text: &str, delimiter: char) -> Result<Vec<(usize, Vec<String>)>, String> {
     let mut records = Vec::new();
     let mut fields = Vec::new();
     let mut field = String::new();
@@ -75,7 +82,7 @@ fn split_records(text: &str) -> Result<Vec<(usize, Vec<String>)>, String> {
         }
         match c {
             '"' if field.is_empty() => in_quotes = true,
-            ',' => fields.push(std::mem::take(&mut field)),
+            c if c == delimiter => fields.push(std::mem::take(&mut field)),
             '\r' if chars.peek() == Some(&'\n') => {}
             '\n' => {
                 fields.push(std::mem::take(&mut field));
@@ -89,7 +96,7 @@ fn split_records(text: &str) -> Result<Vec<(usize, Vec<String>)>, String> {
     if in_quotes {
         return Err(format!("baris {record_line}: tanda kutip tidak ditutup"));
     }
-    if !field.is_empty() || !fields.is_empty() {
+    if !field.is_empty() || !fields.is_empty() || text.ends_with('"') {
         fields.push(field);
         records.push((record_line, fields));
     }
@@ -161,6 +168,15 @@ pub fn insert_statement(owner: &str, table: &str, columns: &[String], row: &[Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_clipboard_without_a_header_and_preserves_quoted_fields() {
+        let rows = clipboard_rows("1\t\"two\tcolumns\"\r\n2\t\"line\n\"\"two\"\"\"\r\n").unwrap();
+        assert_eq!(rows[0], ["1", "two\tcolumns"]);
+        assert_eq!(rows[1], ["2", "line\n\"two\""]);
+        assert!(clipboard_rows("\"unfinished").is_err());
+        assert_eq!(clipboard_rows("\"\"").unwrap()[0], [""]);
+    }
 
     fn col(name: &str) -> ColumnDef {
         ColumnDef {

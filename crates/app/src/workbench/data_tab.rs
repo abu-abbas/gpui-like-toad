@@ -97,14 +97,14 @@ pub(super) struct DataTab {
     /// Cell edits staged or applied but not yet committed.
     pub(super) edits: Vec<CellEdit>,
     pub(super) deletes: Vec<String>,
-    pub(super) insert_fields: Vec<(String, Entity<InputState>)>,
+    pub(super) insert_rows: crate::results::InsertRows,
     _page_subs: Vec<Subscription>,
 }
 
 impl DataTab {
     pub(super) fn has_staged(&self) -> bool {
         !self.deletes.is_empty()
-            || !self.insert_fields.is_empty()
+            || !self.insert_rows.is_empty()
             || self.edits.iter().any(|edit| !edit.applied)
     }
 
@@ -178,7 +178,7 @@ impl DataTab {
             hidden: HashSet::new(),
             edits: Vec::new(),
             deletes: Vec::new(),
-            insert_fields: Vec::new(),
+            insert_rows: Default::default(),
             _page_subs: page_subs,
         }
     }
@@ -586,12 +586,12 @@ impl Workbench {
             && self.active_tab().conn == Some(self.conn.id)
             && self.conn.session.is_some()
             && !data.columns.is_empty();
-        let selected = self
-            .active_tab()
-            .table_state
-            .read(cx)
-            .delegate()
-            .selected_rowids();
+        let state = self.active_tab().table_state.read(cx);
+        let draft_index = state
+            .selected_row()
+            .and_then(|ix| ix.checked_sub(state.delegate().page_rows()))
+            .filter(|&ix| ix < data.insert_rows.len());
+        let selected = state.delegate().selected_rowids();
         let staged = data.has_staged();
         let button = |id: &'static str, symbol, label: &'static str, disabled| {
             Button::new(id)
@@ -614,35 +614,39 @@ impl Workbench {
                     "row-add",
                     IconName::Plus,
                     "Add row",
-                    busy || !editable || !data.insert_fields.is_empty(),
+                    !self.can_insert_rows(),
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
-                    if let Some(data) = this.data_mut() {
-                        data.insert_fields = data
-                            .columns
-                            .iter()
-                            .map(|name| {
-                                (
-                                    name.clone(),
-                                    cx.new(|cx| {
-                                        InputState::new(window, cx).placeholder(name.clone())
-                                    }),
-                                )
-                            })
-                            .collect();
-                        cx.notify();
-                    }
+                    this.stage_grid_rows(vec![Vec::new()], None, window, cx)
                 })),
+            )
+            .child(
+                button(
+                    "row-paste",
+                    IconName::Clipboard,
+                    "Paste rows",
+                    !self.can_insert_rows(),
+                )
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.paste_grid_rows(None, window, cx)),
+                ),
             )
             .child(
                 button(
                     "row-delete",
                     IconName::Minus,
                     "Stage selected rows for deletion",
-                    busy || !editable || selected.is_empty(),
+                    busy || !editable || (draft_index.is_none() && selected.is_empty()),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(data) = this.data_mut() {
+                        if let Some(ix) = draft_index {
+                            if ix < data.insert_rows.len() {
+                                std::rc::Rc::make_mut(&mut data.insert_rows).remove(ix);
+                            }
+                            cx.notify();
+                            return;
+                        }
                         for id in &selected {
                             if !data.deletes.contains(id) {
                                 data.deletes.push(id.clone());
@@ -700,25 +704,7 @@ impl Workbench {
                     theme,
                 ))
             });
-        let mut group = div().flex_none().flex().flex_col();
-        if !data.insert_fields.is_empty() {
-            group = group.child(
-                div()
-                    .id("new-row-values")
-                    .flex()
-                    .overflow_x_scroll()
-                    .gap(px(6.))
-                    .p(px(4.))
-                    .children(data.insert_fields.iter().map(|(name, field)| {
-                        div()
-                            .flex_none()
-                            .w(px(140.))
-                            .child(caption_text(name.clone(), theme))
-                            .child(Input::new(field).small().disabled(busy))
-                    })),
-            );
-        }
-        Some(group.child(bar).into_any_element())
+        Some(bar.flex_none().into_any_element())
     }
 
     /// The Details panel: every column of the selected row as a

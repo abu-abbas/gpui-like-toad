@@ -52,25 +52,28 @@ use crate::results::ResultsDelegate;
 use crate::schema::{self, ObjectCategory};
 use crate::theme::{
     self, CONNECTIONS_WIDTH, EXPLORER_WIDTH, FONT_BODY, FONT_CAPTION, FONT_HEADING_MD,
-    FONT_HEADING_XL, FONT_LABEL, GRID_ROW_HEIGHT, LEADING_BODY, LEADING_CAPTION,
-    LEADING_HEADING_MD, LEADING_HEADING_XL, LEADING_LABEL, PAGINATION_HEIGHT, PLAN_PANEL_WIDTH,
-    RADIUS_MD, RADIUS_SM, RAIL_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6,
-    STATUS_BAR_HEIGHT, SUB_TAB_HEIGHT, TAB_BAR_HEIGHT, TOOLBAR_HEIGHT, TREE_ROW_HEIGHT,
+    FONT_HEADING_XL, FONT_LABEL, LEADING_BODY, LEADING_CAPTION, LEADING_HEADING_MD,
+    LEADING_HEADING_XL, LEADING_LABEL, PAGINATION_HEIGHT, PLAN_PANEL_WIDTH, RADIUS_MD, RADIUS_SM,
+    RAIL_WIDTH, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6, STATUS_BAR_HEIGHT, SUB_TAB_HEIGHT,
+    TAB_BAR_HEIGHT, TOOLBAR_HEIGHT, TREE_ROW_HEIGHT,
 };
 use crate::worker::{DbHandle, ExportFormat, Job, Password, Response};
 
 mod cell_edit;
 mod chrome;
 mod completion_catalog;
+mod connection_tree;
 mod connections_ui;
 mod conns;
 mod data_tab;
 mod db_events;
 mod explorer;
+mod grid_clipboard;
 mod profiles;
 mod query;
 mod quick_open;
 mod results;
+mod results_grid;
 mod settings;
 mod sidebar;
 mod tabs;
@@ -362,6 +365,7 @@ pub struct Workbench {
     connection_form: ConnectionForm,
     rail: RailPanel,
     sidebar_compact: bool,
+    folder_draft: Option<(String, Entity<InputState>)>,
     collapsed_connection_folders: HashSet<String>,
     connection_folder_colors: std::collections::BTreeMap<String, String>,
     focused_profile_id: Option<String>,
@@ -449,6 +453,7 @@ impl Workbench {
             connection_form,
             rail: RailPanel::Connections,
             sidebar_compact: false,
+            folder_draft: None,
             collapsed_connection_folders: HashSet::new(),
             connection_folder_colors: store::load_connection_folder_colors(),
             focused_profile_id: None,

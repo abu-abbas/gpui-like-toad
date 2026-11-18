@@ -20,19 +20,55 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tab = self.active_tab();
+        if let Some(data) = &tab.data {
+            let grid = tab.table_state.read(cx).delegate();
+            if !std::rc::Rc::ptr_eq(&grid.insert_rows, &data.insert_rows)
+                || (!data.insert_rows.is_empty() && grid.insert_disabled != self.conn.busy)
+            {
+                tab.table_state.update(cx, |state, cx| {
+                    let grid = state.delegate_mut();
+                    grid.insert_rows = data.insert_rows.clone();
+                    grid.insert_disabled = self.conn.busy;
+                    cx.notify();
+                });
+            }
+        }
         let grid = if tab.last_result.is_some() {
             div()
                 .flex_1()
                 .min_w(px(0.))
                 .overflow_hidden()
-                .child(
-                    DataTable::new(&tab.table_state)
-                        .stripe(true)
-                        .fixed_cols_border(false)
-                        .bordered(true)
-                        .xsmall()
-                        .header_row_height(px(DATA_HEADER_HEIGHT)),
+                .key_context("OraDataGrid")
+                .on_action(
+                    cx.listener(|this, _: &gpui_kit::component::input::Copy, _, cx| {
+                        let state = this.active_tab().table_state.read(cx);
+                        if let Some(text) = state.delegate().selected_tsv(state.selected_row()) {
+                            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+                        }
+                    }),
                 )
+                .capture_action(cx.listener(
+                    |this, _: &gpui_kit::component::input::Paste, window, cx| {
+                        let anchor = this.focused_insert_cell(window, cx);
+                        if anchor.is_some()
+                            && cx
+                                .read_from_clipboard()
+                                .and_then(|item| item.text())
+                                .is_some_and(|s| s.contains(['\t', '\n', '\r']))
+                        {
+                            this.paste_grid_rows(anchor, window, cx);
+                            cx.stop_propagation();
+                        }
+                    },
+                ))
+                .on_action(cx.listener(
+                    |this, _: &gpui_kit::component::input::Paste, window, cx| {
+                        if this.focused_insert_cell(window, cx).is_none() {
+                            this.paste_grid_rows(None, window, cx);
+                        }
+                    },
+                ))
+                .child(results_grid::ResultsGrid::new(&tab.table_state, theme))
                 .into_any_element()
         } else {
             div()
@@ -73,14 +109,9 @@ impl Workbench {
                 .min_h(px(0.))
                 .overflow_hidden()
                 .child(
-                    div().flex_1().child(
-                        DataTable::new(&data.structure)
-                            .stripe(true)
-                            .fixed_cols_border(false)
-                            .bordered(true)
-                            .xsmall()
-                            .header_row_height(px(DATA_HEADER_HEIGHT)),
-                    ),
+                    div()
+                        .flex_1()
+                        .child(results_grid::ResultsGrid::new(&data.structure, theme)),
                 )
                 .into_any_element(),
             (DataView::Index, Some(data)) => div()
@@ -90,14 +121,9 @@ impl Workbench {
                 .min_h(px(0.))
                 .overflow_hidden()
                 .child(
-                    div().flex_1().child(
-                        DataTable::new(&data.indexes)
-                            .stripe(true)
-                            .fixed_cols_border(false)
-                            .bordered(true)
-                            .xsmall()
-                            .header_row_height(px(DATA_HEADER_HEIGHT)),
-                    ),
+                    div()
+                        .flex_1()
+                        .child(results_grid::ResultsGrid::new(&data.indexes, theme)),
                 )
                 .into_any_element(),
             (DataView::Ddl, Some(data)) => div()
@@ -571,14 +597,7 @@ impl Workbench {
                 } else {
                     div()
                         .flex_1()
-                        .child(
-                            DataTable::new(&tab.table_state)
-                                .stripe(true)
-                                .fixed_cols_border(false)
-                                .bordered(true)
-                                .small()
-                                .header_row_height(px(GRID_ROW_HEIGHT)),
-                        )
+                        .child(results_grid::ResultsGrid::new(&tab.table_state, theme))
                         .into_any_element()
                 }
             }

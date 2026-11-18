@@ -199,16 +199,20 @@ impl Workbench {
         };
         let staged: Vec<&CellEdit> = data.edits.iter().filter(|e| !e.applied).collect();
         let deletes = data.deletes.clone();
-        let insert = data
-            .insert_fields
+        let inserts: Vec<Vec<_>> = data
+            .insert_rows
             .iter()
-            .filter_map(|(name, field)| {
-                let value = field.read(cx).value().to_string();
-                (!value.is_empty()).then(|| (name.clone(), value))
+            .map(|row| {
+                row.iter()
+                    .filter_map(|(name, field)| {
+                        let value = field.read(cx).value().to_string();
+                        (!value.is_empty()).then(|| (name.clone(), value))
+                    })
+                    .collect()
             })
-            .collect::<Vec<_>>();
-        if !data.insert_fields.is_empty() && insert.is_empty() {
-            self.conn.status = "Isi minimal satu kolom untuk baris baru.".into();
+            .collect();
+        if inserts.iter().any(Vec::is_empty) {
+            self.conn.status = "Isi minimal satu kolom untuk setiap baris baru.".into();
             cx.notify();
             return;
         }
@@ -240,7 +244,7 @@ impl Workbench {
                 name,
                 edits: updates,
                 deletes,
-                insert,
+                inserts,
             },
             PendingOp::ApplyEdits,
             cx,
@@ -269,7 +273,7 @@ impl Workbench {
             let removed = remaining.min(data.deletes.len());
             data.deletes.drain(..removed);
             if remaining > removed {
-                data.insert_fields.clear();
+                std::rc::Rc::make_mut(&mut data.insert_rows).drain(..remaining - removed);
             }
         }
         if changed_rows
@@ -307,7 +311,7 @@ impl Workbench {
             return;
         };
         data.deletes.clear();
-        data.insert_fields.clear();
+        data.insert_rows = Default::default();
         data.edits.retain(|e| e.applied || e.was_applied);
         for edit in &mut data.edits {
             if edit.was_applied {
@@ -328,7 +332,7 @@ impl Workbench {
             }
             if let Some(data) = self.tabs[ix].data.as_mut() {
                 data.deletes.clear();
-                data.insert_fields.clear();
+                data.insert_rows = Default::default();
                 if !data.edits.is_empty() {
                     data.edits.clear();
                     self.sync_pending(ix, cx);
