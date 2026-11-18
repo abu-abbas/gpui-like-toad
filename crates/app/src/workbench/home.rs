@@ -1,5 +1,13 @@
 use super::*;
 
+#[derive(Default)]
+pub(super) struct HomeViewState {
+    /// Show saved connections as a zebra list instead of cards.
+    list: bool,
+    connections_folded: bool,
+    recent_folded: bool,
+}
+
 impl Workbench {
     pub(super) fn render_home(
         &self,
@@ -45,8 +53,8 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let folded = self.home_conn_folded;
-        let list_mode = self.home_list;
+        let folded = self.home_view.connections_folded;
+        let list_mode = self.home_view.list;
         let toggle = |id: &str, label: &'static str, icon_name: IconName, active: bool| {
             Button::new(id.to_string())
                 .small()
@@ -68,7 +76,7 @@ impl Workbench {
                     theme,
                     cx,
                     |this| {
-                        this.home_conn_folded = !this.home_conn_folded;
+                        this.home_view.connections_folded = !this.home_view.connections_folded;
                     },
                 ))
                 .child(div().flex_1())
@@ -81,7 +89,7 @@ impl Workbench {
                             !list_mode,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.home_list = false;
+                            this.home_view.list = false;
                             cx.notify();
                         })),
                     )
@@ -93,7 +101,7 @@ impl Workbench {
                             list_mode,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.home_list = true;
+                            this.home_view.list = true;
                             cx.notify();
                         })),
                     )
@@ -481,7 +489,7 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let folded = self.home_recent_folded;
+        let folded = self.home_view.recent_folded;
         let mut section = div()
             .flex()
             .flex_col()
@@ -492,7 +500,7 @@ impl Workbench {
                 folded,
                 theme,
                 cx,
-                |this| this.home_recent_folded = !this.home_recent_folded,
+                |this| this.home_view.recent_folded = !this.home_view.recent_folded,
             ));
         if folded {
             return section.into_any_element();

@@ -78,7 +78,8 @@ mod ui_helpers;
 mod updates;
 use cell_edit::CellEditor;
 use data_tab::{DataTab, DataView};
-use profiles::FORM_INCOMPLETE;
+use home::HomeViewState;
+use profiles::{ConnectionForm, FORM_INCOMPLETE};
 use quick_open::QuickOpen;
 use ui_helpers::{
     body_text, caption_text, empty_state_text, form_label, icon, select_trigger, status_dot,
@@ -350,28 +351,10 @@ impl QueryTab {
 }
 
 pub struct Workbench {
-    name_input: Entity<InputState>,
-    user_input: Entity<InputState>,
-    host_input: Entity<InputState>,
-    port_input: Entity<InputState>,
-    service_input: Entity<InputState>,
-    tns_input: Entity<InputState>,
-    /// Connection dialog mode: separate host/port/service (Basic) or one
-    /// TNS alias / connect descriptor.
-    use_tns: bool,
-    /// Feedback shown inside the connection dialog: (is_error, text).
-    form_notice: Option<(bool, String)>,
-    password_input: Entity<InputState>,
-    /// "Save password" checkbox in the connection dialog. Off by default;
-    /// follows the profile when editing one.
-    save_password: bool,
+    connection_form: ConnectionForm,
     search_input: Entity<InputState>,
     rail: RailPanel,
     profiles: Vec<SavedProfile>,
-    editing_profile: Option<usize>,
-    /// Whether the connection dialog (modal) is open. Closing it never
-    /// clears the inputs: they live on `Workbench` as entities.
-    show_connection_form: bool,
     history: Vec<HistoryEntry>,
     theme_pref: ThemePreference,
     tabs: Vec<QueryTab>,
@@ -407,12 +390,8 @@ pub struct Workbench {
     disconnect_prompt: Option<conns::DisconnectPrompt>,
     /// The Info panel under data / script tabs is folded to its header.
     info_collapsed: bool,
-    /// Home page: connections as a zebra list instead of cards, and
-    /// whether each section is folded.
-    home_list: bool,
+    home_view: HomeViewState,
     side_conn_folded: bool,
-    home_conn_folded: bool,
-    home_recent_folded: bool,
     /// Keeps shortcuts (Quick Open, Run) working when no input has focus.
     focus_handle: gpui_kit::FocusHandle,
     tree_filter: String,
@@ -429,21 +408,7 @@ pub struct Workbench {
 
 impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let name_input =
-            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Nama koneksi (opsional)"));
-        let user_input =
-            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Username, mis. HR"));
-        let host_input =
-            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("dbhost.example.com"));
-        let port_input = cx.new(|cx| {
-            InputState::new(&mut *window, cx)
-                .placeholder("1521")
-                .default_value("1521")
-        });
-        let service_input = cx.new(|cx| InputState::new(&mut *window, cx).placeholder("orclpdb"));
-        let tns_input = cx
-            .new(|cx| InputState::new(&mut *window, cx).placeholder("ORCL atau (DESCRIPTION=...)"));
-        let password_input = cx.new(|cx| InputState::new(&mut *window, cx).masked(true));
+        let connection_form = ConnectionForm::new(window, cx);
         let search_input =
             cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Filter objects..."));
         let catalog = Rc::new(RefCell::new(Catalog::new()));
@@ -478,21 +443,10 @@ impl Workbench {
             .observe_window_appearance(|window, cx| theme::sync_system_appearance(window, cx));
 
         Workbench {
-            name_input,
-            user_input,
-            host_input,
-            port_input,
-            service_input,
-            tns_input,
-            use_tns: false,
-            form_notice: None,
-            password_input,
-            save_password: false,
+            connection_form,
             search_input,
             rail: RailPanel::Connections,
             profiles: store::load_profiles(),
-            editing_profile: None,
-            show_connection_form: false,
             history: store::load_history(),
             theme_pref: theme::preference(cx),
             tabs: vec![first_tab],
@@ -514,10 +468,8 @@ impl Workbench {
             cell_editor: None,
             disconnect_prompt: None,
             info_collapsed: false,
-            home_list: false,
+            home_view: HomeViewState::default(),
             side_conn_folded: false,
-            home_conn_folded: false,
-            home_recent_folded: false,
             focus_handle: cx.focus_handle(),
             tree_filter: String::new(),
             messages: Vec::new(),
@@ -650,7 +602,7 @@ impl Render for Workbench {
                     ),
             )
             .child(self.render_status_bar(&theme))
-            .when(self.show_connection_form, |this| {
+            .when(self.connection_form.show_connection_form, |this| {
                 this.child(self.render_connection_dialog(&theme, cx))
             })
             .when(self.quick_open.is_some(), |this| {

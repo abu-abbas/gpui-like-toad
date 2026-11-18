@@ -660,10 +660,10 @@ impl Workbench {
                 Password::Typed(SecretString::from(String::new())),
             )
         } else {
-            let username = Self::input_text(&self.user_input, cx);
+            let username = Self::input_text(&self.connection_form.user_input, cx);
             let connect_string = self.form_connect_string(cx);
             if username.is_empty() || connect_string.is_empty() {
-                self.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
+                self.connection_form.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
                 cx.notify();
                 return;
             }
@@ -671,14 +671,15 @@ impl Workbench {
             // one: Connect also saves the profile so the keychain matches
             // the checkbox.
             let had_saved = self
+                .connection_form
                 .editing_profile
                 .and_then(|ix| self.profiles.get(ix))
                 .is_some_and(|p| p.save_password);
             let password = self.dialog_password(cx);
-            if self.save_password || had_saved {
+            if self.connection_form.save_password || had_saved {
                 self.save_profile_quiet(cx);
             }
-            let name = Self::input_text(&self.name_input, cx);
+            let name = Self::input_text(&self.connection_form.name_input, cx);
             (
                 ConnectionProfile {
                     name: if name.is_empty() {
@@ -696,7 +697,11 @@ impl Workbench {
             profile,
             password,
             demo,
-            if demo { None } else { self.editing_profile },
+            if demo {
+                None
+            } else {
+                self.connection_form.editing_profile
+            },
             cx,
         );
     }
@@ -767,18 +772,18 @@ impl Workbench {
         if self.conn.busy {
             return;
         }
-        let username = Self::input_text(&self.user_input, cx);
+        let username = Self::input_text(&self.connection_form.user_input, cx);
         let connect_string = self.form_connect_string(cx);
         if username.is_empty() || connect_string.is_empty() {
-            self.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
+            self.connection_form.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
             cx.notify();
             return;
         }
-        self.form_notice = None;
+        self.connection_form.form_notice = None;
         if self.conn.db.is_none() {
             self.conn.db = Some(DbHandle::spawn());
         }
-        let name = Self::input_text(&self.name_input, cx);
+        let name = Self::input_text(&self.connection_form.name_input, cx);
         self.conn.status = "Mengetes koneksi...".to_string();
         self.spawn_db(
             Job::TestConnect {
@@ -806,7 +811,7 @@ impl Workbench {
         self.reset_catalog(None);
         self.conn.demo_mode = false;
         self.conn.uncommitted = false;
-        self.show_connection_form = false;
+        self.connection_form.show_connection_form = false;
         self.conn.objects.clear();
         self.conn.schemas.clear();
         self.conn.current_schema = None;
@@ -848,10 +853,10 @@ impl Workbench {
                     connect_string: last.profile.connect_string.clone(),
                     save_password: false,
                 };
-                self.editing_profile = None;
+                self.connection_form.editing_profile = None;
                 self.fill_form(&profile, window, cx);
-                self.form_notice = None;
-                self.show_connection_form = true;
+                self.connection_form.form_notice = None;
+                self.connection_form.show_connection_form = true;
                 cx.notify();
             }
         }

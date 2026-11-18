@@ -242,7 +242,7 @@ impl Workbench {
             return list.into_any_element();
         }
         for (ix, profile) in self.profiles.iter().enumerate() {
-            let selected = self.editing_profile == Some(ix);
+            let selected = self.connection_form.editing_profile == Some(ix);
             let mut row = div()
                 .group("profile-row")
                 .flex()
@@ -319,7 +319,7 @@ impl Workbench {
                 .child(Input::new(input).w_full())
         };
         let mode_button = |id: &'static str, label: &'static str, tns: bool| {
-            let active = self.use_tns == tns;
+            let active = self.connection_form.use_tns == tns;
             let mut b = div()
                 .id(id)
                 .flex()
@@ -331,7 +331,7 @@ impl Workbench {
                 .text_size(px(FONT_LABEL))
                 .font_weight(FontWeight::MEDIUM)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.use_tns = tns;
+                    this.connection_form.use_tns = tns;
                     cx.notify();
                 }))
                 .child(label);
@@ -346,7 +346,7 @@ impl Workbench {
             }
             b
         };
-        let title = if self.editing_profile.is_some() {
+        let title = if self.connection_form.editing_profile.is_some() {
             "Edit connection"
         } else {
             "New connection"
@@ -356,7 +356,7 @@ impl Workbench {
             .flex_col()
             .gap(px(SPACE_3))
             .p(px(SPACE_4))
-            .child(field("Connection name", &self.name_input))
+            .child(field("Connection name", &self.connection_form.name_input))
             .child(
                 div()
                     .flex()
@@ -368,8 +368,11 @@ impl Workbench {
                     .child(mode_button("conn-mode-basic", "Basic", false))
                     .child(mode_button("conn-mode-tns", "TNS", true)),
             );
-        if self.use_tns {
-            body = body.child(field("TNS alias / connect descriptor", &self.tns_input));
+        if self.connection_form.use_tns {
+            body = body.child(field(
+                "TNS alias / connect descriptor",
+                &self.connection_form.tns_input,
+            ));
         } else {
             body = body
                 .child(
@@ -377,17 +380,29 @@ impl Workbench {
                         .flex()
                         .flex_row()
                         .gap(px(SPACE_2))
-                        .child(div().flex_1().child(field("Host", &self.host_input)))
-                        .child(div().w(px(96.)).child(field("Port", &self.port_input))),
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(field("Host", &self.connection_form.host_input)),
+                        )
+                        .child(
+                            div()
+                                .w(px(96.))
+                                .child(field("Port", &self.connection_form.port_input)),
+                        ),
                 )
-                .child(field("Service name", &self.service_input));
+                .child(field("Service name", &self.connection_form.service_input));
         }
         body = body.child(
             div()
                 .flex()
                 .flex_row()
                 .gap(px(SPACE_2))
-                .child(div().flex_1().child(field("Username", &self.user_input)))
+                .child(
+                    div()
+                        .flex_1()
+                        .child(field("Username", &self.connection_form.user_input)),
+                )
                 .child(
                     div().flex_1().child(
                         div()
@@ -395,16 +410,20 @@ impl Workbench {
                             .flex_col()
                             .gap(px(SPACE_1))
                             .child(form_label("Password", theme))
-                            .child(Input::new(&self.password_input).mask_toggle().w_full()),
+                            .child(
+                                Input::new(&self.connection_form.password_input)
+                                    .mask_toggle()
+                                    .w_full(),
+                            ),
                     ),
                 ),
         );
         body = body.child(
             Checkbox::new("save-password")
                 .label("Save password")
-                .checked(self.save_password)
+                .checked(self.connection_form.save_password)
                 .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                    this.save_password = *checked;
+                    this.connection_form.save_password = *checked;
                     cx.notify();
                 })),
         );
@@ -413,7 +432,7 @@ impl Workbench {
             .connect_error
             .clone()
             .map(|e| (true, e))
-            .or_else(|| self.form_notice.clone());
+            .or_else(|| self.connection_form.form_notice.clone());
         if let Some((is_error, text)) = notice {
             body = body.child(
                 div()
@@ -436,12 +455,13 @@ impl Workbench {
             );
         } else {
             let has_saved = self
+                .connection_form
                 .editing_profile
                 .and_then(|ix| self.profiles.get(ix))
                 .is_some_and(|p| p.save_password);
-            let hint = if self.save_password && has_saved {
+            let hint = if self.connection_form.save_password && has_saved {
                 "Password tersimpan di keychain OS. Kosongkan untuk tetap pakai yang lama."
-            } else if self.save_password {
+            } else if self.connection_form.save_password {
                 "Password disimpan di keychain OS, bukan di file profil."
             } else {
                 "Password tidak disimpan; diisi setiap connect."
@@ -469,7 +489,7 @@ impl Workbench {
                     .icon(IconName::Save)
                     .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
             );
-        if let Some(ix) = self.editing_profile {
+        if let Some(ix) = self.connection_form.editing_profile {
             footer = footer.child(
                 Button::new("remove-profile")
                     .icon(IconName::Trash)

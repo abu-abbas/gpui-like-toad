@@ -21,7 +21,7 @@ impl Workbench {
             self.close_quick_open(cx);
             return;
         }
-        if self.conn.session.is_none() || self.show_connection_form {
+        if self.conn.session.is_none() || self.connection_form.show_connection_form {
             self.conn.status = "Quick Open butuh koneksi yang aktif.".to_string();
             cx.notify();
             return;

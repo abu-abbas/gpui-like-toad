@@ -1,10 +1,72 @@
 use super::*;
 
+pub(super) struct ConnectionForm {
+    pub(super) name_input: Entity<InputState>,
+    pub(super) user_input: Entity<InputState>,
+    pub(super) host_input: Entity<InputState>,
+    pub(super) port_input: Entity<InputState>,
+    pub(super) service_input: Entity<InputState>,
+    pub(super) tns_input: Entity<InputState>,
+    /// Connection dialog mode: separate host/port/service (Basic) or one
+    /// TNS alias / connect descriptor.
+    pub(super) use_tns: bool,
+    /// Feedback shown inside the connection dialog: (is_error, text).
+    pub(super) form_notice: Option<(bool, String)>,
+    pub(super) password_input: Entity<InputState>,
+    /// "Save password" checkbox in the connection dialog. Off by default;
+    /// follows the profile when editing one.
+    pub(super) save_password: bool,
+    pub(super) editing_profile: Option<usize>,
+    /// Whether the connection dialog (modal) is open. Closing it never
+    /// clears the inputs: the form keeps its input entities.
+    pub(super) show_connection_form: bool,
+}
+
+impl ConnectionForm {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<Workbench>) -> Self {
+        let name_input =
+            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Nama koneksi (opsional)"));
+        let user_input =
+            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Username, mis. HR"));
+        let host_input =
+            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("dbhost.example.com"));
+        let port_input = cx.new(|cx| {
+            InputState::new(&mut *window, cx)
+                .placeholder("1521")
+                .default_value("1521")
+        });
+        let service_input = cx.new(|cx| InputState::new(&mut *window, cx).placeholder("orclpdb"));
+        let tns_input = cx
+            .new(|cx| InputState::new(&mut *window, cx).placeholder("ORCL atau (DESCRIPTION=...)"));
+        let password_input = cx.new(|cx| InputState::new(&mut *window, cx).masked(true));
+        Self {
+            name_input,
+            user_input,
+            host_input,
+            port_input,
+            service_input,
+            tns_input,
+            use_tns: false,
+            form_notice: None,
+            password_input,
+            save_password: false,
+            editing_profile: None,
+            show_connection_form: false,
+        }
+    }
+}
+
 impl Workbench {
     /// The typed password, untrimmed, wrapped so it is redacted in
     /// `Debug` and zeroed on drop.
     fn typed_password(&self, cx: &App) -> SecretString {
-        SecretString::from(self.password_input.read(cx).value().to_string())
+        SecretString::from(
+            self.connection_form
+                .password_input
+                .read(cx)
+                .value()
+                .to_string(),
+        )
     }
 
     /// Password for a connect/test from the dialog: what was typed, or the
@@ -14,9 +76,10 @@ impl Workbench {
         let typed = self.typed_password(cx);
         if ora_core::credentials::ExposeSecret::expose_secret(&typed).is_empty() {
             if let Some(profile) = self
+                .connection_form
                 .editing_profile
                 .and_then(|ix| self.profiles.get(ix))
-                .filter(|p| p.save_password && self.save_password)
+                .filter(|p| p.save_password && self.connection_form.save_password)
             {
                 return Password::Saved {
                     profile_id: profile.id.clone(),
@@ -49,12 +112,12 @@ impl Workbench {
                             this.profiles[ix].save_password = false;
                             this.persist_profiles();
                         }
-                        this.save_password = false;
+                        this.connection_form.save_password = false;
                     }
                     let text = format!("Gagal menyimpan password ke keychain: {err}");
                     this.push_message(text.clone());
-                    if this.show_connection_form {
-                        this.form_notice = Some((true, text));
+                    if this.connection_form.show_connection_form {
+                        this.connection_form.form_notice = Some((true, text));
                     }
                     cx.notify();
                 });
@@ -82,17 +145,17 @@ impl Workbench {
     /// or `host:port/service` built from the Basic fields. Empty when the
     /// required field (TNS text or host) is blank.
     pub(super) fn form_connect_string(&self, cx: &App) -> String {
-        if self.use_tns {
-            return Self::input_text(&self.tns_input, cx);
+        if self.connection_form.use_tns {
+            return Self::input_text(&self.connection_form.tns_input, cx);
         }
-        let host = Self::input_text(&self.host_input, cx);
+        let host = Self::input_text(&self.connection_form.host_input, cx);
         if host.is_empty() {
             return String::new();
         }
         compose_easy_connect(
             &host,
-            &Self::input_text(&self.port_input, cx),
-            &Self::input_text(&self.service_input, cx),
+            &Self::input_text(&self.connection_form.port_input, cx),
+            &Self::input_text(&self.connection_form.service_input, cx),
         )
     }
 
@@ -102,9 +165,14 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        Self::set_input(&self.name_input.clone(), profile.name.clone(), window, cx);
         Self::set_input(
-            &self.user_input.clone(),
+            &self.connection_form.name_input.clone(),
+            profile.name.clone(),
+            window,
+            cx,
+        );
+        Self::set_input(
+            &self.connection_form.user_input.clone(),
             profile.username.clone(),
             window,
             cx,
@@ -113,19 +181,44 @@ impl Workbench {
         // TNS aliases open in TNS mode unchanged.
         match parse_easy_connect(&profile.connect_string) {
             Some((host, port, service)) => {
-                self.use_tns = false;
-                Self::set_input(&self.host_input.clone(), host, window, cx);
-                Self::set_input(&self.port_input.clone(), port, window, cx);
-                Self::set_input(&self.service_input.clone(), service, window, cx);
-                Self::set_input(&self.tns_input.clone(), String::new(), window, cx);
+                self.connection_form.use_tns = false;
+                Self::set_input(&self.connection_form.host_input.clone(), host, window, cx);
+                Self::set_input(&self.connection_form.port_input.clone(), port, window, cx);
+                Self::set_input(
+                    &self.connection_form.service_input.clone(),
+                    service,
+                    window,
+                    cx,
+                );
+                Self::set_input(
+                    &self.connection_form.tns_input.clone(),
+                    String::new(),
+                    window,
+                    cx,
+                );
             }
             None => {
-                self.use_tns = true;
-                Self::set_input(&self.host_input.clone(), String::new(), window, cx);
-                Self::set_input(&self.port_input.clone(), "1521".into(), window, cx);
-                Self::set_input(&self.service_input.clone(), String::new(), window, cx);
+                self.connection_form.use_tns = true;
                 Self::set_input(
-                    &self.tns_input.clone(),
+                    &self.connection_form.host_input.clone(),
+                    String::new(),
+                    window,
+                    cx,
+                );
+                Self::set_input(
+                    &self.connection_form.port_input.clone(),
+                    "1521".into(),
+                    window,
+                    cx,
+                );
+                Self::set_input(
+                    &self.connection_form.service_input.clone(),
+                    String::new(),
+                    window,
+                    cx,
+                );
+                Self::set_input(
+                    &self.connection_form.tns_input.clone(),
                     profile.connect_string.clone(),
                     window,
                     cx,
@@ -134,47 +227,87 @@ impl Workbench {
         }
         // A saved password is never loaded into the field: blank means
         // "use the one in the keychain" (see `dialog_password`).
-        Self::set_input(&self.password_input.clone(), String::new(), window, cx);
-        self.save_password = profile.save_password;
+        Self::set_input(
+            &self.connection_form.password_input.clone(),
+            String::new(),
+            window,
+            cx,
+        );
+        self.connection_form.save_password = profile.save_password;
     }
 
     /// Open the connection dialog for a saved profile.
     pub(super) fn edit_profile(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(profile) = self.profiles.get(ix).cloned() {
-            self.editing_profile = Some(ix);
+            self.connection_form.editing_profile = Some(ix);
             self.fill_form(&profile, window, cx);
-            self.form_notice = None;
+            self.connection_form.form_notice = None;
             self.conn.connect_error = None;
-            self.show_connection_form = true;
+            self.connection_form.show_connection_form = true;
             cx.notify();
         }
     }
 
     fn new_profile_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.editing_profile = None;
-        self.use_tns = false;
-        self.form_notice = None;
+        self.connection_form.editing_profile = None;
+        self.connection_form.use_tns = false;
+        self.connection_form.form_notice = None;
         self.conn.connect_error = None;
-        Self::set_input(&self.name_input.clone(), String::new(), window, cx);
-        Self::set_input(&self.user_input.clone(), String::new(), window, cx);
-        Self::set_input(&self.host_input.clone(), String::new(), window, cx);
-        Self::set_input(&self.port_input.clone(), "1521".into(), window, cx);
-        Self::set_input(&self.service_input.clone(), String::new(), window, cx);
-        Self::set_input(&self.tns_input.clone(), String::new(), window, cx);
-        Self::set_input(&self.password_input.clone(), String::new(), window, cx);
-        self.save_password = false;
+        Self::set_input(
+            &self.connection_form.name_input.clone(),
+            String::new(),
+            window,
+            cx,
+        );
+        Self::set_input(
+            &self.connection_form.user_input.clone(),
+            String::new(),
+            window,
+            cx,
+        );
+        Self::set_input(
+            &self.connection_form.host_input.clone(),
+            String::new(),
+            window,
+            cx,
+        );
+        Self::set_input(
+            &self.connection_form.port_input.clone(),
+            "1521".into(),
+            window,
+            cx,
+        );
+        Self::set_input(
+            &self.connection_form.service_input.clone(),
+            String::new(),
+            window,
+            cx,
+        );
+        Self::set_input(
+            &self.connection_form.tns_input.clone(),
+            String::new(),
+            window,
+            cx,
+        );
+        Self::set_input(
+            &self.connection_form.password_input.clone(),
+            String::new(),
+            window,
+            cx,
+        );
+        self.connection_form.save_password = false;
         cx.notify();
     }
 
     /// "+" / "New connection": open an empty connection dialog.
     pub(super) fn open_new_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.new_profile_form(window, cx);
-        self.show_connection_form = true;
+        self.connection_form.show_connection_form = true;
         cx.notify();
     }
 
     pub(super) fn close_connection_dialog(&mut self, cx: &mut Context<Self>) {
-        self.show_connection_form = false;
+        self.connection_form.show_connection_form = false;
         cx.notify();
     }
 
@@ -182,13 +315,13 @@ impl Workbench {
         if self.save_profile_quiet(cx) {
             // A stale connect error would hide the "saved" notice.
             self.conn.connect_error = None;
-            let text = if self.save_password {
+            let text = if self.connection_form.save_password {
                 "Profil koneksi tersimpan, password di keychain."
             } else {
                 "Profil koneksi tersimpan."
             };
             self.push_message(text.to_string());
-            self.form_notice = Some((false, text.to_string()));
+            self.connection_form.form_notice = Some((false, text.to_string()));
             cx.notify();
         }
     }
@@ -197,15 +330,16 @@ impl Workbench {
     /// keychain entry in line with "Save password". Returns false when
     /// the form is incomplete.
     pub(super) fn save_profile_quiet(&mut self, cx: &mut Context<Self>) -> bool {
-        let username = Self::input_text(&self.user_input, cx);
+        let username = Self::input_text(&self.connection_form.user_input, cx);
         let connect_string = self.form_connect_string(cx);
         if username.is_empty() || connect_string.is_empty() {
-            self.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
+            self.connection_form.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
             cx.notify();
             return false;
         }
-        let name = Self::input_text(&self.name_input, cx);
+        let name = Self::input_text(&self.connection_form.name_input, cx);
         let existing = self
+            .connection_form
             .editing_profile
             .and_then(|ix| self.profiles.get(ix))
             .cloned();
@@ -221,19 +355,20 @@ impl Workbench {
             },
             username,
             connect_string,
-            save_password: self.save_password,
+            save_password: self.connection_form.save_password,
         };
-        let action = PasswordAction::decide(self.save_password, self.typed_password(cx));
+        let action =
+            PasswordAction::decide(self.connection_form.save_password, self.typed_password(cx));
         // Skip the keychain entirely for a profile that never had a
         // saved password and still does not want one.
-        let touch_keychain =
-            self.save_password || existing.as_ref().is_some_and(|p| p.save_password);
+        let touch_keychain = self.connection_form.save_password
+            || existing.as_ref().is_some_and(|p| p.save_password);
         let profile_id = profile.id.clone();
-        match self.editing_profile {
+        match self.connection_form.editing_profile {
             Some(ix) if ix < self.profiles.len() => self.profiles[ix] = profile,
             _ => {
                 self.profiles.push(profile);
-                self.editing_profile = Some(self.profiles.len() - 1);
+                self.connection_form.editing_profile = Some(self.profiles.len() - 1);
             }
         }
         self.persist_profiles();
@@ -252,11 +387,11 @@ impl Workbench {
             self.apply_keychain(removed.id.clone(), PasswordAction::Delete, cx);
         }
         self.shift_profile_ix(ix);
-        if self.editing_profile == Some(ix) {
-            self.editing_profile = None;
-        } else if let Some(editing) = self.editing_profile {
+        if self.connection_form.editing_profile == Some(ix) {
+            self.connection_form.editing_profile = None;
+        } else if let Some(editing) = self.connection_form.editing_profile {
             if ix < editing {
-                self.editing_profile = Some(editing - 1);
+                self.connection_form.editing_profile = Some(editing - 1);
             }
         }
         self.persist_profiles();

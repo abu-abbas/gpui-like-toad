@@ -133,7 +133,7 @@ impl Workbench {
                 self.conn.open_tab_on_connect = false;
                 // A direct connect with a saved password failed (wrong or
                 // missing password): open the dialog so it can be fixed.
-                if !self.show_connection_form {
+                if !self.connection_form.show_connection_form {
                     if let Some(ix) = self
                         .conn
                         .last_connection
@@ -158,7 +158,7 @@ impl Workbench {
                 self.reset_catalog(Some(info.user.clone()));
                 self.conn.current_schema = None;
                 self.conn.connect_error = None;
-                self.show_connection_form = false;
+                self.connection_form.show_connection_form = false;
                 self.conn.status = format!("Connected sebagai {}.", info.user);
                 self.push_message(format!(
                     "Connected: {} @ {} ({})",
@@ -182,12 +182,13 @@ impl Workbench {
                         info.user, info.database, info.version
                     );
                     self.push_message(text.clone());
-                    self.form_notice = Some((false, text));
+                    self.connection_form.form_notice = Some((false, text));
                     self.conn.status = "Test koneksi berhasil.".to_string();
                 }
                 Err(message) => {
                     self.push_message(format!("Test koneksi gagal: {message}"));
-                    self.form_notice = Some((true, format!("Test koneksi gagal: {message}")));
+                    self.connection_form.form_notice =
+                        Some((true, format!("Test koneksi gagal: {message}")));
                     self.conn.status = "Test koneksi gagal.".to_string();
                 }
             },
