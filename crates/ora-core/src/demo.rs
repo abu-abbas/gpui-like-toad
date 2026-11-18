@@ -687,6 +687,7 @@ mod tests {
                     name: "demo".into(),
                     username: "demo".into(),
                     connect_string: "demo".into(),
+                    access: Default::default(),
                 },
                 "",
             )
@@ -949,6 +950,7 @@ mod tests {
                     name: "demo".into(),
                     username: "  ".into(),
                     connect_string: "demo".into(),
+                    access: Default::default(),
                 },
                 "",
             )
@@ -960,6 +962,7 @@ mod tests {
                     name: "demo".into(),
                     username: "demo".into(),
                     connect_string: "demo".into(),
+                    access: Default::default(),
                 },
                 "",
             )

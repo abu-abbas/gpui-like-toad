@@ -102,6 +102,36 @@ impl Workbench {
                             cx.listener(|this, _, window, cx| this.open_new_connection(window, cx)),
                         ),
                 );
+                let import_view = cx.entity();
+                let export_view = import_view.clone();
+                let has_profiles = !self.profiles.is_empty();
+                heading = heading.child(
+                    tree_button(Button::new("connection-transfer"), keyboard, cx)
+                        .small()
+                        .icon(IconName::Ellipsis)
+                        .tooltip("Import or export connections")
+                        .dropdown_menu(move |menu, _, _| {
+                            let import_view = import_view.clone();
+                            let export_view = export_view.clone();
+                            menu.item(
+                                PopupMenuItem::new("Import Ora connections…")
+                                    .icon(Icon::new(IconName::Upload))
+                                    .on_click(move |_, _, cx| {
+                                        import_view
+                                            .update(cx, |this, cx| this.import_connections(cx))
+                                    }),
+                            )
+                            .item(
+                                PopupMenuItem::new("Export Ora connections…")
+                                    .disabled(!has_profiles)
+                                    .icon(Icon::new(IconName::Download))
+                                    .on_click(move |_, _, cx| {
+                                        export_view
+                                            .update(cx, |this, cx| this.export_connections(cx))
+                                    }),
+                            )
+                        }),
+                );
             }
             nav = nav.child(heading);
             if selected && !compact {
@@ -234,7 +264,7 @@ impl Workbench {
                             .child(
                                 div()
                                     .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                                    .line_height(px(LEADING_LABEL))
+                                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
                                     .text_color(theme.foreground)
                                     .truncate()
                                     .child(preview),

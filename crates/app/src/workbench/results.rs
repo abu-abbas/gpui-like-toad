@@ -182,7 +182,7 @@ impl Workbench {
                     .child(
                         div()
                             .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                            .line_height(px(LEADING_LABEL))
+                            .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child("Info"),
@@ -222,7 +222,7 @@ impl Workbench {
                             self.messages[start..].iter().rev().map(|m| {
                                 div()
                                     .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                                    .line_height(px(LEADING_LABEL))
+                                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
                                     .text_color(if is_error_message(m) {
                                         theme.danger
                                     } else {
@@ -444,7 +444,7 @@ impl Workbench {
                 item.child(
                     div()
                         .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                        .line_height(px(LEADING_LABEL))
+                        .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
                         .font_weight(FontWeight::MEDIUM)
                         .child(label),
                 ),
@@ -473,7 +473,7 @@ impl Workbench {
             .child(
                 div()
                     .text_size(theme::ui_size(cx.theme(), FONT_LABEL))
-                    .line_height(px(LEADING_LABEL))
+                    .line_height(crate::theme::ui_size(cx.theme(), LEADING_LABEL))
                     .font_weight(FontWeight::MEDIUM)
                     .child("Export"),
             )
@@ -602,7 +602,7 @@ impl Workbench {
                             |line| {
                                 div()
                                     .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                                    .line_height(px(LEADING_LABEL))
+                                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
                                     .text_color(theme.foreground)
                                     .child(line.clone())
                             },
@@ -654,7 +654,7 @@ impl Workbench {
                             self.messages[start..].iter().map(|m| {
                                 div()
                                     .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                                    .line_height(px(LEADING_LABEL))
+                                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
                                     .text_color(theme.foreground)
                                     .child(m.clone())
                             }),
@@ -745,7 +745,7 @@ impl Workbench {
                         button.child(
                             div()
                                 .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                                .line_height(px(LEADING_LABEL))
+                                .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(if active {
                                     theme.primary_foreground
@@ -867,7 +867,7 @@ impl Workbench {
                     .child(
                         div()
                             .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
-                            .line_height(px(LEADING_CAPTION))
+                            .line_height(crate::theme::ui_size(&theme, LEADING_CAPTION))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child("EXPLAIN PLAN"),
@@ -902,7 +902,7 @@ impl Workbench {
                             |line| {
                                 div()
                                     .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                                    .line_height(px(LEADING_LABEL))
+                                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
                                     .text_color(theme.foreground)
                                     .child(line.clone())
                             },

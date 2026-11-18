@@ -232,7 +232,7 @@ fn render_object_row(
         .px(px(SPACE_2))
         .rounded(px(RADIUS_SM))
         .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-        .line_height(px(LEADING_LABEL))
+        .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
         .on_click(cx.listener(move |this, event, window, cx| {
             this.on_object_click(click_object.clone(), event, window, cx);
         }));

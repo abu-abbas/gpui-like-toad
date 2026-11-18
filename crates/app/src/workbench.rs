@@ -41,8 +41,9 @@ use ora_core::export::{to_csv, to_xlsx};
 use ora_core::sql::{clean_statement, format_sql, statement_at};
 use ora_core::store::{self, HistoryEntry, SavedProfile, ThemePreference};
 use ora_core::{
-    compose_easy_connect, parse_easy_connect, ConnectionProfile, DbInfo, ObjectKind, PlanNode,
-    QueryResult, SchemaObject, DEFAULT_MAX_ROWS, MAX_PAGE_LIMIT,
+    compose_easy_connect, parse_easy_connect, ConnectionAccess, ConnectionEnvironment,
+    ConnectionProfile, DbInfo, ObjectKind, PlanNode, QueryResult, SchemaObject, DEFAULT_MAX_ROWS,
+    MAX_PAGE_LIMIT,
 };
 
 use crate::completion::SqlCompletionProvider;
@@ -200,6 +201,7 @@ struct ConnState {
     pending_sql: Option<String>,
     op_generation: u64,
     connect_error: Option<String>,
+    connection_lost: bool,
     last_connection: Option<LastConnection>,
     /// Tab (by id) that the in-flight operation writes its result into, so
     /// switching tabs mid-query never lands the result in the wrong tab.
@@ -238,6 +240,7 @@ impl ConnState {
             pending_sql: None,
             op_generation: 0,
             connect_error: None,
+            connection_lost: false,
             last_connection: None,
             pending_tab: None,
             cancel_script: None,
@@ -260,6 +263,12 @@ impl ConnState {
     }
 
     /// Short name for tab labels and the switcher: the profile name.
+    fn access(&self) -> ConnectionAccess {
+        self.last_connection
+            .as_ref()
+            .map_or_else(ConnectionAccess::default, |last| last.profile.access)
+    }
+
     fn label(&self) -> String {
         match (&self.last_connection, &self.session) {
             (Some(last), _) => last.profile.name.clone(),
@@ -409,6 +418,7 @@ pub struct Workbench {
 
 impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::start_heartbeat(cx);
         let connection_form = ConnectionForm::new(window, cx);
         let catalog = Rc::new(RefCell::new(Catalog::new()));
         let workbench = cx.weak_entity();
@@ -515,10 +525,10 @@ impl Workbench {
 
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The Root sets rem to the theme font size (13px) every frame; the
-        // layout was built for the default 16px rem.
-        window.set_rem_size(px(16.));
         let theme = cx.theme().clone();
+        // Match the app's default layout at 13px and pass changes through to
+        // GPUI controls whose text and row dimensions use rem units.
+        window.set_rem_size(theme::ui_size(&theme, 16.));
         // Nothing focused (fresh start, closed palette): take focus so
         // window-level shortcuts reach this view.
         if window.focused(cx).is_none() {

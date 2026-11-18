@@ -482,7 +482,7 @@ impl Workbench {
                         .flex_1()
                         .truncate()
                         .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                        .line_height(px(LEADING_LABEL))
+                        .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
                         .text_color(theme.accent_foreground)
                         .child(text),
                 )
@@ -564,7 +564,7 @@ impl Workbench {
                     .child(
                         div()
                             .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                            .line_height(px(LEADING_LABEL))
+                            .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(color)
                             .child("What's new"),
@@ -612,7 +612,7 @@ impl Workbench {
                 .child(
                     div()
                         .text_size(crate::theme::ui_size(&theme, FONT_HEADING_XL))
-                        .line_height(px(LEADING_HEADING_XL))
+                        .line_height(crate::theme::ui_size(&theme, LEADING_HEADING_XL))
                         .child("What's new"),
                 )
                 .child(caption_text(
@@ -635,7 +635,7 @@ impl Workbench {
             .child(
                 div()
                     .text_size(crate::theme::ui_size(&theme, FONT_HEADING_XL))
-                    .line_height(px(LEADING_HEADING_XL))
+                    .line_height(crate::theme::ui_size(&theme, LEADING_HEADING_XL))
                     .child(format!("What's new di {}", release.version)),
             )
             .child(caption_text(
@@ -694,7 +694,7 @@ impl Workbench {
             let line = if is_error {
                 div()
                     .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
-                    .line_height(px(LEADING_CAPTION))
+                    .line_height(crate::theme::ui_size(&theme, LEADING_CAPTION))
                     .text_color(theme.danger)
                     .child(text)
             } else {

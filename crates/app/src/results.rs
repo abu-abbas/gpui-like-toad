@@ -585,7 +585,7 @@ impl TableDelegate for ResultsDelegate {
                 }),
             )
             .text_size(crate::theme::ui_size(theme, FONT_GRID))
-            .line_height(px(LEADING_GRID))
+            .line_height(crate::theme::ui_size(theme, LEADING_GRID))
             .truncate();
         let abs_row = self.absolute_row(row_ix);
         let Some(data_col) = self.data_col(col_ix) else {

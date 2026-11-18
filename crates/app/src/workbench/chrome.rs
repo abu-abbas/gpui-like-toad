@@ -83,14 +83,22 @@ impl Workbench {
                     .text_size(crate::theme::ui_size(&theme, FONT_HEADING_MD))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.muted_foreground)
-                    .child("No active connection"),
+                    .child(if self.conn.connection_lost {
+                        "Connection lost"
+                    } else {
+                        "No active connection"
+                    }),
             )
             .child(
                 div()
                     .max_w(px(270.))
                     .text_center()
                     .text_color(theme::empty_hint(theme))
-                    .child("Pick a connection on the left to browse schemas and open tables."),
+                    .child(if self.conn.connection_lost {
+                        "Reconnect to resume browsing and running queries."
+                    } else {
+                        "Pick a connection on the left to browse schemas and open tables."
+                    }),
             )
             .children(self.conn.connect_error.as_ref().map(|err| {
                 div()
@@ -111,6 +119,19 @@ impl Workbench {
                         cx.listener(|this, _, window, cx| this.open_new_connection(window, cx)),
                     ),
             )
+            .when(self.conn.connection_lost, |view| {
+                view.child(
+                    Button::new("reconnect-lost")
+                        .small()
+                        .outline()
+                        .icon(IconName::RefreshCw)
+                        .label("Reconnect")
+                        .disabled(self.conn.busy)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.reconnect_last(window, cx)),
+                        ),
+                )
+            })
             .when(self.show_demo && self.sidebar_compact, |view| {
                 view.child(
                     Button::new("empty-demo")
@@ -150,6 +171,9 @@ impl Workbench {
                 "Connection failed",
                 "lihat Messages".to_string(),
             );
+        }
+        if self.conn.connection_lost {
+            return (theme.danger, "Connection lost", self.conn.label());
         }
         (
             theme.muted_foreground,
@@ -506,7 +530,7 @@ impl Workbench {
                         .min_w(px(0.))
                         .truncate()
                         .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
-                        .line_height(px(LEADING_CAPTION))
+                        .line_height(crate::theme::ui_size(&theme, LEADING_CAPTION))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.foreground)
                         .child(conn_text),
@@ -534,9 +558,7 @@ impl Workbench {
                     .child(caption_text(format!("{} rows", result.row_count()), theme)),
             );
         }
-        // Right side: activity while busy, last action while connected,
-        // empty while disconnected — the connection state already shows
-        // once on the left, and every status line is mirrored to Messages.
+        // The status line can also report file operations while disconnected.
         bar.child(
             div()
                 .flex_1()
@@ -548,7 +570,9 @@ impl Workbench {
                     caption_text(
                         if self.conn.busy {
                             "Running…".to_string()
-                        } else if self.conn.session.is_some() {
+                        } else if self.conn.session.is_some()
+                            || self.conn.status != "Belum terhubung."
+                        {
                             self.conn.status.clone()
                         } else {
                             String::new()

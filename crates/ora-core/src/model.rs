@@ -14,6 +14,49 @@ pub struct ConnectionProfile {
     /// Oracle Net connect string: Easy Connect (`host:1521/service`), a full
     /// connect descriptor, or a `tnsnames.ora` alias.
     pub connect_string: String,
+    pub access: ConnectionAccess,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConnectionAccess {
+    pub environment: ConnectionEnvironment,
+    pub read_only: bool,
+    pub protect_production: bool,
+    pub sysdba: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConnectionEnvironment {
+    #[default]
+    None,
+    Development,
+    Staging,
+    Production,
+}
+
+impl ConnectionEnvironment {
+    pub const ALL: [Self; 4] = [
+        Self::None,
+        Self::Development,
+        Self::Staging,
+        Self::Production,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Development => "DEV",
+            Self::Staging => "STAGING",
+            Self::Production => "PROD",
+        }
+    }
+
+    pub fn parse(label: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|env| env.label() == label)
+            .unwrap_or_default()
+    }
 }
 
 /// One cell value from a query result.
