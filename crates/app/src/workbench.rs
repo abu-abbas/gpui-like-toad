@@ -632,16 +632,6 @@ impl Render for Workbench {
                             } else {
                                 "expanded-workbench-explorer"
                             })
-                            .with_handle_appearance(Rc::new(|handle, window, cx| {
-                                use gpui_kit::base::ResizeHandleState;
-                                if handle.state() == ResizeHandleState::Idle {
-                                    Some(div().into_any_element())
-                                } else {
-                                    gpui_kit::component::resizable::resize_handle_appearance()(
-                                        handle, window, cx,
-                                    )
-                                }
-                            }))
                             .child(
                                 resizable_panel()
                                     .size(px(EXPLORER_WIDTH))
