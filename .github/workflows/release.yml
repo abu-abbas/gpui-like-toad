@@ -65,17 +65,25 @@ jobs:
           sudo apt-get install -y gcc g++ clang libfontconfig-dev libwayland-dev \
             libwebkit2gtk-4.1-dev libxkbcommon-x11-dev libx11-xcb-dev \
             libssl-dev libzstd-dev libasound2-dev vulkan-validationlayers libvulkan1 pkg-config
-      - name: Toolchain Rust
-        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - id: rust
+        name: Toolchain Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          echo "version=$(rustc --version | cut -d ' ' -f 2)" >> "$GITHUB_OUTPUT"
       - name: Pulihkan cache Cargo
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        # Run manual di branch default mengisi cache yang bisa dibaca oleh tag.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+          key: cargo-release-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-release-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.version }}-
       - name: Sematkan nomor versi
         shell: python
         run: |
