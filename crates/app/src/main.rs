@@ -16,6 +16,7 @@ mod keychain;
 mod plan;
 mod results;
 mod schema;
+mod splash;
 mod theme;
 mod workbench;
 mod worker;
@@ -72,7 +73,7 @@ fn main() {
             let _ = window.update(cx, |_, window, _| window.activate_window());
             cx.activate(true);
         } else {
-            open_main_window(cx, false);
+            open_main_window(cx);
         }
     });
     app.run(|cx: &mut App| {
@@ -113,7 +114,7 @@ fn main() {
         // GPUI installs no menu bar by default, so on macOS the top bar
         // showed only the app name and Cmd+Q / Cmd+H did nothing.
         install_menus(cx);
-        open_main_window(cx, true);
+        splash::show_then(cx, open_main_window);
         cx.activate(true);
     });
 }
@@ -127,7 +128,7 @@ fn install_menus(cx: &mut App) {
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-    cx.on_action(|_: &NewWindow, cx| open_main_window(cx, false));
+    cx.on_action(|_: &NewWindow, cx| open_main_window(cx));
     cx.on_action(|_: &OpenAbout, cx| about::open(cx));
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |w| w.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |w| w.zoom_window()));
@@ -183,7 +184,7 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&mut gpui_kit::Window)) {
 
 /// Open the main workbench window. Used at launch and again from the macOS
 /// reopen handler when every window has been closed.
-fn open_main_window(cx: &mut App, show_launch_splash: bool) {
+fn open_main_window(cx: &mut App) {
     let pref = ora_core::store::load_theme_preference();
     let mut options = gpui_kit::component::TitleBar::window_options();
     options.window_bounds = Some(WindowBounds::Windowed(Bounds::centered(
@@ -221,9 +222,6 @@ fn open_main_window(cx: &mut App, show_launch_splash: bool) {
         theme::remember_ui_font(window.text_style().font_family);
         theme::apply_preference(pref, window, cx);
         let view = cx.new(|cx| workbench::Workbench::new(window, cx));
-        if show_launch_splash {
-            view.update(cx, |this, cx| this.show_launch_splash(window, cx));
-        }
         // Background, rate-limited, silent on failure.
         view.update(cx, |this, cx| this.auto_check_updates(cx));
         if let Some(panic) = crash_log::take_previous() {
