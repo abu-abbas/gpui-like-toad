@@ -102,7 +102,7 @@ impl Workbench {
 
     /// Activate the connection of the active tab, if it is open.
     pub(super) fn follow_tab_conn(&mut self, cx: &mut Context<Self>) {
-        if self.show_home {
+        if self.show_empty_workspace {
             return;
         }
         if let Some(id) = self.tabs.get(self.active_tab).and_then(|t| t.conn) {
@@ -146,9 +146,9 @@ impl Workbench {
         if !self.conn.is_open() && !self.conn.busy {
             return;
         }
-        // Connecting from a tab of the old connection: show Home while
-        // this one connects, then open a tab for it.
-        let from_tab = !self.show_home
+        // Keep the previous connection’s tab open while the new
+        // connection starts with an empty workspace.
+        let from_tab = !self.show_empty_workspace
             && self
                 .tabs
                 .get(self.active_tab)
@@ -158,18 +158,17 @@ impl Workbench {
         let ix = self.parked.len() - 1;
         self.swap_active(ix);
         if from_tab {
-            self.show_home = true;
-            self.conn.open_tab_on_connect = true;
+            self.show_empty_workspace = true;
         }
     }
 
     /// Switcher pick: activate `id` and make the active tab run on it.
     /// A SQL tab (unbound, orphaned, or bound to another connection) is
     /// rebound to `id`; a data tab makes way for `id`'s most recent tab,
-    /// or a new query tab.
-    pub(super) fn switch_conn(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    /// when available.
+    pub(super) fn switch_conn(&mut self, id: u64, cx: &mut Context<Self>) {
         self.activate_conn(id, cx);
-        if self.conn.id != id || self.show_home {
+        if self.conn.id != id || self.show_empty_workspace {
             cx.notify();
             return;
         }
@@ -185,6 +184,7 @@ impl Workbench {
             // was closed). Its old grid came from the other connection.
             Some(_) if orphaned || tab.data.is_none() => {
                 tab.conn = Some(id);
+                tab.statement_results.clear();
                 tab.last_result = None;
                 tab.elapsed_ms = None;
                 tab.plan_nodes = None;
@@ -198,7 +198,7 @@ impl Workbench {
             // the picked one instead.
             Some(_) => match self.tabs.iter().rposition(|t| t.conn == Some(id)) {
                 Some(ix) => self.activate_tab(ix, cx),
-                None => self.add_tab(window, cx),
+                None => self.show_empty_workspace = true,
             },
         }
         cx.notify();
@@ -213,6 +213,7 @@ impl Workbench {
         let closed = self.conn.id;
         for tab in &mut self.tabs {
             if tab.conn == Some(closed) {
+                tab.statement_results.clear();
                 tab.last_result = None;
                 tab.elapsed_ms = None;
                 tab.plan_nodes = None;
@@ -226,7 +227,7 @@ impl Workbench {
         if let Some(next) = self.parked.iter().rev().find(|c| c.is_open()).map(|c| c.id) {
             self.activate_conn(next, cx);
             // Stay on a tab of the connection now active, when there is one.
-            if !self.show_home && self.active_tab_orphaned() {
+            if !self.show_empty_workspace && self.active_tab_orphaned() {
                 if let Some(ix) = self.tabs.iter().rposition(|t| t.conn == Some(next)) {
                     self.activate_tab(ix, cx);
                 }
@@ -265,14 +266,10 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (dot_color, _, conn_detail) = self.conn_status(theme);
+        let (dot_color, _, _) = self.conn_status(theme);
         let others = self.open_conn_count() - usize::from(self.conn.is_open());
-        // With several open, the short profile name keeps the pill from
-        // squeezing Commit/Rollback off the toolbar.
-        let pill_label = if self.conn.session.is_some() && others > 0 {
+        let pill_label = if self.conn.session.is_some() {
             self.conn.label()
-        } else if self.conn.session.is_some() {
-            conn_detail
         } else {
             "Not connected".to_string()
         };
@@ -310,7 +307,7 @@ impl Workbench {
                 div()
                     .min_w(px(0.))
                     .truncate()
-                    .text_size(px(FONT_LABEL))
+                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                     .line_height(px(LEADING_LABEL))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
@@ -324,7 +321,7 @@ impl Workbench {
                     .px(px(SPACE_1))
                     .rounded(px(RADIUS_SM))
                     .bg(theme.secondary)
-                    .text_size(px(FONT_CAPTION))
+                    .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
                     .line_height(px(LEADING_CAPTION))
                     .text_color(theme.muted_foreground)
                     .child(format!("+{others}")),
@@ -341,8 +338,8 @@ impl Workbench {
                 menu = menu.item(
                     PopupMenuItem::new(format!("{name}  ({detail}){mark}"))
                         .checked(active)
-                        .on_click(move |_, window, cx: &mut App| {
-                            switch_view.update(cx, |this, cx| this.switch_conn(id, window, cx));
+                        .on_click(move |_, _, cx: &mut App| {
+                            switch_view.update(cx, |this, cx| this.switch_conn(id, cx));
                         }),
                 );
             }
@@ -364,8 +361,8 @@ impl Workbench {
                     .icon(Icon::new(IconName::Database))
                     .on_click(move |_, _, cx: &mut App| {
                         panel_view.update(cx, |this, cx| {
-                            this.show_home = true;
                             this.rail = RailPanel::Connections;
+                            this.sidebar_compact = false;
                             cx.notify();
                         });
                     }),
@@ -532,7 +529,7 @@ impl Workbench {
                     .p(px(SPACE_4))
                     .child(
                         div()
-                            .text_size(px(FONT_HEADING_MD))
+                            .text_size(crate::theme::ui_size(&theme, FONT_HEADING_MD))
                             .line_height(px(LEADING_HEADING_MD))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
@@ -540,7 +537,7 @@ impl Workbench {
                     )
                     .child(
                         div()
-                            .text_size(px(FONT_BODY))
+                            .text_size(crate::theme::ui_size(&theme, FONT_BODY))
                             .line_height(px(LEADING_BODY))
                             .text_color(theme.muted_foreground)
                             .child(text),
@@ -609,7 +606,7 @@ impl Workbench {
 
 /// File name offered when saving a tab's script: its title, `.sql`
 /// added unless already there, path separators replaced.
-fn script_filename(title: &str) -> String {
+pub(super) fn script_filename(title: &str) -> String {
     let base: String = title
         .chars()
         .map(|c| {
@@ -636,5 +633,230 @@ mod tests {
         assert_eq!(script_filename("Query 2"), "Query 2.sql");
         assert_eq!(script_filename("EMPLOYEES.sql"), "EMPLOYEES.sql");
         assert_eq!(script_filename("HR/EMP:x"), "HR_EMP_x.sql");
+    }
+}
+
+impl Workbench {
+    pub(super) fn connect(&mut self, demo: bool, cx: &mut Context<Self>) {
+        if demo {
+            if let Some(id) = self.find_open_conn(None, true) {
+                self.switch_conn(id, cx);
+                return;
+            }
+        }
+        if self.conn.busy {
+            return;
+        }
+        let (profile, password) = if demo {
+            (
+                ConnectionProfile {
+                    name: "Demo database".to_string(),
+                    username: "DEMO".to_string(),
+                    connect_string: "demo".to_string(),
+                },
+                Password::Typed(SecretString::from(String::new())),
+            )
+        } else {
+            let username = Self::input_text(&self.connection_form.user_input, cx);
+            let connect_string = self.form_connect_string(cx);
+            if username.is_empty() || connect_string.is_empty() {
+                self.connection_form.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
+                cx.notify();
+                return;
+            }
+            // "Save password" ticked, or unticked on a profile that had
+            // one: Connect also saves the profile so the keychain matches
+            // the checkbox.
+            let had_saved = self
+                .connection_form
+                .editing_profile
+                .and_then(|ix| self.profiles.get(ix))
+                .is_some_and(|p| p.save_password);
+            let password = self.dialog_password(cx);
+            if self.connection_form.save_password || had_saved {
+                self.save_profile_quiet(cx);
+            }
+            let name = Self::input_text(&self.connection_form.name_input, cx);
+            (
+                ConnectionProfile {
+                    name: if name.is_empty() {
+                        format!("{username}@{connect_string}")
+                    } else {
+                        name
+                    },
+                    username,
+                    connect_string,
+                },
+                password,
+            )
+        };
+        self.start_connect(
+            profile,
+            password,
+            demo,
+            if demo {
+                None
+            } else {
+                self.connection_form.editing_profile
+            },
+            cx,
+        );
+    }
+
+    /// Connect straight to a saved profile when its password is in the
+    /// keychain; otherwise open its dialog so the user types one.
+    pub(super) fn open_profile(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(saved) = self.profiles.get(ix).cloned() else {
+            return;
+        };
+        // Already open: switch to it rather than logging in twice.
+        if let Some(id) = self.find_open_conn(Some(ix), false) {
+            self.switch_conn(id, cx);
+            return;
+        }
+        if !saved.save_password || self.conn.busy {
+            self.edit_profile(ix, window, cx);
+            return;
+        }
+        let profile = ConnectionProfile {
+            name: saved.name.clone(),
+            username: saved.username.clone(),
+            connect_string: saved.connect_string.clone(),
+        };
+        self.start_connect(
+            profile,
+            Password::Saved {
+                profile_id: saved.id.clone(),
+            },
+            false,
+            Some(ix),
+            cx,
+        );
+    }
+
+    fn start_connect(
+        &mut self,
+        profile: ConnectionProfile,
+        password: Password,
+        demo: bool,
+        profile_ix: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        self.prepare_new_conn();
+        if self.conn.db.is_none() {
+            self.conn.db = Some(DbHandle::spawn());
+        }
+        self.conn.demo_mode = demo;
+        self.conn.connect_error = None;
+        self.conn.last_connection = Some(LastConnection {
+            profile: profile.clone(),
+            demo,
+            profile_ix,
+        });
+        self.conn.status = "Menghubungkan...".to_string();
+        self.spawn_db(
+            Job::Connect {
+                profile,
+                password,
+                demo,
+            },
+            PendingOp::Connect,
+            cx,
+        );
+    }
+
+    pub(super) fn test_connection(&mut self, cx: &mut Context<Self>) {
+        if self.conn.busy {
+            return;
+        }
+        let username = Self::input_text(&self.connection_form.user_input, cx);
+        let connect_string = self.form_connect_string(cx);
+        if username.is_empty() || connect_string.is_empty() {
+            self.connection_form.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
+            cx.notify();
+            return;
+        }
+        self.connection_form.form_notice = None;
+        if self.conn.db.is_none() {
+            self.conn.db = Some(DbHandle::spawn());
+        }
+        let name = Self::input_text(&self.connection_form.name_input, cx);
+        self.conn.status = "Mengetes koneksi...".to_string();
+        self.spawn_db(
+            Job::TestConnect {
+                profile: ConnectionProfile {
+                    name,
+                    username,
+                    connect_string,
+                },
+                password: self.dialog_password(cx),
+            },
+            PendingOp::TestConnect,
+            cx,
+        );
+    }
+
+    /// Close the active connection. Other open connections stay open; the
+    /// next one becomes active.
+    pub(super) fn disconnect(&mut self, cx: &mut Context<Self>) {
+        self.push_message("Disconnected.".to_string());
+        if let Some(db) = self.conn.db.take() {
+            // Fire and forget: the worker closes the session on its own.
+            let _ = db.request(Job::Disconnect);
+        }
+        self.conn.session = None;
+        self.reset_catalog(None);
+        self.conn.demo_mode = false;
+        self.conn.uncommitted = false;
+        self.connection_form.show_connection_form = false;
+        self.conn.objects.clear();
+        self.conn.schemas.clear();
+        self.conn.current_schema = None;
+        self.conn.selected_object = None;
+        self.conn.status = "Belum terhubung.".to_string();
+        self.after_disconnect(cx);
+        cx.notify();
+    }
+
+    /// Connect again to the last connection: demo and profiles with a
+    /// saved password reconnect directly; anything else opens its dialog.
+    pub(super) fn reconnect_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(last) = self.conn.last_connection.clone() else {
+            return;
+        };
+        if last.demo {
+            self.connect(true, cx);
+        } else if let Some(ix) = last.profile_ix.filter(|ix| *ix < self.profiles.len()) {
+            self.open_profile(ix, window, cx);
+        } else {
+            self.edit_last_connection(window, cx);
+        }
+    }
+
+    pub(super) fn edit_last_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(last) = self.conn.last_connection.clone() else {
+            return;
+        };
+        if last.demo {
+            return;
+        }
+        match last.profile_ix.filter(|ix| *ix < self.profiles.len()) {
+            Some(ix) => self.edit_profile(ix, window, cx),
+            None => {
+                let profile = SavedProfile {
+                    id: String::new(),
+                    name: last.profile.name.clone(),
+                    username: last.profile.username.clone(),
+                    connect_string: last.profile.connect_string.clone(),
+                    folder: String::new(),
+                    save_password: false,
+                };
+                self.connection_form.editing_profile = None;
+                self.fill_form(&profile, window, cx);
+                self.connection_form.form_notice = None;
+                self.connection_form.show_connection_form = true;
+                cx.notify();
+            }
+        }
     }
 }

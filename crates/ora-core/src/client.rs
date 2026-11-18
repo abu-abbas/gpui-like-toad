@@ -133,6 +133,49 @@ pub trait DbClient: Send {
         }
     }
 
+    fn delete_grid_row(&mut self, owner: &str, table: &str, rowid: &str) -> Result<(), DbError> {
+        use crate::import::quote_ident;
+        let sql = format!(
+            "DELETE FROM {}.{} WHERE ROWID = CHARTOROWID(:1)",
+            quote_ident(owner),
+            quote_ident(table)
+        );
+        match self.execute_binds(&sql, &[rowid.to_owned()])? {
+            1 => Ok(()),
+            n => Err(DbError::new(format!(
+                "Expected to delete one row, affected {n}"
+            ))),
+        }
+    }
+
+    fn insert_grid_row(
+        &mut self,
+        owner: &str,
+        table: &str,
+        fields: &[(String, String)],
+    ) -> Result<(), DbError> {
+        use crate::import::quote_ident;
+        if fields.is_empty() {
+            return Err(DbError::new("Enter at least one column value"));
+        }
+        let columns = fields
+            .iter()
+            .map(|(c, _)| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let params = (1..=fields.len())
+            .map(|n| format!(":{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO {}.{} ({columns}) VALUES ({params})",
+            quote_ident(owner),
+            quote_ident(table)
+        );
+        let binds = fields.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>();
+        self.execute_binds(&sql, &binds).map(|_| ())
+    }
+
     fn commit(&mut self) -> Result<(), DbError>;
 
     fn rollback(&mut self) -> Result<(), DbError>;

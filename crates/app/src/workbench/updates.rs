@@ -446,9 +446,8 @@ impl Workbench {
     fn open_whats_new(&mut self) {
         self.updates.tab_open = true;
         self.updates.tab_active = true;
-        // `show_home` means "no query tab is current"; the page replaces
-        // Home's content while the What's new tab is active.
-        self.show_home = true;
+        // Suspend query shortcuts while release notes are active.
+        self.show_empty_workspace = true;
     }
 
     /// Minimal one-line banner above the whole window when a newer release
@@ -482,7 +481,7 @@ impl Workbench {
                     div()
                         .flex_1()
                         .truncate()
-                        .text_size(px(FONT_LABEL))
+                        .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                         .line_height(px(LEADING_LABEL))
                         .text_color(theme.accent_foreground)
                         .child(text),
@@ -564,7 +563,7 @@ impl Workbench {
                     ))
                     .child(
                         div()
-                            .text_size(px(FONT_LABEL))
+                            .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                             .line_height(px(LEADING_LABEL))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(color)
@@ -612,7 +611,7 @@ impl Workbench {
             return page
                 .child(
                     div()
-                        .text_size(px(FONT_HEADING_XL))
+                        .text_size(crate::theme::ui_size(&theme, FONT_HEADING_XL))
                         .line_height(px(LEADING_HEADING_XL))
                         .child("What's new"),
                 )
@@ -635,7 +634,7 @@ impl Workbench {
         page = page
             .child(
                 div()
-                    .text_size(px(FONT_HEADING_XL))
+                    .text_size(crate::theme::ui_size(&theme, FONT_HEADING_XL))
                     .line_height(px(LEADING_HEADING_XL))
                     .child(format!("What's new di {}", release.version)),
             )
@@ -694,7 +693,7 @@ impl Workbench {
         if let Some((is_error, text)) = note {
             let line = if is_error {
                 div()
-                    .text_size(px(FONT_CAPTION))
+                    .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
                     .line_height(px(LEADING_CAPTION))
                     .text_color(theme.danger)
                     .child(text)
@@ -716,7 +715,10 @@ impl Workbench {
         }
         let notes = release.notes.trim();
         if notes.is_empty() {
-            page = page.child(caption_text("Tidak ada catatan rilis.".to_string(), theme));
+            page = page.child(empty_state_text(
+                "Tidak ada catatan rilis.".to_string(),
+                theme,
+            ));
         }
         for line in notes.lines().filter(|l| !l.trim().is_empty()) {
             page = page.child(body_text(line.to_string(), theme));

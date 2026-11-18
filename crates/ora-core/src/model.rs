@@ -87,6 +87,8 @@ pub struct QueryResult {
     pub truncated: bool,
     /// Wall time of the fetch, measured by the client implementation.
     pub elapsed: Duration,
+    /// Time spent consuming the open cursor, when measured by the driver.
+    pub fetch_time: Option<Duration>,
 }
 
 impl QueryResult {

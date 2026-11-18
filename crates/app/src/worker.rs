@@ -93,6 +93,10 @@ pub enum Job {
     },
     /// Data tab fetch: rows of one table/view that pass the filter bar's
     /// conditions, values sent as bind variables.
+    SelectScript {
+        statements: Vec<String>,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    },
     QueryTable {
         owner: String,
         name: String,
@@ -105,6 +109,8 @@ pub enum Job {
         owner: String,
         name: String,
         edits: Vec<CellUpdate>,
+        deletes: Vec<String>,
+        insert: Vec<(String, String)>,
     },
     Commit,
     Rollback,
@@ -152,7 +158,14 @@ pub enum Job {
     Disconnect,
 }
 
+pub struct StatementResult {
+    pub sql: String,
+    pub started: String,
+    pub outcome: Result<QueryResult, String>,
+}
+
 pub enum Response {
+    ScriptDone(Vec<StatementResult>),
     Connected(DbInfo),
     Tested(Result<DbInfo, String>),
     QueryDone(QueryResult),
@@ -275,6 +288,36 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             probe.disconnect();
             Response::Tested(outcome)
         }
+        Job::SelectScript {
+            statements,
+            cancelled,
+        } => {
+            let Some(client) = client.as_mut() else {
+                return Response::Failed("not connected".into());
+            };
+            let mut results = Vec::new();
+            for sql in statements {
+                if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let started = chrono::Local::now()
+                    .format("%Y-%m-%d %H:%M:%S %:z")
+                    .to_string();
+                let outcome = client
+                    .query(&sql, DEFAULT_MAX_ROWS)
+                    .map_err(|e| e.to_string());
+                let failed = outcome.is_err();
+                results.push(StatementResult {
+                    sql,
+                    started,
+                    outcome,
+                });
+                if failed {
+                    break;
+                }
+            }
+            Response::ScriptDone(results)
+        }
         Job::Run { sql } => {
             let Some(client) = client.as_mut() else {
                 return Response::Failed("not connected".to_string());
@@ -307,7 +350,13 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             },
             None => Response::Failed("not connected".to_string()),
         },
-        Job::UpdateCells { owner, name, edits } => match client.as_mut() {
+        Job::UpdateCells {
+            owner,
+            name,
+            edits,
+            deletes,
+            insert,
+        } => match client.as_mut() {
             Some(client) => {
                 let mut done = 0;
                 let mut error = None;
@@ -325,6 +374,21 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                             error = Some(format!("{}: {err}", edit.column));
                             break;
                         }
+                    }
+                }
+                for rowid in deletes {
+                    if error.is_some() {
+                        break;
+                    }
+                    match client.delete_grid_row(&owner, &name, &rowid) {
+                        Ok(()) => done += 1,
+                        Err(err) => error = Some(err.to_string()),
+                    }
+                }
+                if error.is_none() && !insert.is_empty() {
+                    match client.insert_grid_row(&owner, &name, &insert) {
+                        Ok(()) => done += 1,
+                        Err(err) => error = Some(err.to_string()),
                     }
                 }
                 Response::CellsUpdated { done, error }
@@ -481,6 +545,22 @@ mod tests {
             )
             .unwrap();
         client
+    }
+
+    #[test]
+    fn select_script_retains_results_before_an_error() {
+        let mut client: Option<Box<dyn DbClient>> = Some(Box::new(demo()));
+        let script = "select 1 from dual; select * from missing; select 1 from dual;";
+        let job = Job::SelectScript {
+            statements: ora_core::sql::select_script(script).unwrap(),
+            cancelled: Default::default(),
+        };
+        let Response::ScriptDone(results) = handle_job(job, &mut client) else {
+            panic!("expected script results")
+        };
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].outcome.as_ref().unwrap().row_count(), 1);
+        assert!(results[1].outcome.is_err());
     }
 
     #[test]

@@ -19,6 +19,21 @@ pub struct DemoClient {
     /// the demo has no SQL engine, so edits are overlaid on the canned rows.
     staged: Vec<DemoEdit>,
     committed: Vec<DemoEdit>,
+    staged_rows: Vec<DemoRow>,
+    committed_rows: Vec<DemoRow>,
+    next_row: usize,
+}
+
+enum DemoRow {
+    Insert {
+        table: String,
+        index: usize,
+        fields: Vec<(String, String)>,
+    },
+    Delete {
+        table: String,
+        index: usize,
+    },
 }
 
 /// One edited demo cell: table, row index in the canned data, column.
@@ -41,6 +56,9 @@ impl DemoClient {
             connected_user: None,
             staged: Vec::new(),
             committed: Vec::new(),
+            staged_rows: Vec::new(),
+            committed_rows: Vec::new(),
+            next_row: 1000000,
         }
     }
 
@@ -206,6 +224,7 @@ fn finish(columns: Vec<ColumnInfo>, rows: Vec<Vec<Value>>, max_rows: usize) -> Q
         rows,
         truncated,
         elapsed: Default::default(),
+        fetch_time: None,
     }
 }
 
@@ -275,12 +294,39 @@ impl DbClient for DemoClient {
         let all = self.query(&sql, usize::MAX)?;
         let mut columns = all.columns;
         let mut rows: Vec<(usize, Vec<Value>)> = all.rows.into_iter().enumerate().collect();
+        for change in self.committed_rows.iter().chain(&self.staged_rows) {
+            match change {
+                DemoRow::Insert {
+                    table: target,
+                    index,
+                    fields,
+                } if target.eq_ignore_ascii_case(table) => {
+                    let row = columns
+                        .iter()
+                        .map(|c| {
+                            fields
+                                .iter()
+                                .find(|(name, _)| *name == c.name)
+                                .map_or(Value::Null, |(_, value)| Value::Text(value.clone()))
+                        })
+                        .collect();
+                    rows.push((*index, row));
+                }
+                DemoRow::Delete {
+                    table: target,
+                    index,
+                } if target.eq_ignore_ascii_case(table) => rows.retain(|(i, _)| i != index),
+                _ => {}
+            }
+        }
         for edit in self.committed.iter().chain(&self.staged) {
             if !edit.table.eq_ignore_ascii_case(table) {
                 continue;
             }
             let col = columns.iter().position(|c| c.name == edit.column);
-            if let (Some(col), Some((_, row))) = (col, rows.get_mut(edit.row)) {
+            if let (Some(col), Some((_, row))) =
+                (col, rows.iter_mut().find(|(ix, _)| *ix == edit.row))
+            {
                 row[col] = edit.value.clone().map_or(Value::Null, Value::Text);
             }
         }
@@ -344,15 +390,58 @@ impl DbClient for DemoClient {
         Ok(())
     }
 
+    fn delete_grid_row(&mut self, owner: &str, table: &str, rowid: &str) -> Result<(), DbError> {
+        let page = TablePage {
+            rowid: true,
+            limit: usize::MAX,
+            ..TablePage::default()
+        };
+        let result = self.query_table(owner, table, &TableFilter::default(), page)?;
+        if !result.rows.iter().any(|row| row[0].display() == rowid) {
+            return Err(DbError::new("Unknown ROWID"));
+        }
+        let index = rowid
+            .rsplit('-')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| DbError::new("Invalid ROWID"))?;
+        self.staged_rows.push(DemoRow::Delete {
+            table: table.into(),
+            index,
+        });
+        Ok(())
+    }
+
+    fn insert_grid_row(
+        &mut self,
+        _: &str,
+        table: &str,
+        fields: &[(String, String)],
+    ) -> Result<(), DbError> {
+        self.require_connected()?;
+        if fields.is_empty() {
+            return Err(DbError::new("Enter at least one column value"));
+        }
+        self.staged_rows.push(DemoRow::Insert {
+            table: table.into(),
+            index: self.next_row,
+            fields: fields.to_vec(),
+        });
+        self.next_row += 1;
+        Ok(())
+    }
+
     fn commit(&mut self) -> Result<(), DbError> {
         self.require_connected()?;
         let staged = std::mem::take(&mut self.staged);
         self.committed.extend(staged);
+        self.committed_rows.append(&mut self.staged_rows);
         Ok(())
     }
 
     fn rollback(&mut self) -> Result<(), DbError> {
         self.require_connected()?;
+        self.staged_rows.clear();
         self.staged.clear();
         Ok(())
     }
@@ -647,6 +736,32 @@ mod tests {
             .object_ddl("HR", "GIVE_RAISE", &ObjectKind::Procedure)
             .unwrap()
             .contains("PROCEDURE"));
+    }
+
+    #[test]
+    fn grid_row_changes_follow_transactions() {
+        let mut client = connected();
+        let page = TablePage {
+            rowid: true,
+            ..TablePage::default()
+        };
+        let read = |client: &mut DemoClient| {
+            client
+                .query_table("HR", "EMPLOYEES", &TableFilter::default(), page)
+                .unwrap()
+        };
+        let original = read(&mut client);
+        let id = original.rows[0][0].display();
+        client.delete_grid_row("HR", "EMPLOYEES", &id).unwrap();
+        assert!(client.delete_grid_row("HR", "EMPLOYEES", &id).is_err());
+        assert_eq!(read(&mut client).row_count() + 1, original.row_count());
+        client.rollback().unwrap();
+        assert_eq!(read(&mut client).row_count(), original.row_count());
+        client
+            .insert_grid_row("HR", "EMPLOYEES", &[("FIRST_NAME".into(), "New".into())])
+            .unwrap();
+        client.commit().unwrap();
+        assert_eq!(read(&mut client).row_count(), original.row_count() + 1);
     }
 
     #[test]

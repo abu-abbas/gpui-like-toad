@@ -41,19 +41,16 @@ pub const TREE_ROW_HEIGHT: f32 = 28.0;
 pub const GRID_ROW_HEIGHT: f32 = 30.0;
 /// Status bar height.
 pub const STATUS_BAR_HEIGHT: f32 = 26.0;
-/// Primary icon rail width. Wider than the 64px token so the longest
-/// rail label fits on one line: "Connections" is 11 JetBrains Mono chars
-/// at 0.6em advance, i.e. 66px at [`FONT_RAIL`], inside a 70px button
-/// (`RAIL_WIDTH - 6`).
-pub const RAIL_WIDTH: f32 = 76.0;
-/// Height of one rail button (icon + label).
-pub const RAIL_BUTTON_HEIGHT: f32 = 52.0;
+/// Width of the compact icon rail.
+pub const RAIL_WIDTH: f32 = 44.0;
+/// Width of the expanded connections tree.
+pub const CONNECTIONS_WIDTH: f32 = 224.0;
+/// Default width of the schema and object explorer.
+pub const EXPLORER_WIDTH: f32 = 218.0;
 /// Height of the Results / Explain Plan / Messages sub-tab row.
 pub const SUB_TAB_HEIGHT: f32 = 32.0;
 /// Height of the pagination row under the grid.
 pub const PAGINATION_HEIGHT: f32 = 36.0;
-/// Default width of the connections/schema side panel.
-pub const SIDE_PANEL_WIDTH: f32 = 300.0;
 /// Default width of the explain-plan side panel.
 pub const PLAN_PANEL_WIDTH: f32 = 320.0;
 
@@ -91,9 +88,6 @@ pub const FONT_LABEL: f32 = 12.0;
 pub const FONT_CAPTION: f32 = 11.0;
 pub const FONT_EDITOR: f32 = 13.0;
 pub const FONT_GRID: f32 = 12.0;
-/// Icon rail label size: 10px keeps "Connections" (11 chars x 0.6em =
-/// 66px) on one line inside the 70px rail button.
-pub const FONT_RAIL: f32 = 10.0;
 
 pub const LEADING_HEADING_XL: f32 = 32.0;
 pub const LEADING_HEADING_LG: f32 = 28.0;
@@ -101,9 +95,6 @@ pub const LEADING_HEADING_MD: f32 = 24.0;
 pub const LEADING_BODY: f32 = 20.0;
 pub const LEADING_LABEL: f32 = 18.0;
 pub const LEADING_CAPTION: f32 = 16.0;
-/// Icon rail label line height: icon 20 + gap 4 + label 14 = 38px, inside
-/// the 52px rail button.
-pub const LEADING_RAIL: f32 = 14.0;
 pub const LEADING_EDITOR: f32 = 22.0;
 pub const LEADING_GRID: f32 = 20.0;
 
@@ -126,6 +117,10 @@ static UI_FONT: std::sync::OnceLock<gpui_kit::SharedString> = std::sync::OnceLoc
 /// Record the platform default font family so the theme can use it.
 pub fn remember_ui_font(family: gpui_kit::SharedString) {
     let _ = UI_FONT.set(family);
+}
+
+pub fn empty_hint(theme: &Theme) -> Hsla {
+    theme.background.blend(theme.muted_foreground.opacity(0.66))
 }
 
 fn hex(value: u32) -> Hsla {
@@ -202,12 +197,103 @@ fn lookup(name: Option<&str>, dark: bool, cx: &App) -> Option<Rc<ThemeConfig>> {
     (config.mode.is_dark() == dark).then_some(config)
 }
 
+pub const ACCENTS: [(&str, u32, u32); 8] = [
+    ("Violet", VIOLET_500, VIOLET_300),
+    ("Blue", 0x2563EB, 0x93C5FD),
+    ("Green", 0x15803D, 0x86EFAC),
+    ("Teal", 0x0F766E, 0x5EEAD4),
+    ("Yellow", 0xA16207, 0xFDE047),
+    ("Orange", 0xC2410C, 0xFDBA74),
+    ("Pink", 0xBE185D, 0xF9A8D4),
+    ("Red", 0xB91C1C, 0xFCA5A5),
+];
+
+#[derive(Clone)]
+struct AppearanceState {
+    prefs: ora_core::store::AppearancePrefs,
+    system_reduce_motion: bool,
+}
+
+impl gpui_kit::Global for AppearanceState {}
+
+pub fn init_appearance(cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    let system_reduce_motion = std::process::Command::new("/usr/bin/defaults")
+        .args(["read", "com.apple.universalaccess", "reduceMotion"])
+        .output()
+        .is_ok_and(|result| {
+            result.status.success() && String::from_utf8_lossy(&result.stdout).trim() == "1"
+        });
+    #[cfg(not(target_os = "macos"))]
+    let system_reduce_motion = cx.reduce_motion();
+    let prefs = ora_core::store::load_appearance();
+    cx.set_global(AppearanceState {
+        prefs: prefs.clone(),
+        system_reduce_motion,
+    });
+    set_appearance(prefs, cx);
+}
+
+pub fn appearance(cx: &App) -> ora_core::store::AppearancePrefs {
+    cx.try_global::<AppearanceState>()
+        .map(|state| state.prefs.clone())
+        .unwrap_or_default()
+}
+
+pub fn set_appearance(prefs: ora_core::store::AppearancePrefs, cx: &mut App) {
+    let state = cx.global_mut::<AppearanceState>();
+    let reduce_motion = prefs.reduce_motion.unwrap_or(state.system_reduce_motion);
+    state.prefs = prefs;
+    cx.set_reduce_motion(reduce_motion);
+}
+
+fn apply_accent(theme: &mut Theme, name: &str) {
+    let Some((_, light, dark)) = ACCENTS.iter().skip(1).find(|(label, _, _)| *label == name) else {
+        return;
+    };
+    let primary = hex(*light);
+    let bright = hex(*dark);
+    let dark = theme.mode.is_dark();
+    let highlight = if dark { bright } else { primary };
+    theme.primary = highlight;
+    theme.primary_hover = highlight.blend(theme.foreground.opacity(0.12));
+    theme.primary_active = highlight.blend(theme.foreground.opacity(0.2));
+    theme.primary_foreground = if dark { hex(0x09090B) } else { hex(0xFFFFFF) };
+    theme.button_primary = theme.primary;
+    theme.button_primary_hover = theme.primary_hover;
+    theme.button_primary_active = theme.primary_active;
+    theme.button_primary_foreground = theme.primary_foreground;
+    theme.accent = theme
+        .background
+        .blend(highlight.opacity(if dark { 0.24 } else { 0.09 }));
+    theme.accent_foreground = if dark {
+        bright
+    } else {
+        primary.blend(hex(0x000000).opacity(0.24))
+    };
+    theme.ring = highlight;
+    theme.link = highlight;
+    theme.link_hover = theme.primary_hover;
+    theme.link_active = theme.primary_active;
+    theme.sidebar_accent = theme.accent;
+    theme.sidebar_accent_foreground = theme.accent_foreground;
+    theme.sidebar_primary = theme.primary;
+    theme.sidebar_primary_foreground = theme.primary_foreground;
+    theme.selection = highlight.opacity(0.23);
+    theme.table_active = theme.accent;
+}
+
+pub fn ui_size(theme: &Theme, base: f32) -> gpui_kit::Pixels {
+    gpui_kit::px(base + f32::from(theme.font_size) - FONT_BODY)
+}
+
 /// Apply one palette. `change` first (registered theme + mode), then a
 /// second `update` with the Ora colors (when no gpui-kit theme is picked
 /// for this mode), fonts, and radius — the order the component theme docs
 /// require.
 pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
     let names = theme_names(cx);
+    let appearance = appearance(cx);
     let light = lookup(names.light.as_deref(), false, cx);
     let dark = lookup(names.dark.as_deref(), true, cx);
     let use_ora = if mode.is_dark() {
@@ -227,6 +313,12 @@ pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
         });
     }
     Theme::change(mode, window, cx);
+    let ui_font = appearance
+        .ui_font
+        .as_ref()
+        .map(|s| gpui_kit::SharedString::from(s.clone()))
+        .or_else(|| UI_FONT.get().cloned())
+        .unwrap_or_else(|| ".SystemUIFont".into());
     Theme::update(cx, |theme| {
         if use_ora {
             if mode.is_dark() {
@@ -235,15 +327,13 @@ pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
                 apply_light(theme);
             }
         }
+        apply_accent(theme, &appearance.accent);
         // UI text keeps the platform font (the Root would otherwise apply
         // the theme font to the whole window); mono is for code only.
-        theme.font_family = UI_FONT
-            .get()
-            .cloned()
-            .unwrap_or_else(|| MONO_FONT_FAMILY.into());
+        theme.font_family = ui_font.clone();
         theme.mono_font_family = MONO_FONT_FAMILY.into();
-        theme.font_size = gpui_kit::px(FONT_BODY);
-        theme.mono_font_size = gpui_kit::px(FONT_EDITOR);
+        theme.font_size = gpui_kit::px(appearance.ui_font_size.into());
+        theme.mono_font_size = gpui_kit::px(appearance.sql_font_size.into());
         theme.radius = gpui_kit::px(RADIUS_MD);
         theme.radius_lg = gpui_kit::px(RADIUS_LG);
     });
@@ -251,10 +341,7 @@ pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
     // `update`, but pin its typography tokens to JetBrains Mono directly
     // too, so editor-adjacent surfaces never fall back to a system font.
     let base = gpui_kit::base::Theme::global_mut(cx);
-    base.tokens.typography.sans = UI_FONT
-        .get()
-        .cloned()
-        .unwrap_or_else(|| MONO_FONT_FAMILY.into());
+    base.tokens.typography.sans = ui_font.clone();
     base.tokens.typography.mono = MONO_FONT_FAMILY.into();
 }
 

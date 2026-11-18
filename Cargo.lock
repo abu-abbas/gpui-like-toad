@@ -2389,6 +2389,7 @@ name = "gpui-like-toad"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "gpui-kit",
  "gpui-updater-core",
  "image",
@@ -2396,6 +2397,7 @@ dependencies = [
  "lsp-types",
  "ora-core",
  "ora-driver",
+ "rust-embed",
  "serde_json",
  "ureq",
  "winresource",

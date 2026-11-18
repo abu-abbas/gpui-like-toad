@@ -120,6 +120,7 @@ mod tests {
             ],
             truncated: false,
             elapsed: Default::default(),
+            fetch_time: None,
         }
     }
 
@@ -148,6 +149,7 @@ mod tests {
             rows: vec![],
             truncated: false,
             elapsed: Default::default(),
+            fetch_time: None,
         };
         assert_eq!(to_csv(&empty), "A,B\r\n");
         assert_eq!(to_csv(&QueryResult::default()), "\r\n");
@@ -166,6 +168,7 @@ mod tests {
             ],
             truncated: false,
             elapsed: Default::default(),
+            fetch_time: None,
         };
         assert_eq!(to_csv(&result), "T\r\ncafé ☕\r\n\"a\rb\"\r\n");
     }
@@ -222,6 +225,7 @@ mod tests {
             ]],
             truncated: false,
             elapsed: Default::default(),
+            fetch_time: None,
         };
         let bytes = to_xlsx(&result).unwrap();
         assert_eq!(&bytes[0..4], &[0x50, 0x4B, 0x03, 0x04]);

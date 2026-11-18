@@ -191,6 +191,7 @@ mod tests {
             rows: vec![vec![crate::model::Value::Text("x,\"y\"".into())]],
             truncated: false,
             elapsed: Default::default(),
+            fetch_time: None,
         };
         let csv = parse_csv(&crate::export::to_csv(&result)).unwrap();
         assert_eq!(csv.rows, [["x,\"y\""]]);

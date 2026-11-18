@@ -178,6 +178,7 @@ impl DbClient for ThinClient {
             .map(|b| b as &dyn oracledb::ToDbValue)
             .collect();
         let cursor = conn.query(sql, &params).map_err(db_err)?;
+        let fetching = Instant::now();
         // Column metadata comes from the cursor (not a row) so empty result
         // sets still report their columns. DbType refs are 'static, so the
         // borrow of the cursor ends here before iteration moves it.
@@ -209,6 +210,7 @@ impl DbClient for ThinClient {
             columns,
             rows,
             truncated,
+            fetch_time: Some(fetching.elapsed()),
             elapsed: started.elapsed(),
         })
     }

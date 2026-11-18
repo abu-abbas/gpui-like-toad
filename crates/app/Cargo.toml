@@ -12,10 +12,13 @@ ora-driver = { path = "../ora-driver" }
 # `syntect` enables SQL syntax highlighting in the editor with a small
 # footprint (no Tree-sitter grammars bundled).
 gpui-kit = { version = "0.9.1", features = ["syntect"] }
+# GPUI assets must travel with standalone apps, including debug previews.
+rust-embed = { version = "8", features = ["debug-embed"] }
 # Types of the editor's completion hook (`CompletionProvider`), which
 # gpui-kit does not re-export. Versions follow gpui-kit's own.
 lsp-types = "0.97"
 anyhow = "1"
+chrono = "0.4"
 # Update check: one anonymous GET to the GitHub Releases API (rustls, no
 # OpenSSL needed at build time).
 ureq = { version = "3", features = ["platform-verifier"] }

@@ -21,7 +21,7 @@ impl Workbench {
             self.close_quick_open(cx);
             return;
         }
-        if self.conn.session.is_none() || self.show_connection_form {
+        if self.conn.session.is_none() || self.connection_form.show_connection_form {
             self.conn.status = "Quick Open butuh koneksi yang aktif.".to_string();
             cx.notify();
             return;
@@ -107,10 +107,15 @@ impl Workbench {
         let hits = self.quick_open_hits();
         let mut list = div().flex().flex_col().p(px(SPACE_1));
         if hits.is_empty() {
-            list = list.child(div().px(px(SPACE_3)).py(px(SPACE_2)).child(caption_text(
-                "Tidak ada tabel atau view yang cocok.".to_string(),
-                theme,
-            )));
+            list = list.child(
+                div()
+                    .px(px(SPACE_3))
+                    .py(px(SPACE_2))
+                    .child(empty_state_text(
+                        "Tidak ada tabel atau view yang cocok.".to_string(),
+                        theme,
+                    )),
+            );
         }
         for (ix, object) in hits.iter().enumerate() {
             let selected = ix == open.selected;
@@ -129,7 +134,7 @@ impl Workbench {
                 .h(px(TREE_ROW_HEIGHT))
                 .px(px(SPACE_2))
                 .rounded(px(RADIUS_SM))
-                .text_size(px(FONT_LABEL))
+                .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                 .line_height(px(LEADING_LABEL))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.confirm_quick_open(Some(ix), window, cx)

@@ -663,20 +663,44 @@ fn prev_is_select(toks: &[Tok], ix: usize) -> bool {
     ix >= 1 && matches!(&toks[ix - 1], Tok::Word(w) if w.eq_ignore_ascii_case("select"))
 }
 
-/// The statement the cursor (byte offset) sits in. Statements end at a
-/// `;` outside quotes and comments; a cursor right after a `;` still
-/// belongs to the statement that `;` closes. Empty segments are skipped
-/// so a cursor on trailing whitespace picks the nearest statement before.
-/// Returns the whole text when it holds a single statement.
-pub fn statement_at(sql: &str, cursor: usize) -> String {
+/// Only split scripts consisting entirely of result-producing queries. Procedural
+/// scripts and DDL keep their original statement boundaries.
+pub fn select_script(sql: &str) -> Option<Vec<String>> {
+    let parts: Vec<_> = statement_spans(sql)
+        .into_iter()
+        .map(|(a, b)| sql[a..b].trim())
+        .filter(|s| !skip_leading_comments(clean_statement(s)).is_empty())
+        .collect();
+    (!parts.is_empty()
+        && parts
+            .iter()
+            .all(|s| statement_kind(s) == StatementKind::Select))
+    .then(|| parts.into_iter().map(str::to_owned).collect())
+}
+
+fn statement_spans(sql: &str) -> Vec<(usize, usize)> {
     let bytes = sql.as_bytes();
     let mut spans: Vec<(usize, usize)> = Vec::new();
     let (mut start, mut i) = (0usize, 0usize);
     while i < bytes.len() {
         match bytes[i] {
-            b'\'' => {
+            b'q' | b'Q' if bytes.get(i + 1) == Some(&b'\'') && i + 2 < bytes.len() => {
+                let end = match bytes[i + 2] {
+                    b'[' => b']',
+                    b'(' => b')',
+                    b'{' => b'}',
+                    b'<' => b'>',
+                    c => c,
+                };
+                i += 3;
+                while i < bytes.len() && !(bytes[i] == end && bytes.get(i + 1) == Some(&b'\'')) {
+                    i += 1;
+                }
                 i += 1;
-                while i < bytes.len() && bytes[i] != b'\'' {
+            }
+            quote @ (b'\'' | b'"') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
                     i += 1;
                 }
             }
@@ -706,6 +730,16 @@ pub fn statement_at(sql: &str, cursor: usize) -> String {
         .into_iter()
         .filter(|(a, b)| !clean_statement(&sql[*a..*b]).is_empty())
         .collect();
+    spans
+}
+
+/// The statement the cursor (byte offset) sits in. Statements end at a
+/// `;` outside quotes and comments; a cursor right after a `;` still
+/// belongs to the statement that `;` closes. Empty segments are skipped
+/// so a cursor on trailing whitespace picks the nearest statement before.
+/// Returns the whole text when it holds a single statement.
+pub fn statement_at(sql: &str, cursor: usize) -> String {
+    let spans = statement_spans(sql);
     let cursor = cursor.min(sql.len());
     let pick = spans
         .iter()
@@ -721,6 +755,13 @@ pub fn statement_at(sql: &str, cursor: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_script_preserves_literals_and_ignores_trailing_comments() {
+        let sql = "select q'[it's;a]' from dual; select 1 as \"a;b\" from dual; -- done";
+        assert_eq!(select_script(sql).unwrap().len(), 2);
+        assert!(select_script("begin null; end;").is_none());
+    }
 
     #[test]
     fn statement_at_picks_the_statement_under_the_cursor() {

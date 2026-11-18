@@ -52,7 +52,7 @@ impl Workbench {
             .iter()
             .filter(|t| t.conn == conn)
             .filter_map(|t| t.data.as_ref())
-            .any(|d| d.edits.iter().any(|e| !e.applied))
+            .any(|d| d.has_staged())
     }
 
     /// Open the dialog for one cell.
@@ -198,7 +198,21 @@ impl Workbench {
             return;
         };
         let staged: Vec<&CellEdit> = data.edits.iter().filter(|e| !e.applied).collect();
-        if staged.is_empty() {
+        let deletes = data.deletes.clone();
+        let insert = data
+            .insert_fields
+            .iter()
+            .filter_map(|(name, field)| {
+                let value = field.read(cx).value().to_string();
+                (!value.is_empty()).then(|| (name.clone(), value))
+            })
+            .collect::<Vec<_>>();
+        if !data.insert_fields.is_empty() && insert.is_empty() {
+            self.conn.status = "Isi minimal satu kolom untuk baris baru.".into();
+            cx.notify();
+            return;
+        }
+        if !data.has_staged() {
             return;
         }
         let (owner, name) = (data.owner.clone(), data.name.clone());
@@ -225,6 +239,8 @@ impl Workbench {
                 owner,
                 name,
                 edits: updates,
+                deletes,
+                insert,
             },
             PendingOp::ApplyEdits,
             cx,
@@ -238,12 +254,30 @@ impl Workbench {
         error: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let tab_ix = self.active_tab;
+        let Some(tab_ix) = self.target_ix() else {
+            return;
+        };
+        let mut changed_rows = false;
         if let Some(data) = self.tabs.get_mut(tab_ix).and_then(|t| t.data.as_mut()) {
+            let mut remaining = done;
             for edit in data.edits.iter_mut().filter(|e| !e.applied).take(done) {
                 edit.applied = true;
                 edit.was_applied = false;
+                remaining -= 1;
             }
+            changed_rows = remaining > 0;
+            let removed = remaining.min(data.deletes.len());
+            data.deletes.drain(..removed);
+            if remaining > removed {
+                data.insert_fields.clear();
+            }
+        }
+        if changed_rows
+            && error.is_none()
+            && tab_ix == self.active_tab
+            && self.tabs[tab_ix].conn == Some(self.conn.id)
+        {
+            self.reload_data(cx);
         }
         self.sync_pending(tab_ix, cx);
         match error {
@@ -272,6 +306,8 @@ impl Workbench {
         let Some(data) = self.tabs.get_mut(tab_ix).and_then(|t| t.data.as_mut()) else {
             return;
         };
+        data.deletes.clear();
+        data.insert_fields.clear();
         data.edits.retain(|e| e.applied || e.was_applied);
         for edit in &mut data.edits {
             if edit.was_applied {
@@ -291,6 +327,8 @@ impl Workbench {
                 continue;
             }
             if let Some(data) = self.tabs[ix].data.as_mut() {
+                data.deletes.clear();
+                data.insert_fields.clear();
                 if !data.edits.is_empty() {
                     data.edits.clear();
                     self.sync_pending(ix, cx);
@@ -336,7 +374,7 @@ impl Workbench {
                     .items_center()
                     .border_b_1()
                     .border_color(theme.border)
-                    .text_size(px(FONT_BODY))
+                    .text_size(crate::theme::ui_size(&theme, FONT_BODY))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(format!("Edit {}", request.column)),
             )
