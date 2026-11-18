@@ -278,3 +278,269 @@ fn object_menu(menu: PopupMenu, view: &Entity<Workbench>, object: &ObjectRef) ->
             |this, o, _, cx| this.import_table(o, cx),
         ))
 }
+
+impl Workbench {
+    /// Reload the schema list, then the objects of the current schema
+    /// (the session user's own schema on first load).
+    pub(super) fn refresh_schema(&mut self, cx: &mut Context<Self>) {
+        if self.conn.busy {
+            return;
+        }
+        if self.conn.session.is_none() {
+            self.push_message("Belum terhubung.".to_string());
+            return;
+        }
+        self.conn.status = "Memuat daftar schema...".to_string();
+        self.spawn_db(Job::ListSchemas, PendingOp::ListSchemas, cx);
+    }
+
+    pub(super) fn load_objects(&mut self, cx: &mut Context<Self>) {
+        let Some(owner) = self.conn.current_schema.clone() else {
+            return;
+        };
+        self.conn.status = format!("Memuat objek {owner}...");
+        self.spawn_db(Job::ListObjects { owner }, PendingOp::ListObjects, cx);
+    }
+
+    fn select_schema(&mut self, schema: String, cx: &mut Context<Self>) {
+        if self.conn.busy || self.conn.current_schema.as_deref() == Some(schema.as_str()) {
+            return;
+        }
+        self.conn.current_schema = Some(schema);
+        self.conn.selected_object = None;
+        self.conn.objects.clear();
+        self.load_objects(cx);
+    }
+
+    fn select_category(&mut self, category: ObjectCategory, cx: &mut Context<Self>) {
+        self.category = category;
+        self.conn.selected_object = None;
+        cx.notify();
+    }
+
+    pub(super) fn apply_tree_filter(&mut self, cx: &mut Context<Self>) {
+        self.tree_filter = Self::input_text(&self.search_input, cx);
+        cx.notify();
+    }
+
+    /// Single click selects; double click on a table/view opens its data
+    /// in a new tab, like Toad. The platform reports the tap count on the
+    /// mouse-down event, so a double click arrives with `click_count >= 2`.
+    fn on_object_click(
+        &mut self,
+        object: ObjectRef,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.conn.selected_object = Some(object.name.clone());
+        let double_click = matches!(event, ClickEvent::Mouse(m) if m.down.click_count >= 2);
+        if double_click {
+            if schema::has_data(&object.kind) {
+                self.open_table_data(&object.owner, &object.name, window, cx);
+            } else {
+                self.view_script(object, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Open `owner.name` in a new data tab titled after the table and run a
+    /// capped `SELECT *` there.
+    pub(super) fn open_table_data(
+        &mut self,
+        owner: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_table_data_in(owner, name, DataView::Data, window, cx);
+    }
+
+    /// Like [`Self::open_table_data`], starting on `view` (Describe opens
+    /// the Structure view; the rows load when Data is first shown).
+    fn open_table_data_in(
+        &mut self,
+        owner: &str,
+        name: &str,
+        start_view: DataView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.conn.session.is_none() {
+            return;
+        }
+        if self.conn.busy {
+            self.conn.status = "Masih ada operasi berjalan.".to_string();
+            cx.notify();
+            return;
+        }
+        let kind = self
+            .conn
+            .objects
+            .iter()
+            .find(|o| o.owner == owner && o.name == name)
+            .map_or(ObjectKind::Table, |o| o.kind.clone());
+        self.add_tab(window, cx);
+        let view = cx.entity().downgrade();
+        let editable = kind == ObjectKind::Table;
+        let data = DataTab::new(owner, name, kind, window, cx);
+        let table_state = self.active_tab().table_state.clone();
+        let observe = cx.observe(&table_state, |_, _, cx| cx.notify());
+        let mut data = data;
+        data._grid_observe = Some(observe);
+        let tab = self.active_tab_mut();
+        tab.title = format!("{owner}.{name}");
+        tab.kind = TabKind::Data;
+        tab.data = Some(data);
+        let edit_view = view.clone();
+        let table_name = format!(
+            "{}.{}",
+            ora_core::import::quote_ident(owner),
+            ora_core::import::quote_ident(name)
+        );
+        tab.table_state.update(cx, |state, _| {
+            let mut delegate = ResultsDelegate::empty()
+                .with_page_size(DATA_PAGE_SIZE)
+                .with_row_numbers()
+                .with_quick_filter(Rc::new(move |condition, window, cx| {
+                    let _ = view.update(cx, |this, cx| this.quick_filter(condition, window, cx));
+                }));
+            // Only tables have a stable ROWID to find a row by.
+            if editable {
+                delegate = delegate.with_cell_edit(Rc::new(move |request, window, cx| {
+                    let _ =
+                        edit_view.update(cx, |this, cx| this.open_cell_editor(request, window, cx));
+                }));
+            }
+            delegate.set_table_name(Some(table_name));
+            *state.delegate_mut() = delegate;
+        });
+        self.add_filter_row(None, None, window, cx);
+        if start_view == DataView::Data {
+            self.reload_data(cx);
+        } else {
+            if let Some(data) = self.data_mut() {
+                data.view = start_view;
+            }
+            self.load_data_view(cx);
+        }
+    }
+
+    /// "View Script": fetch the DDL; the response opens it in a new tab.
+    fn view_script(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
+        if self.conn.busy || self.conn.session.is_none() {
+            return;
+        }
+        self.conn.status = format!("Mengambil DDL {}.{}...", object.owner, object.name);
+        self.spawn_db(
+            Job::Ddl {
+                owner: object.owner.clone(),
+                name: object.name.clone(),
+                kind: object.kind,
+            },
+            PendingOp::Ddl {
+                owner: object.owner,
+                name: object.name,
+            },
+            cx,
+        );
+    }
+
+    /// "Export Data": ask where to save (native save dialog), then let the
+    /// worker fetch and write the whole table. If the platform has no file
+    /// dialog, fall back to a timestamped file in the working directory.
+    fn export_table(&mut self, object: ObjectRef, format: ExportFormat, cx: &mut Context<Self>) {
+        if self.conn.busy || self.conn.session.is_none() {
+            return;
+        }
+        let conn_id = self.conn.id;
+        let suggested = format!("{}.{}", object.name, format.extension());
+        let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let prompt = cx.prompt_for_new_path(&dir, Some(&suggested));
+        cx.spawn(async move |view, cx| {
+            let path = match prompt.await {
+                Ok(Ok(Some(path))) => Some(path),
+                Ok(Ok(None)) => None, // cancelled
+                _ => Some(dir.join(format!(
+                    "{}-{}.{}",
+                    object.name,
+                    unix_stamp(),
+                    format.extension()
+                ))),
+            };
+            let Some(path) = path else {
+                return;
+            };
+            let _ = view.update(cx, |this, cx| {
+                this.with_conn(conn_id, cx, |this, _, cx| {
+                    this.conn.status = format!("Export {}.{}...", object.owner, object.name);
+                    this.spawn_db(
+                        Job::ExportTable {
+                            owner: object.owner.clone(),
+                            name: object.name.clone(),
+                            path,
+                            format,
+                        },
+                        PendingOp::ExportTable {
+                            owner: object.owner,
+                            name: object.name,
+                        },
+                        cx,
+                    );
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// "Import Data": pick a CSV file whose header names match the table's
+    /// columns; rows are inserted without commit.
+    fn import_table(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
+        if self.conn.busy || self.conn.session.is_none() {
+            return;
+        }
+        let conn_id = self.conn.id;
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import CSV".into()),
+        });
+        cx.spawn(async move |view, cx| {
+            let picked = prompt.await;
+            let _ = view.update(cx, |this, cx| {
+                let path = match picked {
+                    Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                    Ok(Ok(None)) => None,
+                    _ => {
+                        this.push_message(
+                            "Dialog pilih file tidak tersedia di sistem ini.".to_string(),
+                        );
+                        cx.notify();
+                        None
+                    }
+                };
+                let Some(path) = path else {
+                    return;
+                };
+                this.with_conn(conn_id, cx, |this, _, cx| {
+                    this.conn.status = format!("Import ke {}.{}...", object.owner, object.name);
+                    this.spawn_db(
+                        Job::ImportCsv {
+                            owner: object.owner.clone(),
+                            name: object.name.clone(),
+                            path,
+                        },
+                        PendingOp::ImportCsv {
+                            owner: object.owner,
+                            name: object.name,
+                        },
+                        cx,
+                    );
+                });
+            });
+        })
+        .detach();
+    }
+}

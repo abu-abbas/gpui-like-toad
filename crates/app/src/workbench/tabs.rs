@@ -261,3 +261,132 @@ impl Workbench {
             )
     }
 }
+
+impl Workbench {
+    pub(super) fn active_tab(&self) -> &QueryTab {
+        self.tabs.get(self.active_tab).unwrap_or(&self.scratch_tab)
+    }
+
+    pub(super) fn active_tab_mut(&mut self) -> &mut QueryTab {
+        if self.active_tab < self.tabs.len() {
+            &mut self.tabs[self.active_tab]
+        } else {
+            &mut self.scratch_tab
+        }
+    }
+
+    pub(super) fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.next_tab_id += 1;
+        let id = self.next_tab_id;
+        let completion = self.completion.clone();
+        let mut tab = QueryTab::new(id, format!("Query {id}"), "", &completion, window, cx);
+        tab.conn = self.conn.is_open().then_some(self.conn.id);
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        self.show_home = false;
+        self.leave_whats_new();
+        self.tab_scroll.scroll_to_item(self.active_tab);
+        cx.notify();
+    }
+
+    /// Every tab can be closed; only Home stays. Closing the last one
+    /// goes back to Home.
+    fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(ix);
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+            self.show_home = true;
+        } else if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        } else if ix < self.active_tab {
+            self.active_tab -= 1;
+        }
+        // The tab now showing may run on another connection.
+        self.follow_tab_conn(cx);
+        cx.notify();
+    }
+
+    /// Close every tab for which `close(ix, tab)` is true. The active tab
+    /// stays active when it survives; otherwise the nearest survivor is
+    /// shown (or Home when none is left).
+    pub(super) fn close_tabs_where(
+        &mut self,
+        close: impl Fn(usize, &QueryTab, &App) -> bool,
+        cx: &mut Context<Self>,
+    ) {
+        let active_id = self.tabs.get(self.active_tab).map(|t| t.id);
+        let old_active = self.active_tab;
+        let doomed: Vec<bool> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(ix, t)| close(ix, t, cx))
+            .collect();
+        let mut ix = 0;
+        self.tabs.retain(|_| {
+            let keep = !doomed[ix];
+            ix += 1;
+            keep
+        });
+        if self.tabs.is_empty() {
+            self.active_tab = 0;
+            self.show_home = true;
+        } else if let Some(pos) = self.tabs.iter().position(|t| Some(t.id) == active_id) {
+            self.active_tab = pos;
+        } else {
+            self.active_tab = old_active.min(self.tabs.len() - 1);
+        }
+        self.follow_tab_conn(cx);
+        cx.notify();
+    }
+
+    /// Whether a tab holds nothing that would be lost: a data tab with
+    /// no staged or uncommitted cell edits, or an empty SQL editor.
+    fn tab_is_saved(tab: &QueryTab, cx: &App) -> bool {
+        match &tab.data {
+            Some(d) => d.edits.is_empty(),
+            None => tab.editor.read(cx).value().trim().is_empty(),
+        }
+    }
+
+    pub(super) fn activate_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix >= self.tabs.len() {
+            return;
+        }
+        self.active_tab = ix;
+        self.show_home = false;
+        self.leave_whats_new();
+        self.tab_scroll.scroll_to_item(ix);
+        self.follow_tab_conn(cx);
+        cx.notify();
+    }
+
+    pub(super) fn new_tab_with_sql(
+        &mut self,
+        sql: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_tab(window, cx);
+        let editor = self.active_tab().editor.clone();
+        editor.update(cx, |state, cx| state.set_value(sql, window, cx));
+    }
+
+    pub(super) fn load_sql_into_active_tab(
+        &mut self,
+        sql: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.show_home {
+            self.new_tab_with_sql(sql, window, cx);
+            return;
+        }
+        let editor = self.active_tab().editor.clone();
+        editor.update(cx, |state, cx| state.set_value(sql, window, cx));
+        cx.notify();
+    }
+}

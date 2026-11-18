@@ -638,3 +638,222 @@ mod tests {
         assert_eq!(script_filename("HR/EMP:x"), "HR_EMP_x.sql");
     }
 }
+
+impl Workbench {
+    pub(super) fn connect(&mut self, demo: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if demo {
+            if let Some(id) = self.find_open_conn(None, true) {
+                self.switch_conn(id, window, cx);
+                return;
+            }
+        }
+        if self.conn.busy {
+            return;
+        }
+        let (profile, password) = if demo {
+            (
+                ConnectionProfile {
+                    name: "Demo database".to_string(),
+                    username: "DEMO".to_string(),
+                    connect_string: "demo".to_string(),
+                },
+                Password::Typed(SecretString::from(String::new())),
+            )
+        } else {
+            let username = Self::input_text(&self.user_input, cx);
+            let connect_string = self.form_connect_string(cx);
+            if username.is_empty() || connect_string.is_empty() {
+                self.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
+                cx.notify();
+                return;
+            }
+            // "Save password" ticked, or unticked on a profile that had
+            // one: Connect also saves the profile so the keychain matches
+            // the checkbox.
+            let had_saved = self
+                .editing_profile
+                .and_then(|ix| self.profiles.get(ix))
+                .is_some_and(|p| p.save_password);
+            let password = self.dialog_password(cx);
+            if self.save_password || had_saved {
+                self.save_profile_quiet(cx);
+            }
+            let name = Self::input_text(&self.name_input, cx);
+            (
+                ConnectionProfile {
+                    name: if name.is_empty() {
+                        format!("{username}@{connect_string}")
+                    } else {
+                        name
+                    },
+                    username,
+                    connect_string,
+                },
+                password,
+            )
+        };
+        self.start_connect(
+            profile,
+            password,
+            demo,
+            if demo { None } else { self.editing_profile },
+            cx,
+        );
+    }
+
+    /// Connect straight to a saved profile when its password is in the
+    /// keychain; otherwise open its dialog so the user types one.
+    pub(super) fn open_profile(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(saved) = self.profiles.get(ix).cloned() else {
+            return;
+        };
+        // Already open: switch to it rather than logging in twice.
+        if let Some(id) = self.find_open_conn(Some(ix), false) {
+            self.switch_conn(id, window, cx);
+            return;
+        }
+        if !saved.save_password || self.conn.busy {
+            self.edit_profile(ix, window, cx);
+            return;
+        }
+        let profile = ConnectionProfile {
+            name: saved.name.clone(),
+            username: saved.username.clone(),
+            connect_string: saved.connect_string.clone(),
+        };
+        self.start_connect(
+            profile,
+            Password::Saved {
+                profile_id: saved.id.clone(),
+            },
+            false,
+            Some(ix),
+            cx,
+        );
+    }
+
+    fn start_connect(
+        &mut self,
+        profile: ConnectionProfile,
+        password: Password,
+        demo: bool,
+        profile_ix: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        self.prepare_new_conn();
+        if self.conn.db.is_none() {
+            self.conn.db = Some(DbHandle::spawn());
+        }
+        self.conn.demo_mode = demo;
+        self.conn.connect_error = None;
+        self.conn.last_connection = Some(LastConnection {
+            profile: profile.clone(),
+            demo,
+            profile_ix,
+        });
+        self.conn.status = "Menghubungkan...".to_string();
+        self.spawn_db(
+            Job::Connect {
+                profile,
+                password,
+                demo,
+            },
+            PendingOp::Connect,
+            cx,
+        );
+    }
+
+    pub(super) fn test_connection(&mut self, cx: &mut Context<Self>) {
+        if self.conn.busy {
+            return;
+        }
+        let username = Self::input_text(&self.user_input, cx);
+        let connect_string = self.form_connect_string(cx);
+        if username.is_empty() || connect_string.is_empty() {
+            self.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
+            cx.notify();
+            return;
+        }
+        self.form_notice = None;
+        if self.conn.db.is_none() {
+            self.conn.db = Some(DbHandle::spawn());
+        }
+        let name = Self::input_text(&self.name_input, cx);
+        self.conn.status = "Mengetes koneksi...".to_string();
+        self.spawn_db(
+            Job::TestConnect {
+                profile: ConnectionProfile {
+                    name,
+                    username,
+                    connect_string,
+                },
+                password: self.dialog_password(cx),
+            },
+            PendingOp::TestConnect,
+            cx,
+        );
+    }
+
+    /// Close the active connection. Other open connections stay open; the
+    /// next one becomes active.
+    pub(super) fn disconnect(&mut self, cx: &mut Context<Self>) {
+        self.push_message("Disconnected.".to_string());
+        if let Some(db) = self.conn.db.take() {
+            // Fire and forget: the worker closes the session on its own.
+            let _ = db.request(Job::Disconnect);
+        }
+        self.conn.session = None;
+        self.reset_catalog(None);
+        self.conn.demo_mode = false;
+        self.conn.uncommitted = false;
+        self.show_connection_form = false;
+        self.conn.objects.clear();
+        self.conn.schemas.clear();
+        self.conn.current_schema = None;
+        self.conn.selected_object = None;
+        self.conn.status = "Belum terhubung.".to_string();
+        self.after_disconnect(cx);
+        cx.notify();
+    }
+
+    /// Connect again to the last connection: demo and profiles with a
+    /// saved password reconnect directly; anything else opens its dialog.
+    pub(super) fn reconnect_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(last) = self.conn.last_connection.clone() else {
+            return;
+        };
+        if last.demo {
+            self.connect(true, window, cx);
+        } else if let Some(ix) = last.profile_ix.filter(|ix| *ix < self.profiles.len()) {
+            self.open_profile(ix, window, cx);
+        } else {
+            self.edit_last_connection(window, cx);
+        }
+    }
+
+    pub(super) fn edit_last_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(last) = self.conn.last_connection.clone() else {
+            return;
+        };
+        if last.demo {
+            return;
+        }
+        match last.profile_ix.filter(|ix| *ix < self.profiles.len()) {
+            Some(ix) => self.edit_profile(ix, window, cx),
+            None => {
+                let profile = SavedProfile {
+                    id: String::new(),
+                    name: last.profile.name.clone(),
+                    username: last.profile.username.clone(),
+                    connect_string: last.profile.connect_string.clone(),
+                    save_password: false,
+                };
+                self.editing_profile = None;
+                self.fill_form(&profile, window, cx);
+                self.form_notice = None;
+                self.show_connection_form = true;
+                cx.notify();
+            }
+        }
+    }
+}

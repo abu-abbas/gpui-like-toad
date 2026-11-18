@@ -239,3 +239,25 @@ impl Workbench {
         panel.child(list)
     }
 }
+
+impl Workbench {
+    fn persist_history(&mut self) {
+        if let Err(err) = store::save_history(&self.history) {
+            self.push_message(format!("Gagal menyimpan history: {err}"));
+        }
+    }
+
+    fn toggle_favorite(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(entry) = self.history.get_mut(ix) {
+            entry.favorite = !entry.favorite;
+            self.persist_history();
+            cx.notify();
+        }
+    }
+
+    fn clear_history(&mut self, cx: &mut Context<Self>) {
+        self.history.clear();
+        self.persist_history();
+        cx.notify();
+    }
+}

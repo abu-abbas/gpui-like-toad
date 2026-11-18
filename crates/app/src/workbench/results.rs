@@ -777,6 +777,16 @@ fn page_items(current: usize, total: usize) -> Vec<PageItem> {
     items
 }
 
+/// CSV export filename for a unix timestamp. Split out for tests.
+fn export_filename(stamp: u64) -> String {
+    format!("Ora-The-Explorer-export-{stamp}.csv")
+}
+
+/// XLSX export filename for a unix timestamp. Split out for tests.
+fn export_xlsx_filename(stamp: u64) -> String {
+    format!("Ora-The-Explorer-export-{stamp}.xlsx")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -835,5 +845,109 @@ mod tests {
                 Page(7)
             ]
         );
+    }
+
+    #[test]
+    fn export_filename_is_stable_and_suffixed() {
+        assert_eq!(export_filename(0), "Ora-The-Explorer-export-0.csv");
+        assert_eq!(
+            export_filename(1_700_000_000),
+            "Ora-The-Explorer-export-1700000000.csv"
+        );
+        assert_eq!(
+            export_xlsx_filename(1_700_000_000),
+            "Ora-The-Explorer-export-1700000000.xlsx"
+        );
+    }
+}
+
+impl Workbench {
+    pub(super) fn set_grid_result(&mut self, result: QueryResult, cx: &mut Context<Self>) {
+        let tab = self.target_tab_mut();
+        tab.last_result = Some(result.clone());
+        tab.table_state.update(cx, |state, cx| {
+            state.delegate_mut().set_result(result);
+            state.refresh(cx);
+        });
+    }
+
+    fn export_csv(&mut self, cx: &mut Context<Self>) {
+        let Some(result) = self.active_tab().last_result.clone() else {
+            self.push_message("Belum ada hasil query untuk diekspor.".to_string());
+            self.active_tab_mut().results_tab = ResultsTab::Messages;
+            cx.notify();
+            return;
+        };
+        let csv = to_csv(&result);
+        let filename = export_filename(unix_stamp());
+        let path = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(&filename);
+        match std::fs::write(&path, csv) {
+            Ok(()) => {
+                self.push_message(format!(
+                    "CSV tersimpan: {} ({} baris)",
+                    path.display(),
+                    result.row_count()
+                ));
+                self.conn.status = format!("Exported {filename}");
+            }
+            Err(err) => {
+                self.push_message(format!("Gagal menulis CSV: {err}"));
+            }
+        }
+        self.active_tab_mut().results_tab = ResultsTab::Messages;
+        cx.notify();
+    }
+
+    fn export_xlsx(&mut self, cx: &mut Context<Self>) {
+        let Some(result) = self.active_tab().last_result.clone() else {
+            self.push_message("Belum ada hasil query untuk diekspor.".to_string());
+            self.active_tab_mut().results_tab = ResultsTab::Messages;
+            cx.notify();
+            return;
+        };
+        match to_xlsx(&result) {
+            Ok(bytes) => {
+                let filename = export_xlsx_filename(unix_stamp());
+                let path = std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(&filename);
+                match std::fs::write(&path, bytes) {
+                    Ok(()) => {
+                        self.push_message(format!(
+                            "XLSX tersimpan: {} ({} baris)",
+                            path.display(),
+                            result.row_count()
+                        ));
+                        self.conn.status = format!("Exported {filename}");
+                    }
+                    Err(err) => {
+                        self.push_message(format!("Gagal menulis XLSX: {err}"));
+                    }
+                }
+            }
+            Err(err) => {
+                self.push_message(format!("Gagal membuat XLSX: {err}"));
+            }
+        }
+        self.active_tab_mut().results_tab = ResultsTab::Messages;
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_plan_node(&mut self, id: i64) {
+        let expanded = &mut self.active_tab_mut().plan_expanded;
+        if !expanded.insert(id) {
+            expanded.remove(&id);
+        }
+    }
+
+    fn goto_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        let tab = self.active_tab_mut();
+        tab.table_state.update(cx, |state, cx| {
+            state.delegate_mut().set_page(page);
+            state.refresh(cx);
+        });
+        cx.notify();
     }
 }

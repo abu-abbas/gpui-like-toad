@@ -159,3 +159,37 @@ impl Workbench {
         )
     }
 }
+
+impl Workbench {
+    /// Pick the color theme for light (`dark == false`) or dark mode;
+    /// `None` is the app's own palette.
+    fn set_theme_name(
+        &mut self,
+        dark: bool,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut names = theme::theme_names(cx);
+        if dark {
+            names.dark = name;
+        } else {
+            names.light = name;
+        }
+        theme::set_theme_names(names.clone(), cx);
+        theme::apply_preference(self.theme_pref, window, cx);
+        if let Err(err) = store::save_theme_names(&names) {
+            self.push_message(format!("Gagal menyimpan pilihan tema: {err}"));
+        }
+        cx.notify();
+    }
+
+    fn set_theme(&mut self, pref: ThemePreference, window: &mut Window, cx: &mut Context<Self>) {
+        self.theme_pref = pref;
+        theme::apply_preference(pref, window, cx);
+        if let Err(err) = store::save_theme_preference(pref) {
+            self.push_message(format!("Gagal menyimpan preferensi tema: {err}"));
+        }
+        cx.notify();
+    }
+}
