@@ -119,6 +119,10 @@ pub fn remember_ui_font(family: gpui_kit::SharedString) {
     let _ = UI_FONT.set(family);
 }
 
+pub fn empty_hint(theme: &Theme) -> Hsla {
+    theme.background.blend(theme.muted_foreground.opacity(0.66))
+}
+
 fn hex(value: u32) -> Hsla {
     Hsla::from(rgb(value))
 }
@@ -309,6 +313,12 @@ pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
         });
     }
     Theme::change(mode, window, cx);
+    let ui_font = appearance
+        .ui_font
+        .as_ref()
+        .map(|s| gpui_kit::SharedString::from(s.clone()))
+        .or_else(|| UI_FONT.get().cloned())
+        .unwrap_or_else(|| ".SystemUIFont".into());
     Theme::update(cx, |theme| {
         if use_ora {
             if mode.is_dark() {
@@ -320,10 +330,7 @@ pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
         apply_accent(theme, &appearance.accent);
         // UI text keeps the platform font (the Root would otherwise apply
         // the theme font to the whole window); mono is for code only.
-        theme.font_family = UI_FONT
-            .get()
-            .cloned()
-            .unwrap_or_else(|| MONO_FONT_FAMILY.into());
+        theme.font_family = ui_font.clone();
         theme.mono_font_family = MONO_FONT_FAMILY.into();
         theme.font_size = gpui_kit::px(appearance.ui_font_size.into());
         theme.mono_font_size = gpui_kit::px(appearance.sql_font_size.into());
@@ -334,10 +341,7 @@ pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
     // `update`, but pin its typography tokens to JetBrains Mono directly
     // too, so editor-adjacent surfaces never fall back to a system font.
     let base = gpui_kit::base::Theme::global_mut(cx);
-    base.tokens.typography.sans = UI_FONT
-        .get()
-        .cloned()
-        .unwrap_or_else(|| MONO_FONT_FAMILY.into());
+    base.tokens.typography.sans = ui_font.clone();
     base.tokens.typography.mono = MONO_FONT_FAMILY.into();
 }
 

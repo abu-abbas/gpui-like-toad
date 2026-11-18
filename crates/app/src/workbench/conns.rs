@@ -184,6 +184,7 @@ impl Workbench {
             // was closed). Its old grid came from the other connection.
             Some(_) if orphaned || tab.data.is_none() => {
                 tab.conn = Some(id);
+                tab.statement_results.clear();
                 tab.last_result = None;
                 tab.elapsed_ms = None;
                 tab.plan_nodes = None;
@@ -212,6 +213,7 @@ impl Workbench {
         let closed = self.conn.id;
         for tab in &mut self.tabs {
             if tab.conn == Some(closed) {
+                tab.statement_results.clear();
                 tab.last_result = None;
                 tab.elapsed_ms = None;
                 tab.plan_nodes = None;

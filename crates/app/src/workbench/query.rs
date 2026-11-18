@@ -129,7 +129,18 @@ impl Workbench {
         }
         self.conn.status = "Menjalankan...".to_string();
         self.conn.pending_sql = Some(sql.clone());
-        self.spawn_db(Job::Run { sql }, PendingOp::Run, cx);
+        self.active_tab_mut().statement_results.clear();
+        let job = if let Some(statements) = ora_core::sql::select_script(&sql) {
+            let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            self.conn.cancel_script = Some(cancelled.clone());
+            Job::SelectScript {
+                statements,
+                cancelled,
+            }
+        } else {
+            Job::Run { sql }
+        };
+        self.spawn_db(job, PendingOp::Run, cx);
     }
 
     pub(super) fn explain(&mut self, cx: &mut Context<Self>) {
@@ -171,8 +182,11 @@ impl Workbench {
     /// true cancellation — Oracle offers no cancel handle through the thin
     /// driver call in use — and the UI must never claim otherwise.
     pub(super) fn stop(&mut self, cx: &mut Context<Self>) {
-        if !self.conn.busy {
+        if !self.conn.busy || matches!(self.conn.pending_op, Some(PendingOp::ApplyEdits)) {
             return;
+        }
+        if let Some(cancelled) = self.conn.cancel_script.take() {
+            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         self.conn.op_generation += 1;
         self.conn.pending_op = None;

@@ -106,7 +106,6 @@ impl Workbench {
                     tab.data.as_ref().is_some_and(|data| data.show_filters),
                     |body| body.child(self.render_filter_bar(theme, cx)),
                 )
-                .children(self.render_edit_bar(theme, cx))
                 .child(
                     div()
                         .flex()
@@ -125,6 +124,7 @@ impl Workbench {
             .min_w(px(0.))
             .overflow_hidden()
             .child(body)
+            .children(self.render_edit_bar(theme, cx))
             .child(self.render_data_footer(theme, cx))
     }
 
@@ -283,7 +283,57 @@ impl Workbench {
             .min_w(px(0.))
             .overflow_hidden()
             .bg(theme.background);
-        col = col.child(self.render_sub_tab_bar(theme, cx));
+        let tab = self.active_tab();
+        if tab.statement_results.len() > 1 {
+            let mut strip = div()
+                .id("batch-results")
+                .flex()
+                .items_center()
+                .overflow_x_scroll()
+                .flex_none()
+                .gap(px(4.))
+                .p(px(4.));
+            for (label, dest) in [
+                ("Messages", ResultsTab::Messages),
+                ("Summary", ResultsTab::Summary),
+            ] {
+                strip = strip.child(
+                    Button::new(label)
+                        .small()
+                        .ghost()
+                        .label(label)
+                        .selected(tab.results_tab == dest)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.active_tab_mut().results_tab = dest;
+                            cx.notify();
+                        })),
+                );
+            }
+            for ix in 0..tab.statement_results.len() {
+                strip = strip.child(
+                    Button::new(("statement-result", ix))
+                        .small()
+                        .ghost()
+                        .label(format!("Result {}", ix + 1))
+                        .selected(
+                            ix == tab.result_ix
+                                && matches!(
+                                    tab.results_tab,
+                                    ResultsTab::Results | ResultsTab::Info
+                                ),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.show_statement_result(this.active_tab, ix, cx)
+                        })),
+                );
+            }
+            col = col.child(strip);
+        }
+        if tab.statement_results.len() <= 1
+            || !matches!(tab.results_tab, ResultsTab::Summary | ResultsTab::Messages)
+        {
+            col = col.child(self.render_sub_tab_bar(theme, cx));
+        }
         // The content wrapper must be a flex container: the results content
         // is a `flex_1` div, and as a plain block child its flex sizing is
         // ignored, leaving it content-height. `DataTable` sizes itself with
@@ -308,6 +358,33 @@ impl Workbench {
         col
     }
 
+    pub(super) fn show_statement_result(
+        &mut self,
+        tab_ix: usize,
+        result_ix: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = &mut self.tabs[tab_ix];
+        let Some(entry) = tab.statement_results.get(result_ix) else {
+            return;
+        };
+        tab.result_ix = result_ix;
+        tab.last_result = entry.outcome.as_ref().ok().cloned();
+        tab.elapsed_ms = tab.last_result.as_ref().map(|r| r.elapsed.as_millis());
+        tab.results_tab = if tab.last_result.is_some() {
+            ResultsTab::Results
+        } else {
+            ResultsTab::Info
+        };
+        tab.table_state.update(cx, |state, cx| {
+            state
+                .delegate_mut()
+                .set_result(tab.last_result.clone().unwrap_or_default());
+            state.refresh(cx);
+        });
+        cx.notify();
+    }
+
     fn render_sub_tab_bar(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -326,14 +403,21 @@ impl Workbench {
             .bg(theme.background)
             .border_b_1()
             .border_color(theme.border);
-        for (which, label) in [
+        let mut sections = vec![
             (ResultsTab::Results, format!("Data ({rows})")),
             (ResultsTab::Plan, "Explain Plan".to_string()),
             (
                 ResultsTab::Messages,
                 format!("Messages ({})", self.messages.len()),
             ),
-        ] {
+        ];
+        if !tab.statement_results.is_empty() {
+            sections.insert(1, (ResultsTab::Info, "Info".into()));
+            if tab.statement_results.len() > 1 {
+                sections.retain(|(which, _)| *which != ResultsTab::Messages);
+            }
+        }
+        for (which, label) in sections {
             let active = current == which;
             let mut item = div()
                 .id(format!("subtab-{label}"))
@@ -384,7 +468,15 @@ impl Workbench {
         let has_result = self.active_tab().last_result.is_some();
         let view = cx.entity();
         Button::new("export")
-            .label("Export")
+            .ghost()
+            .small()
+            .child(
+                div()
+                    .text_size(theme::ui_size(cx.theme(), FONT_LABEL))
+                    .line_height(px(LEADING_LABEL))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child("Export"),
+            )
             .icon(IconName::Download)
             .disabled(!has_result)
             .dropdown_menu(move |menu, _, _| {
@@ -414,6 +506,47 @@ impl Workbench {
     ) -> impl IntoElement {
         let tab = self.active_tab();
         match tab.results_tab {
+            ResultsTab::Summary | ResultsTab::Info => {
+                let mut panel = div()
+                    .id("query-info")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .p(px(12.));
+                for (ix, entry) in tab.statement_results.iter().enumerate() {
+                    if tab.results_tab == ResultsTab::Info && ix != tab.result_ix {
+                        continue;
+                    }
+                    let summary = match &entry.outcome {
+                        Ok(r) => format!(
+                            "{} rows{}  ·  {} columns  ·  {:.3} s total",
+                            r.row_count(),
+                            if r.truncated { " (limited)" } else { "" },
+                            r.columns.len(),
+                            r.elapsed.as_secs_f64()
+                        ),
+                        Err(err) => err.clone(),
+                    };
+                    let mut section = div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .pb(px(12.))
+                        .child(format!("Result {}  ·  {}", ix + 1, summary))
+                        .child(format!("{}  ·  {}", entry.started, tab.result_connection));
+                    if let Ok(r) = &entry.outcome {
+                        if let Some(fetch) = r.fetch_time {
+                            section = section.child(format!(
+                                "Query time: {:.3} s    Fetch time: {:.3} s",
+                                r.elapsed.saturating_sub(fetch).as_secs_f64(),
+                                fetch.as_secs_f64()
+                            ));
+                        }
+                    }
+                    panel = panel.child(section.child(entry.sql.clone()));
+                }
+                panel.into_any_element()
+            }
+
             ResultsTab::Results => {
                 if tab.last_result.is_none() {
                     div()
@@ -477,6 +610,27 @@ impl Workbench {
                         .into_any_element()
                 }
             }
+            ResultsTab::Messages if tab.statement_results.len() > 1 => div()
+                .id("batch-messages")
+                .flex_1()
+                .overflow_y_scroll()
+                .p(px(12.))
+                .children(tab.statement_results.iter().enumerate().map(|(ix, entry)| {
+                    match &entry.outcome {
+                        Ok(r) => div().child(format!(
+                            "Result {} · {} rows fetched{}",
+                            ix + 1,
+                            r.row_count(),
+                            if r.truncated { " (limited)" } else { "" }
+                        )),
+                        Err(e) => div().text_color(theme.danger).child(format!(
+                            "Result {} · {}",
+                            ix + 1,
+                            e
+                        )),
+                    }
+                }))
+                .into_any_element(),
             ResultsTab::Messages => {
                 if self.messages.is_empty() {
                     div()

@@ -18,6 +18,7 @@ rust-embed = { version = "8", features = ["debug-embed"] }
 # gpui-kit does not re-export. Versions follow gpui-kit's own.
 lsp-types = "0.97"
 anyhow = "1"
+chrono = "0.4"
 # Update check: one anonymous GET to the GitHub Releases API (rustls, no
 # OpenSSL needed at build time).
 ureq = { version = "3", features = ["platform-verifier"] }

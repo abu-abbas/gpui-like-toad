@@ -18,13 +18,19 @@ impl Workbench {
             .border_color(theme.border)
             .child(self.render_session_card(theme, cx))
             .child(
-                div().px(px(SPACE_2)).pt(px(SPACE_1)).flex_none().child(
-                    Button::new("explorer-new-sql")
-                        .small()
+                div().px(px(SPACE_2)).flex_none().child(
+                    explorer::control("explorer-new-sql", theme)
                         .h(px(explorer::EXPLORER_CONTROL_HEIGHT))
                         .w_full()
-                        .icon(IconName::SquarePen)
-                        .label("New SQL editor")
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .w_full()
+                                .child(icon(IconName::SquarePen, 15., theme.foreground))
+                                .child("New SQL editor"),
+                        )
                         .on_click(cx.listener(|this, _, window, cx| this.add_tab(window, cx))),
                 ),
             )
@@ -37,103 +43,81 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let Some(last) = self.conn.last_connection.clone() else {
-            return div()
-                .px(px(SPACE_3))
-                .pt(px(SPACE_3))
-                .child(caption_text(
-                    "Not connected. Pick a connection or try Demo.".to_string(),
-                    theme,
-                ))
-                .into_any_element();
-        };
-        let connected = self.conn.session.is_some();
-        let connecting = self.conn.busy && matches!(self.conn.pending_op, Some(PendingOp::Connect));
-        let dot = if connecting {
-            theme.warning
-        } else if connected {
-            theme.success
-        } else {
-            theme.danger
-        };
+        let sessions: Vec<_> = std::iter::once(&self.conn)
+            .chain(&self.parked)
+            .filter(|conn| conn.session.is_some())
+            .map(|conn| (conn.id, conn.label()))
+            .collect();
+        let current = self.conn.id;
         let view = cx.entity();
-        let busy = self.conn.busy;
-        let demo = last.demo;
-        let menu_button = Button::new("connection-actions")
-            .icon(IconName::EllipsisVertical)
-            .ghost()
-            .small()
-            .dropdown_menu(move |menu, _, _| {
-                let refresh_view = view.clone();
-                let toggle_view = view.clone();
-                let edit_view = view.clone();
-                menu.min_w(px(200.))
-                    .item(
-                        PopupMenuItem::new("Refresh")
-                            .icon(Icon::new(IconName::RefreshCw))
-                            .disabled(!connected || busy)
-                            .on_click(move |_, _, cx: &mut App| {
-                                refresh_view.update(cx, |this, cx| this.refresh_schema(cx));
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new(if connected { "Disconnect" } else { "Connect" })
-                            .icon(Icon::new(if connected {
-                                IconName::LogOut
-                            } else {
-                                IconName::LogIn
-                            }))
-                            .disabled(busy)
-                            .on_click(move |_, window, cx: &mut App| {
-                                toggle_view.update(cx, |this, cx| {
-                                    if this.conn.session.is_some() {
-                                        let id = this.conn.id;
-                                        this.request_disconnect(id, window, cx);
-                                    } else {
-                                        this.reconnect_last(window, cx);
-                                    }
-                                });
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new("Edit connection")
-                            .icon(Icon::new(IconName::SquarePen))
-                            // Only while disconnected: editing the profile a
-                            // live session uses would not change that session.
-                            // Demo has no host/user to edit.
-                            .disabled(connected || busy || demo)
-                            .on_click(move |_, window, cx: &mut App| {
-                                edit_view
-                                    .update(cx, |this, cx| this.edit_last_connection(window, cx));
-                            }),
-                    )
-            });
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(SPACE_2))
-            .flex_none()
-            .px(px(SPACE_2))
-            .h(px(TOOLBAR_HEIGHT))
-            .child(status_dot(dot))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate()
-                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                    .line_height(px(LEADING_LABEL))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.foreground)
-                    .child(last.profile.name.clone()),
-            )
-            .child(menu_button)
-            .into_any_element()
+        div().flex_none().px(px(8.)).py(px(6.)).child(
+            Button::new("explorer-connection")
+                .ghost()
+                .w_full()
+                .h(px(32.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .w_full()
+                        .gap(px(8.))
+                        .child(icon(IconName::Database, 16., theme.primary))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(self.conn.label()),
+                        )
+                        .child(icon(IconName::ChevronDown, 14., theme.muted_foreground)),
+                )
+                .dropdown_menu(move |menu, _, _| {
+                    let mut menu = menu.scrollable(true).max_h(px(320.)).min_w(px(200.));
+                    for (id, label) in &sessions {
+                        let id = *id;
+                        let view = view.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(label.clone())
+                                .checked(id == current)
+                                .on_click(move |_, _, cx: &mut App| {
+                                    view.update(cx, |this, cx| {
+                                        if id == this.conn.id
+                                            || !this
+                                                .conn_by_id(id)
+                                                .is_some_and(|conn| conn.session.is_some())
+                                        {
+                                            return;
+                                        }
+                                        this.activate_conn(id, cx);
+                                        this.focused_profile_id = this
+                                            .conn
+                                            .last_connection
+                                            .as_ref()
+                                            .and_then(|c| c.profile_ix)
+                                            .and_then(|ix| this.profiles.get(ix))
+                                            .map(|p| p.id.clone());
+                                        if let Some(ix) =
+                                            this.tabs.iter().rposition(|tab| tab.conn == Some(id))
+                                        {
+                                            this.activate_tab(ix, cx);
+                                        } else {
+                                            this.leave_whats_new();
+                                            this.show_empty_workspace = true;
+                                            cx.notify();
+                                        }
+                                    })
+                                }),
+                        );
+                    }
+                    menu
+                }),
+        )
     }
 
     pub(super) fn render_profile_list(
         &self,
+        keyboard: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -146,9 +130,8 @@ impl Workbench {
             .min_h(px(0.))
             .overflow_y_scroll();
         tree = tree.child(
-            Button::new("saved-connections")
+            sidebar::tree_button(Button::new("saved-connections"), keyboard, cx)
                 .small()
-                .ghost()
                 .w_full()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.side_conn_folded = !this.side_conn_folded;
@@ -179,7 +162,7 @@ impl Workbench {
         let mut folders = std::collections::BTreeMap::<&str, Vec<usize>>::new();
         for (ix, profile) in self.profiles.iter().enumerate() {
             if profile.folder.is_empty() {
-                branches = branches.child(self.render_profile_row(ix, theme, cx));
+                branches = branches.child(self.render_profile_row(ix, keyboard, theme, cx));
             } else {
                 folders.entry(&profile.folder).or_default().push(ix);
             }
@@ -188,26 +171,29 @@ impl Workbench {
             let name = folder.to_owned();
             let collapsed = self.collapsed_connection_folders.contains(&name);
             branches = branches.child(
-                Button::new(format!("connection-folder-{name}"))
-                    .small()
-                    .ghost()
-                    .w_full()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.collapsed_connection_folders.remove(&name) {
-                            this.collapsed_connection_folders.insert(name.clone());
-                        }
-                        cx.notify();
-                    }))
-                    .child(connection_tree_label(
-                        if collapsed {
-                            IconName::Folder
-                        } else {
-                            IconName::FolderOpen
-                        },
-                        folder.to_owned(),
-                        None,
-                        theme,
-                    )),
+                sidebar::tree_button(
+                    Button::new(format!("connection-folder-{name}")),
+                    keyboard,
+                    cx,
+                )
+                .small()
+                .w_full()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.collapsed_connection_folders.remove(&name) {
+                        this.collapsed_connection_folders.insert(name.clone());
+                    }
+                    cx.notify();
+                }))
+                .child(connection_tree_label(
+                    if collapsed {
+                        IconName::Folder
+                    } else {
+                        IconName::FolderOpen
+                    },
+                    folder.to_owned(),
+                    None,
+                    theme,
+                )),
             );
             if !collapsed {
                 branches = branches.child(
@@ -221,7 +207,7 @@ impl Workbench {
                         .children(
                             entries
                                 .into_iter()
-                                .map(|ix| self.render_profile_row(ix, theme, cx)),
+                                .map(|ix| self.render_profile_row(ix, keyboard, theme, cx)),
                         ),
                 );
             }
@@ -230,12 +216,11 @@ impl Workbench {
         if self.show_demo {
             let active = self.conn.session.is_some() && self.conn.demo_mode;
             tree = tree.child(
-                Button::new("demo")
+                sidebar::tree_button(Button::new("demo"), keyboard, cx)
                     .small()
-                    .ghost()
                     .w_full()
                     .disabled(self.conn.busy)
-                    .when(active, |button| button.bg(theme.accent))
+                    .when(active, |button| button.text_color(theme.primary))
                     .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx)))
                     .child(
                         connection_tree_label(IconName::Database, "Demo".into(), None, theme)
@@ -249,6 +234,7 @@ impl Workbench {
     fn render_profile_row(
         &self,
         ix: usize,
+        keyboard: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -260,6 +246,10 @@ impl Workbench {
                 .as_ref()
                 .and_then(|last| last.profile_ix)
                 == Some(ix);
+        let connected = self
+            .find_open_conn(Some(ix), false)
+            .and_then(|id| self.conn_by_id(id))
+            .is_some_and(|c| c.session.is_some());
         let focused = self.focused_profile_id.as_deref() == Some(profile.id.as_str());
         let profile_id = profile.id.clone();
         let view = cx.entity();
@@ -269,8 +259,6 @@ impl Workbench {
             .items_center()
             .flex_none()
             .rounded(px(RADIUS_MD))
-            .when(active, |row| row.bg(theme.accent))
-            .when(focused && !active, |row| row.bg(theme.secondary))
             .context_menu(move |menu, _, cx| {
                 let workbench = view.read(cx);
                 if let Some(id) = workbench.find_open_conn(Some(ix), false) {
@@ -322,9 +310,8 @@ impl Workbench {
                 )
             })
             .child(
-                Button::new(("profile", ix))
+                sidebar::tree_button(Button::new(("profile", ix)), keyboard, cx)
                     .small()
-                    .ghost()
                     .w_full()
                     .tooltip(profile.name.clone())
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
@@ -350,10 +337,8 @@ impl Workbench {
                             None,
                             theme,
                         )
-                        .when(active, |row| {
-                            row.text_color(theme.accent_foreground)
-                                .child(status_dot(theme.success))
-                        }),
+                        .when(active || focused, |row| row.text_color(theme.primary))
+                        .when(connected, |row| row.child(status_dot(theme.success))),
                     ),
             )
     }

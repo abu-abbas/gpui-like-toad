@@ -715,7 +715,10 @@ impl Workbench {
         }
         let notes = release.notes.trim();
         if notes.is_empty() {
-            page = page.child(caption_text("Tidak ada catatan rilis.".to_string(), theme));
+            page = page.child(empty_state_text(
+                "Tidak ada catatan rilis.".to_string(),
+                theme,
+            ));
         }
         for line in notes.lines().filter(|l| !l.trim().is_empty()) {
             page = page.child(body_text(line.to_string(), theme));

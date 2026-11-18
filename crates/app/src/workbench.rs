@@ -117,6 +117,8 @@ const MAX_MESSAGES_SHOWN: usize = 30;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ResultsTab {
+    Summary,
+    Info,
     Results,
     Plan,
     Messages,
@@ -202,6 +204,7 @@ struct ConnState {
     /// Tab (by id) that the in-flight operation writes its result into, so
     /// switching tabs mid-query never lands the result in the wrong tab.
     pending_tab: Option<u64>,
+    cancel_script: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     schemas: Vec<String>,
     current_schema: Option<String>,
     selected_object: Option<String>,
@@ -237,6 +240,7 @@ impl ConnState {
             connect_error: None,
             last_connection: None,
             pending_tab: None,
+            cancel_script: None,
             schemas: Vec::new(),
             current_schema: None,
             selected_object: None,
@@ -280,6 +284,9 @@ struct QueryTab {
     kind: TabKind,
     editor: Entity<EditorState>,
     table_state: Entity<TableState<ResultsDelegate>>,
+    statement_results: Vec<crate::worker::StatementResult>,
+    result_ix: usize,
+    result_connection: String,
     last_result: Option<QueryResult>,
     elapsed_ms: Option<u128>,
     plan_nodes: Option<Vec<PlanNode>>,
@@ -327,6 +334,9 @@ impl QueryTab {
             kind: TabKind::Query,
             editor,
             table_state,
+            statement_results: Vec::new(),
+            result_ix: 0,
+            result_connection: String::new(),
             last_result: None,
             elapsed_ms: None,
             plan_nodes: None,
@@ -575,7 +585,7 @@ impl Render for Workbench {
                     .flex()
                     .flex_1()
                     .min_h(px(0.))
-                    .child(self.render_navigation(&theme, cx))
+                    .child(self.render_navigation(window.last_input_was_keyboard(), &theme, cx))
                     .child(div().flex().flex_1().min_w(px(0.)).child(
                         if self.conn.session.is_some() {
                             // Each layout starts with the same explorer width.

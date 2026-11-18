@@ -107,10 +107,15 @@ impl Workbench {
         let hits = self.quick_open_hits();
         let mut list = div().flex().flex_col().p(px(SPACE_1));
         if hits.is_empty() {
-            list = list.child(div().px(px(SPACE_3)).py(px(SPACE_2)).child(caption_text(
-                "Tidak ada tabel atau view yang cocok.".to_string(),
-                theme,
-            )));
+            list = list.child(
+                div()
+                    .px(px(SPACE_3))
+                    .py(px(SPACE_2))
+                    .child(empty_state_text(
+                        "Tidak ada tabel atau view yang cocok.".to_string(),
+                        theme,
+                    )),
+            );
         }
         for (ix, object) in hits.iter().enumerate() {
             let selected = ix == open.selected;

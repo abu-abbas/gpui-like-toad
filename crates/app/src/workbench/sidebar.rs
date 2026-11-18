@@ -1,8 +1,17 @@
 use super::*;
 
+use gpui_kit::component::{button::ButtonCustomVariant, FocusableExt as _};
+
+pub(super) fn tree_button(button: Button, keyboard: bool, cx: &App) -> Button {
+    button
+        .custom(ButtonCustomVariant::new(cx))
+        .focus_ring(keyboard)
+}
+
 impl Workbench {
     pub(super) fn render_navigation(
         &self,
+        keyboard: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -45,13 +54,12 @@ impl Workbench {
             ),
         ] {
             let selected = self.rail == panel;
-            let button = Button::new(label)
-                .ghost()
+            let button = tree_button(Button::new(label), keyboard, cx)
                 .small()
                 .tooltip(label)
                 .w_full()
                 .h(px(if compact { 34. } else { 30. }))
-                .when(selected, |button| button.bg(theme.accent))
+                .when(selected, |button| button.text_color(theme.primary))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.rail = panel;
                     this.sidebar_compact = false;
@@ -86,9 +94,8 @@ impl Workbench {
                 .child(div().flex_1().child(button));
             if panel == RailPanel::Connections && !compact {
                 heading = heading.child(
-                    Button::new("profile-new")
+                    tree_button(Button::new("profile-new"), keyboard, cx)
                         .small()
-                        .ghost()
                         .icon(IconName::Plus)
                         .tooltip("New connection")
                         .on_click(
@@ -99,9 +106,9 @@ impl Workbench {
             nav = nav.child(heading);
             if selected && !compact {
                 nav = nav.child(match panel {
-                    RailPanel::Connections => {
-                        self.render_profile_list(theme, cx).into_any_element()
-                    }
+                    RailPanel::Connections => self
+                        .render_profile_list(keyboard, theme, cx)
+                        .into_any_element(),
                     RailPanel::Favorites => self
                         .render_history_panel(true, theme, cx)
                         .into_any_element(),
@@ -112,9 +119,8 @@ impl Workbench {
             }
         }
         nav.child(div().flex_1().min_h(px(0.))).child(
-            Button::new("sidebar-settings")
+            tree_button(Button::new("sidebar-settings"), keyboard, cx)
                 .small()
-                .ghost()
                 .w_full()
                 .h(px(34.))
                 .tooltip("Settings")

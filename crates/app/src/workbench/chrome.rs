@@ -76,28 +76,20 @@ impl Workbench {
             .justify_center()
             .gap(px(SPACE_2))
             .p(px(SPACE_4))
-            .bg(theme.table_even)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(48.))
-                    .rounded(px(12.))
-                    .bg(theme.secondary)
-                    .child(icon(IconName::Database, 24., theme.muted_foreground)),
-            )
+            .bg(theme.background)
+            .child(icon(IconName::Plug, 38., theme::empty_hint(theme)))
             .child(
                 div()
                     .text_size(crate::theme::ui_size(&theme, FONT_HEADING_MD))
                     .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.muted_foreground)
                     .child("No active connection"),
             )
             .child(
                 div()
                     .max_w(px(270.))
                     .text_center()
-                    .text_color(theme.muted_foreground)
+                    .text_color(theme::empty_hint(theme))
                     .child("Pick a connection on the left to browse schemas and open tables."),
             )
             .children(self.conn.connect_error.as_ref().map(|err| {
@@ -109,7 +101,10 @@ impl Workbench {
             }))
             .child(
                 Button::new("empty-new-connection")
-                    .small()
+                    .outline()
+                    .rounded(px(6.))
+                    .h(px(30.))
+                    .text_color(theme.muted_foreground)
                     .label("New connection")
                     .icon(IconName::Plus)
                     .on_click(
@@ -200,18 +195,19 @@ impl Workbench {
                     .justify_center()
                     .gap(px(SPACE_2))
                     .p(px(SPACE_4))
-                    .bg(theme.table_even)
-                    .child(icon(IconName::Table, 28., theme.muted_foreground))
+                    .bg(theme.background)
+                    .child(icon(IconName::Table, 28., theme::empty_hint(theme)))
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_size(theme::ui_size(theme, FONT_HEADING_MD))
+                            .text_color(theme.muted_foreground)
                             .child("Belum ada objek yang dibuka"),
                     )
                     .child(
                         div()
                             .text_center()
-                            .text_color(theme.muted_foreground)
+                            .text_color(theme::empty_hint(theme))
                             .child("Klik dua kali objek di explorer atau buka New SQL editor."),
                     ),
             );
@@ -288,39 +284,108 @@ impl Workbench {
                 .child(self.schema_picker("toolbar-schema", theme, cx));
         }
         if is_data_tab {
-            let data_view = tab
-                .data
-                .as_ref()
-                .is_some_and(|data| data.view == DataView::Data);
-            let filters_visible = tab.data.as_ref().is_some_and(|data| data.show_filters);
-            bar = bar
+            let data = tab.data.as_ref().expect("data tab has table state");
+            let data_view = data.view == DataView::Data;
+            let object = ObjectRef {
+                owner: data.owner.clone(),
+                name: data.name.clone(),
+                kind: data.kind.clone(),
+            };
+            let import_object = object.clone();
+            let unavailable = busy || self.conn.session.is_none() || tab.conn != Some(self.conn.id);
+            let action = |id: &'static str, symbol, color, label: &'static str| {
+                Button::new(id)
+                    .ghost()
+                    .size(px(28.))
+                    .icon(icon(symbol, 16., color))
+                    .tooltip(label)
+            };
+            let divider = || {
+                div()
+                    .flex_none()
+                    .mx(px(2.))
+                    .w(px(1.))
+                    .h(px(18.))
+                    .bg(theme.border)
+            };
+            return bar
                 .child(
-                    Button::new("refresh-data")
-                        .small()
-                        .primary()
-                        .icon(IconName::RefreshCw)
-                        .loading(busy)
-                        .tooltip("Refresh data")
-                        .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
+                    action("table-commit", IconName::Check, theme.success, "Commit")
+                        .disabled(unavailable)
+                        .on_click(cx.listener(|this, _, _, cx| this.commit(cx))),
                 )
                 .child(
-                    Button::new("toggle-data-filters")
-                        .small()
-                        .ghost()
-                        .icon(IconName::Funnel)
-                        .disabled(!data_view)
-                        .when(filters_visible, |button| button.bg(theme.accent))
-                        .tooltip(if filters_visible {
-                            "Hide table filters"
-                        } else {
-                            "Show table filters"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(data) = this.data_mut() {
-                                data.show_filters = !data.show_filters;
-                                cx.notify();
-                            }
-                        })),
+                    action("table-rollback", IconName::Undo2, theme.danger, "Rollback")
+                        .disabled(unavailable)
+                        .on_click(cx.listener(|this, _, _, cx| this.rollback(cx))),
+                )
+                .child(divider())
+                .child(
+                    action(
+                        "refresh-data",
+                        IconName::RefreshCw,
+                        theme.muted_foreground,
+                        "Refresh data",
+                    )
+                    .disabled(unavailable)
+                    .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
+                )
+                .child(
+                    action(
+                        "toggle-data-filters",
+                        IconName::ListFilter,
+                        theme.muted_foreground,
+                        "Table filters",
+                    )
+                    .disabled(!data_view)
+                    .selected(data.show_filters)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(data) = this.data_mut() {
+                            data.show_filters = !data.show_filters;
+                            cx.notify();
+                        }
+                    })),
+                )
+                .child(
+                    action(
+                        "table-details",
+                        IconName::PanelRight,
+                        theme.muted_foreground,
+                        "Row details",
+                    )
+                    .disabled(!data_view)
+                    .selected(data.show_details)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(data) = this.data_mut() {
+                            data.show_details = !data.show_details;
+                            cx.notify();
+                        }
+                    })),
+                )
+                .child(divider())
+                .child(
+                    action(
+                        "table-export",
+                        IconName::Download,
+                        theme.muted_foreground,
+                        "Export table to CSV",
+                    )
+                    .disabled(unavailable)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.export_table(object.clone(), ExportFormat::Csv, cx)
+                    })),
+                )
+                .child(
+                    action(
+                        "table-import",
+                        IconName::Upload,
+                        theme.muted_foreground,
+                        "Import CSV into table",
+                    )
+                    .disabled(unavailable || import_object.kind != ObjectKind::Table)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.import_table(import_object.clone(), cx)
+                    })),
                 );
         } else if !no_active_tab {
             bar = bar

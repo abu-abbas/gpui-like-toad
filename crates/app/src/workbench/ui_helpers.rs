@@ -37,7 +37,7 @@ pub(super) fn empty_state_text(text: String, theme: &gpui_kit::component::Theme)
     div()
         .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
         .line_height(px(LEADING_LABEL))
-        .text_color(theme.muted_foreground)
+        .text_color(theme::empty_hint(theme))
         .child(text)
 }
 

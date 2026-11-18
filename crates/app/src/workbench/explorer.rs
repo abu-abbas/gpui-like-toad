@@ -1,6 +1,14 @@
 use super::*;
 
-pub(super) const EXPLORER_CONTROL_HEIGHT: f32 = 32.;
+pub(super) const EXPLORER_CONTROL_HEIGHT: f32 = 30.;
+
+pub(super) fn control(id: &'static str, theme: &gpui_kit::component::Theme) -> Button {
+    Button::new(id)
+        .ghost()
+        .bg(theme.background)
+        .rounded(px(6.))
+        .h(px(EXPLORER_CONTROL_HEIGHT))
+}
 
 impl Workbench {
     pub(super) fn schema_picker(
@@ -12,15 +20,21 @@ impl Workbench {
         let view = cx.entity();
         let schemas = self.conn.schemas.clone();
         let current = self.conn.current_schema.clone();
-        Button::new(id)
-            .child(select_trigger(
-                current.clone().unwrap_or_else(|| "(schema)".to_string()),
-                theme,
-            ))
-            .small()
-            .when(id == "schema-select", |button| {
-                button.w_full().h(px(EXPLORER_CONTROL_HEIGHT))
-            })
+        let label = current.clone().unwrap_or_else(|| "(schema)".to_string());
+        let button = if id == "schema-select" {
+            control(id, theme).w_full().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .w_full()
+                    .gap(px(6.))
+                    .child(icon(IconName::Layers, 14., theme.muted_foreground))
+                    .child(select_trigger(label, theme).flex_1()),
+            )
+        } else {
+            Button::new(id).small().child(select_trigger(label, theme))
+        };
+        button
             .disabled(self.conn.schemas.is_empty())
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.scrollable(true).max_h(px(360.)).min_w(px(220.));
@@ -52,18 +66,27 @@ impl Workbench {
             .map(|c| (*c, schema::count_in(&self.conn.objects, *c)))
             .collect();
         let current_category = self.category;
-        let category_button = Button::new("category-select")
-            .child(select_trigger(
-                format!(
-                    "{} ({})",
-                    current_category.label(),
-                    schema::count_in(&self.conn.objects, current_category)
-                ),
-                theme,
-            ))
-            .small()
+        let category_button = control("category-select", theme)
             .w_full()
-            .h(px(EXPLORER_CONTROL_HEIGHT))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .w_full()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .child(current_category.label()),
+                    )
+                    .child(caption_text(
+                        schema::count_in(&self.conn.objects, current_category).to_string(),
+                        theme,
+                    ))
+                    .child(icon(IconName::ChevronDown, 14., theme.muted_foreground)),
+            )
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.min_w(px(220.));
                 for (category, count) in &counts {
@@ -137,7 +160,7 @@ impl Workbench {
             .flex()
             .flex_col()
             .gap(px(6.))
-            .pt(px(6.))
+            .pt(px(8.))
             .child(
                 div()
                     .flex()
@@ -162,9 +185,8 @@ impl Workbench {
                             .child(category_button),
                     )
                     .child(
-                        Button::new("explorer-quick-open")
-                            .ghost()
-                            .icon(IconName::Search)
+                        control("explorer-quick-open", theme)
+                            .icon(icon(IconName::Search, 15., theme.muted_foreground))
                             .size(px(EXPLORER_CONTROL_HEIGHT))
                             .flex_none()
                             .tooltip("Quick Open (Ctrl/Cmd+P)")
@@ -454,7 +476,12 @@ impl Workbench {
     /// "Export Data": ask where to save (native save dialog), then let the
     /// worker fetch and write the whole table. If the platform has no file
     /// dialog, fall back to a timestamped file in the working directory.
-    fn export_table(&mut self, object: ObjectRef, format: ExportFormat, cx: &mut Context<Self>) {
+    pub(super) fn export_table(
+        &mut self,
+        object: ObjectRef,
+        format: ExportFormat,
+        cx: &mut Context<Self>,
+    ) {
         if self.conn.busy || self.conn.session.is_none() {
             return;
         }
@@ -500,7 +527,7 @@ impl Workbench {
 
     /// "Import Data": pick a CSV file whose header names match the table's
     /// columns; rows are inserted without commit.
-    fn import_table(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
+    pub(super) fn import_table(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
         if self.conn.busy || self.conn.session.is_none() {
             return;
         }

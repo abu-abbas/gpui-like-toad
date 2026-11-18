@@ -353,7 +353,7 @@ impl Workbench {
     /// no staged or uncommitted cell edits, or an empty SQL editor.
     fn tab_is_saved(tab: &QueryTab, cx: &App) -> bool {
         match &tab.data {
-            Some(d) => d.edits.is_empty(),
+            Some(d) => d.edits.is_empty() && !d.has_staged(),
             None => tab.editor.read(cx).value().trim().is_empty(),
         }
     }

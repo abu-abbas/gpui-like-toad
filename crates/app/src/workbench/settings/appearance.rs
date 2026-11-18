@@ -89,7 +89,12 @@ impl Workbench {
                         color_value(theme.foreground, theme),
                         theme,
                     ),
-                    setting_row("UI font", "", body_text("System".into(), theme), theme),
+                    setting_row(
+                        "UI font",
+                        "",
+                        self.render_font_picker(prefs.ui_font.clone(), cx),
+                        theme,
+                    ),
                 ],
             ))
             .child(div().mt(px(SPACE_2)).child(form_label("Advanced", theme)))
@@ -118,6 +123,42 @@ impl Workbench {
             ))
     }
 
+    fn render_font_picker(
+        &self,
+        current: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let view = cx.entity();
+        Button::new("ui-font-family")
+            .small()
+            .rounded(px(7.))
+            .h(px(32.))
+            .max_w(px(174.))
+            .label(current.clone().unwrap_or_else(|| "System".into()))
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, cx| {
+                let fonts = std::iter::once(None)
+                    .chain(cx.text_system().all_font_names().into_iter().map(Some));
+                fonts.fold(
+                    menu.scrollable(true).max_h(px(320.)).min_w(px(200.)),
+                    |menu, font| {
+                        let view = view.clone();
+                        menu.item(
+                            PopupMenuItem::new(font.clone().unwrap_or_else(|| "System".into()))
+                                .checked(font == current)
+                                .on_click(move |_, window, cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.update_appearance(window, cx, |prefs| {
+                                            prefs.ui_font = font.clone()
+                                        })
+                                    })
+                                }),
+                        )
+                    },
+                )
+            })
+    }
+
     fn render_theme_picker(&self, dark: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let names = theme::theme_names(cx);
         let options = theme::theme_names_for(dark, cx);
@@ -130,17 +171,21 @@ impl Workbench {
         let view = cx.entity();
         Button::new("theme-picker")
             .small()
-            .label(label)
-            .icon(IconName::ChevronDown)
+            .h(px(32.))
+            .w(px(174.))
+            .rounded(px(7.))
+            .child(select_trigger(label, cx.theme()))
             .dropdown_menu(move |menu, window, cx| {
                 let reset_view = view.clone();
                 let theme_view = view.clone();
                 let current = current.clone();
                 let selected = current.is_none();
                 let options = options.clone();
-                menu.min_w(px(190.))
+                menu.min_w(px(252.))
+                    .check_side(gpui_kit::component::Side::Right)
                     .item(
                         PopupMenuItem::new(theme::ORA_THEME_LABEL)
+                            .icon(icon(IconName::CaseSensitive, 20., cx.theme().primary))
                             .checked(selected)
                             .on_click(move |_, window, cx| {
                                 reset_view.update(cx, |this, cx| {
@@ -148,8 +193,13 @@ impl Workbench {
                                 });
                             }),
                     )
-                    .submenu(
-                        format!("gpui-kit themes ({})", options.len()),
+                    .submenu_with_icon(
+                        Some(icon(
+                            IconName::CaseSensitive,
+                            20.,
+                            cx.theme().muted_foreground,
+                        )),
+                        format!("gpui-kit themes    {}", options.len()),
                         window,
                         cx,
                         move |menu, _, _| {
@@ -192,34 +242,43 @@ impl Workbench {
         let view = cx.entity();
         let dark = theme.is_dark();
         Button::new("accent-picker")
-            .small()
+            .h(px(32.))
+            .w(px(174.))
+            .rounded(px(7.))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(SPACE_2))
-                    .child(status_dot(theme.primary))
-                    .child(current)
+                    .w_full()
+                    .child(swatch(theme.primary, theme))
+                    .child(div().flex_1().child(current))
                     .child(icon(IconName::ChevronDown, 14., theme.muted_foreground)),
             )
             .dropdown_menu(move |menu, _, _| {
                 theme::ACCENTS.into_iter().fold(
-                    menu.min_w(px(160.)),
+                    menu.min_w(px(232.))
+                        .check_side(gpui_kit::component::Side::Right),
                     |menu, (label, light, shade)| {
                         let view = view.clone();
                         menu.item(
-                            PopupMenuItem::new(if label == "Violet" {
-                                "Violet (default)"
-                            } else {
-                                label
+                            PopupMenuItem::element(move |_, cx| {
+                                div()
+                                    .flex()
+                                    .flex_1()
+                                    .items_center()
+                                    .gap(px(10.))
+                                    .h(px(32.))
+                                    .child(swatch(
+                                        gpui_kit::rgb(if dark { shade } else { light }).into(),
+                                        cx.theme(),
+                                    ))
+                                    .child(if label == "Violet" {
+                                        "Violet (default)"
+                                    } else {
+                                        label
+                                    })
                             })
-                            .icon(
-                                Icon::new(IconName::Circle).text_color(gpui_kit::rgb(if dark {
-                                    shade
-                                } else {
-                                    light
-                                })),
-                            )
                             .checked(label == current)
                             .on_click(move |_, window, cx| {
                                 view.update(cx, |this, cx| {
@@ -241,13 +300,16 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let view = cx.entity();
-        Button::new(if editor {
+        let picker = Button::new(if editor {
             "sql-font-size"
         } else {
             "ui-font-size"
         })
         .small()
-        .label(format!("{current} px"))
+        .w(px(86.))
+        .h(px(32.))
+        .rounded(px(7.))
+        .child(div().w_full().child(current.to_string()))
         .dropdown_menu(move |menu, _, _| {
             (10..=20).fold(menu, |menu, size| {
                 let view = view.clone();
@@ -267,7 +329,13 @@ impl Workbench {
                         }),
                 )
             })
-        })
+        });
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(picker)
+            .child(caption_text("px".into(), cx.theme()))
     }
 }
 
@@ -325,13 +393,22 @@ fn color_value(color: Hsla, theme: &gpui_kit::component::Theme) -> gpui_kit::Div
         .flex()
         .items_center()
         .gap(px(SPACE_2))
-        .child(
-            div()
-                .size(px(14.))
-                .rounded_full()
-                .border_1()
-                .border_color(theme.border)
-                .bg(color),
-        )
+        .h(px(32.))
+        .px(px(10.))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.background)
+        .rounded(px(8.))
+        .child(swatch(color, theme))
         .child(body_text(label, theme))
+}
+
+fn swatch(color: Hsla, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
+    div()
+        .flex_none()
+        .size(px(16.))
+        .rounded_full()
+        .border_1()
+        .border_color(theme.border)
+        .bg(color)
 }

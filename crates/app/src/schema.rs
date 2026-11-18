@@ -159,6 +159,7 @@ pub fn describe_to_result(defs: &[ColumnDef]) -> QueryResult {
             .collect(),
         truncated: false,
         elapsed: Default::default(),
+        fetch_time: None,
     }
 }
 
@@ -190,6 +191,7 @@ pub fn indexes_to_result(indexes: &[IndexDef]) -> QueryResult {
             .collect(),
         truncated: false,
         elapsed: Default::default(),
+        fetch_time: None,
     }
 }
 

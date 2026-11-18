@@ -41,6 +41,8 @@ pub struct ResultsDelegate {
     visible: Vec<usize>,
     /// Show a fixed row-number column on the left (data tabs).
     row_numbers: bool,
+    selected_rows: std::collections::BTreeSet<usize>,
+    selection_anchor: usize,
     page: usize,
     page_size: usize,
     /// Table column of the last right mouse-down on a cell: the table's
@@ -175,6 +177,8 @@ impl ResultsDelegate {
             hidden: HashSet::new(),
             visible: Vec::new(),
             row_numbers: false,
+            selected_rows: Default::default(),
+            selection_anchor: 0,
             page: 0,
             page_size: PAGE_SIZE,
             right_col: None,
@@ -384,11 +388,24 @@ impl ResultsDelegate {
     }
 
     pub fn set_result(&mut self, result: QueryResult) {
+        self.selected_rows.clear();
+        self.selection_anchor = 0;
         self.numeric = numeric_columns(&result);
         self.rowid_col = result.columns.iter().position(|c| c.name == ROWID_COLUMN);
         self.result = result;
         self.rebuild_columns();
         self.page = 0;
+    }
+
+    pub fn selected_rowids(&self) -> Vec<String> {
+        let Some(column) = self.rowid_col else {
+            return Vec::new();
+        };
+        self.selected_rows
+            .iter()
+            .filter_map(|row| self.result.get(*row, column))
+            .map(Value::display)
+            .collect()
     }
 
     pub fn page(&self) -> usize {
@@ -456,6 +473,61 @@ fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> Ordering {
 }
 
 impl TableDelegate for ResultsDelegate {
+    fn render_tr(
+        &mut self,
+        ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        let row = div().id(("row", ix));
+        let absolute = self.absolute_row(ix);
+        if !self.row_numbers || absolute >= self.total_rows() {
+            return row;
+        }
+        row.when(self.selected_rows.contains(&absolute), |r| {
+            r.bg(cx.theme().accent)
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |table, event: &gpui_kit::MouseDownEvent, _, cx| {
+                let data = table.delegate_mut();
+                if event.modifiers.shift {
+                    data.selected_rows.clear();
+                    data.selected_rows.extend(
+                        data.selection_anchor.min(absolute)..=data.selection_anchor.max(absolute),
+                    );
+                } else if event.modifiers.control || event.modifiers.platform {
+                    if !data.selected_rows.remove(&absolute) {
+                        data.selected_rows.insert(absolute);
+                    }
+                    data.selection_anchor = absolute;
+                } else {
+                    data.selected_rows.clear();
+                    data.selected_rows.insert(absolute);
+                    data.selection_anchor = absolute;
+                }
+                cx.notify();
+            }),
+        )
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Inbox)
+                    .size(px(32.))
+                    .text_color(crate::theme::empty_hint(cx.theme())),
+            )
+    }
+
     fn columns_count(&self, _: &App) -> usize {
         self.columns.len()
     }
@@ -629,6 +701,8 @@ impl TableDelegate for ResultsDelegate {
         let Some(col_ix) = self.data_col(col_ix) else {
             return;
         };
+        self.selected_rows.clear();
+        self.selection_anchor = 0;
         match sort {
             ColumnSort::Ascending => self
                 .result
@@ -710,6 +784,7 @@ mod tests {
             rows: (0..n).map(|i| vec![Value::Integer(i as i128)]).collect(),
             truncated: false,
             elapsed: Default::default(),
+            fetch_time: None,
         }
     }
 
@@ -753,6 +828,7 @@ mod tests {
             ],
             truncated: false,
             elapsed: Default::default(),
+            fetch_time: None,
         };
         // A by type, B by values, C mixed, D all NULL.
         assert_eq!(numeric_columns(&result), vec![true, true, false, false]);
@@ -806,6 +882,7 @@ mod tests {
             rows: vec![vec![int(1), text("x"), text("y")]],
             truncated: false,
             elapsed: Default::default(),
+            fetch_time: None,
         };
         let mut delegate = ResultsDelegate::empty().with_row_numbers();
         delegate.set_result(two_columns());

@@ -96,10 +96,18 @@ pub(super) struct DataTab {
     pub(super) hidden: HashSet<String>,
     /// Cell edits staged or applied but not yet committed.
     pub(super) edits: Vec<CellEdit>,
+    pub(super) deletes: Vec<String>,
+    pub(super) insert_fields: Vec<(String, Entity<InputState>)>,
     _page_subs: Vec<Subscription>,
 }
 
 impl DataTab {
+    pub(super) fn has_staged(&self) -> bool {
+        !self.deletes.is_empty()
+            || !self.insert_fields.is_empty()
+            || self.edits.iter().any(|edit| !edit.applied)
+    }
+
     pub(super) fn new(
         owner: &str,
         name: &str,
@@ -169,6 +177,8 @@ impl DataTab {
             offset_input,
             hidden: HashSet::new(),
             edits: Vec::new(),
+            deletes: Vec::new(),
+            insert_fields: Vec::new(),
             _page_subs: page_subs,
         }
     }
@@ -313,7 +323,7 @@ impl Workbench {
             .tabs
             .get(self.active_tab)
             .and_then(|t| t.data.as_ref())
-            .is_some_and(|d| d.edits.iter().any(|e| !e.applied));
+            .is_some_and(|d| d.has_staged());
         if staged {
             self.conn.status =
                 "Ada perubahan sel yang belum dikirim: klik Apply atau Discard dulu.".to_string();
@@ -498,7 +508,7 @@ impl Workbench {
             .tabs
             .get(self.active_tab)
             .and_then(|t| t.data.as_ref())
-            .is_some_and(|d| d.edits.iter().any(|e| !e.applied));
+            .is_some_and(|d| d.has_staged());
         if staged {
             self.conn.status =
                 "Ada perubahan sel yang belum dikirim: klik Apply atau Discard dulu.".to_string();
@@ -568,59 +578,147 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
         let data = self.active_tab().data.as_ref()?;
-        if data.edits.is_empty() {
+        if data.view != DataView::Data {
             return None;
         }
         let busy = self.conn.busy;
-        let staged = data.edits.iter().filter(|e| !e.applied).count();
-        let sent = data.edits.len() - staged;
-        let label = match (staged, sent) {
-            (s, 0) => format!("{s} perubahan belum dikirim ke database"),
-            (0, n) => {
-                format!("{n} perubahan terkirim, belum di-commit: pakai Commit atau Rollback")
-            }
-            (s, n) => format!("{s} belum dikirim, {n} terkirim tapi belum di-commit"),
+        let editable = data.kind == ObjectKind::Table
+            && self.active_tab().conn == Some(self.conn.id)
+            && self.conn.session.is_some()
+            && !data.columns.is_empty();
+        let selected = self
+            .active_tab()
+            .table_state
+            .read(cx)
+            .delegate()
+            .selected_rowids();
+        let staged = data.has_staged();
+        let button = |id: &'static str, symbol, label: &'static str, disabled| {
+            Button::new(id)
+                .small()
+                .ghost()
+                .icon(symbol)
+                .tooltip(label)
+                .disabled(disabled)
         };
-        let tint = if staged > 0 {
-            theme.warning
-        } else {
-            theme.primary
-        };
-        Some(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(SPACE_2))
-                .px(px(SPACE_3))
-                .h(px(32.))
-                .bg(tint.opacity(0.14))
-                .border_b_1()
-                .border_color(theme.border)
-                .child(div().size(px(8.)).rounded_full().bg(tint))
-                .child(caption_text(label, theme))
-                .child(div().flex_1())
-                .when(staged > 0, |this| {
-                    this.child(
-                        Button::new("edits-discard")
-                            .small()
-                            .label("Discard")
-                            .tooltip("Buang perubahan yang belum dikirim")
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.discard_edits(cx))),
-                    )
-                    .child(
-                        Button::new("edits-apply")
-                            .small()
-                            .primary()
-                            .label(format!("Apply ({staged})"))
-                            .tooltip("Kirim perubahan ke database (belum commit)")
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.apply_edits(cx))),
-                    )
-                })
-                .into_any_element(),
-        )
+        let bar = div()
+            .flex()
+            .items_center()
+            .gap(px(3.))
+            .h(px(30.))
+            .px(px(6.))
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                button(
+                    "row-add",
+                    IconName::Plus,
+                    "Add row",
+                    busy || !editable || !data.insert_fields.is_empty(),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if let Some(data) = this.data_mut() {
+                        data.insert_fields = data
+                            .columns
+                            .iter()
+                            .map(|name| {
+                                (
+                                    name.clone(),
+                                    cx.new(|cx| {
+                                        InputState::new(window, cx).placeholder(name.clone())
+                                    }),
+                                )
+                            })
+                            .collect();
+                        cx.notify();
+                    }
+                })),
+            )
+            .child(
+                button(
+                    "row-delete",
+                    IconName::Minus,
+                    "Stage selected rows for deletion",
+                    busy || !editable || selected.is_empty(),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(data) = this.data_mut() {
+                        for id in &selected {
+                            if !data.deletes.contains(id) {
+                                data.deletes.push(id.clone());
+                            }
+                        }
+                        cx.notify();
+                    }
+                })),
+            )
+            .child(
+                button(
+                    "row-apply",
+                    IconName::Check,
+                    "Apply staged changes",
+                    busy || !editable || !staged,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.apply_edits(cx))),
+            )
+            .child(
+                button(
+                    "row-discard",
+                    IconName::X,
+                    "Discard staged changes",
+                    busy || !staged,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.discard_edits(cx))),
+            )
+            .child(
+                button(
+                    "row-refresh",
+                    IconName::RefreshCw,
+                    "Refresh data",
+                    busy || staged,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.reload_data(cx))),
+            )
+            .child(
+                button(
+                    "row-stop",
+                    IconName::Square,
+                    "Stop fetch",
+                    !busy || !matches!(self.conn.pending_op, Some(PendingOp::Run)),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
+            )
+            .when(!data.deletes.is_empty(), |bar| {
+                bar.child(caption_text(
+                    format!("{} rows pending deletion", data.deletes.len()),
+                    theme,
+                ))
+            })
+            .when(!data.edits.is_empty(), |bar| {
+                bar.child(caption_text(
+                    format!("{} cell edits", data.edits.len()),
+                    theme,
+                ))
+            });
+        let mut group = div().flex_none().flex().flex_col();
+        if !data.insert_fields.is_empty() {
+            group = group.child(
+                div()
+                    .id("new-row-values")
+                    .flex()
+                    .overflow_x_scroll()
+                    .gap(px(6.))
+                    .p(px(4.))
+                    .children(data.insert_fields.iter().map(|(name, field)| {
+                        div()
+                            .flex_none()
+                            .w(px(140.))
+                            .child(caption_text(name.clone(), theme))
+                            .child(Input::new(field).small().disabled(busy))
+                    })),
+            );
+        }
+        Some(group.child(bar).into_any_element())
     }
 
     /// The Details panel: every column of the selected row as a
@@ -647,7 +745,7 @@ impl Workbench {
             .py(px(SPACE_2))
             .gap(px(SPACE_2));
         if fields.is_empty() {
-            list = list.child(caption_text(
+            list = list.child(empty_state_text(
                 "Pilih sebuah baris untuk melihat semua kolomnya.".to_string(),
                 theme,
             ));

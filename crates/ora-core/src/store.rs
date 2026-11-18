@@ -739,6 +739,7 @@ pub fn save_theme_preference(pref: ThemePreference) -> std::io::Result<()> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppearancePrefs {
     pub accent: String,
+    pub ui_font: Option<String>,
     pub ui_font_size: u8,
     pub sql_font_size: u8,
     /// None follows the platform default.
@@ -749,6 +750,7 @@ impl Default for AppearancePrefs {
     fn default() -> Self {
         Self {
             accent: "Violet".into(),
+            ui_font: None,
             ui_font_size: 13,
             sql_font_size: 13,
             reduce_motion: None,
@@ -773,6 +775,10 @@ fn read_appearance(dir: &Path) -> AppearancePrefs {
             .get("accent")
             .and_then(Json::as_str)
             .map_or(default.accent, str::to_owned),
+        ui_font: settings
+            .get("ui_font")
+            .and_then(Json::as_str)
+            .map(str::to_owned),
         ui_font_size: size("ui_font_size", default.ui_font_size),
         sql_font_size: size("sql_font_size", default.sql_font_size),
         reduce_motion: settings.get("reduce_motion").and_then(Json::as_bool),
@@ -788,6 +794,11 @@ fn write_appearance(dir: &Path, prefs: &AppearancePrefs) -> std::io::Result<()> 
         Some(Json::Obj(pairs)) => pairs.into_iter().collect(),
         _ => BTreeMap::new(),
     };
+    if let Some(font) = &prefs.ui_font {
+        pairs.insert("ui_font".into(), Json::Str(font.clone()));
+    } else {
+        pairs.remove("ui_font");
+    }
     pairs.insert("accent".into(), Json::Str(prefs.accent.clone()));
     pairs.insert("ui_font_size".into(), Json::Num(prefs.ui_font_size.into()));
     pairs.insert(
@@ -902,6 +913,7 @@ mod tests {
         let dir = scratch("appearance");
         let prefs = AppearancePrefs {
             accent: "Teal".into(),
+            ui_font: Some("Arial".into()),
             ui_font_size: 15,
             sql_font_size: 17,
             reduce_motion: Some(true),

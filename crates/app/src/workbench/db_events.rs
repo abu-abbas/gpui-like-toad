@@ -5,7 +5,7 @@ impl Workbench {
     /// started from if it still exists, else the active tab.
     /// Index of the tab the running operation belongs to. `None` when that
     /// tab was closed while the operation ran.
-    fn target_ix(&self) -> Option<usize> {
+    pub(super) fn target_ix(&self) -> Option<usize> {
         match self.conn.pending_tab {
             Some(id) => self.tabs.iter().position(|t| t.id == id),
             None => (self.active_tab < self.tabs.len()).then_some(self.active_tab),
@@ -108,6 +108,7 @@ impl Workbench {
         if generation != self.conn.op_generation {
             return;
         }
+        self.conn.cancel_script = None;
         let pending = self.conn.pending_op.take();
         let pending_sql = self.conn.pending_sql.take();
         self.conn.busy = false;
@@ -124,7 +125,6 @@ impl Workbench {
             (&pending, &resp),
             (Some(PendingOp::Run), Response::Executed(_))
                 | (Some(PendingOp::ImportCsv { .. }), Response::Imported(_))
-                | (Some(PendingOp::ApplyEdits), Response::CellsUpdated { .. })
         ) {
             self.conn.uncommitted = true;
         }
@@ -183,6 +183,28 @@ impl Workbench {
                     self.conn.status = "Test koneksi gagal.".to_string();
                 }
             },
+            (Some(PendingOp::Run), Response::ScriptDone(results)) => {
+                let Some(ix) = self.target_ix() else {
+                    return;
+                };
+                for entry in &results {
+                    if entry.outcome.is_ok() {
+                        self.record_run(&entry.sql);
+                    }
+                    if let Err(err) = &entry.outcome {
+                        self.push_message(err.clone());
+                    }
+                }
+                self.tabs[ix].result_connection = self
+                    .conn
+                    .session
+                    .as_ref()
+                    .map(|info| format!("{}  ·  {}", self.conn.label(), info.database))
+                    .unwrap_or_default();
+                self.conn.status = format!("{} query selesai.", results.len());
+                self.tabs[ix].statement_results = results;
+                self.show_statement_result(ix, 0, cx);
+            }
             (Some(PendingOp::Run), Response::QueryDone(result)) => {
                 let rows = result.row_count();
                 let elapsed = result.elapsed.as_millis();
@@ -212,6 +234,7 @@ impl Workbench {
                 if let Some(sql) = pending_sql {
                     self.record_run(&sql);
                 }
+                self.target_tab_mut().statement_results.clear();
                 self.push_message(format!("{affected} baris terpengaruh."));
                 self.conn.status = format!("{affected} baris terpengaruh (belum commit).");
                 self.target_tab_mut().results_tab = ResultsTab::Messages;
@@ -336,6 +359,7 @@ impl Workbench {
                 }
             }
             (Some(PendingOp::ApplyEdits), Response::CellsUpdated { done, error }) => {
+                self.conn.uncommitted |= done > 0;
                 self.edits_applied(done, error, cx);
             }
             (Some(PendingOp::Commit), Response::Committed) => {
