@@ -663,6 +663,31 @@ fn prev_is_select(toks: &[Tok], ix: usize) -> bool {
     ix >= 1 && matches!(&toks[ix - 1], Tok::Word(w) if w.eq_ignore_ascii_case("select"))
 }
 
+/// Conservative classification for Read Only and production confirmation.
+pub fn is_read_query(sql: &str) -> bool {
+    let Some(parts) = select_script(sql) else {
+        return false;
+    };
+    if parts.len() != 1 {
+        return false;
+    }
+    !tokenize(&parts[0]).iter().any(|token| match token {
+        Tok::Word(word) => [
+            "UPDATE",
+            "INSERT",
+            "DELETE",
+            "MERGE",
+            "FUNCTION",
+            "PROCEDURE",
+            "NEXTVAL",
+        ]
+        .iter()
+        .any(|keyword| word.eq_ignore_ascii_case(keyword)),
+        Tok::Quoted(name) => name.eq_ignore_ascii_case("\"NEXTVAL\""),
+        _ => false,
+    })
+}
+
 /// Only split scripts consisting entirely of result-producing queries. Procedural
 /// scripts and DDL keep their original statement boundaries.
 pub fn select_script(sql: &str) -> Option<Vec<String>> {
@@ -755,6 +780,25 @@ pub fn statement_at(sql: &str, cursor: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_query_checks_locking_writes_and_plsql() {
+        assert!(is_read_query(
+            "/* update the report */ SELECT 'NEXTVAL' FROM dual;"
+        ));
+        assert!(is_read_query(
+            "WITH sample AS (SELECT 1 id FROM dual) SELECT id FROM sample"
+        ));
+        for sql in [
+            "SELECT * FROM accounts FOR /* lock */ UPDATE",
+            "SELECT s.NEXTVAL FROM dual",
+            "WITH FUNCTION f RETURN NUMBER IS BEGIN RETURN 1; END; SELECT f FROM dual",
+            "WITH sample AS (SELECT 1 id FROM dual) DELETE FROM accounts",
+            "SELECT 1 FROM dual; DELETE FROM accounts",
+        ] {
+            assert!(!is_read_query(sql), "{sql}");
+        }
+    }
 
     #[test]
     fn query_script_preserves_literals_and_ignores_trailing_comments() {

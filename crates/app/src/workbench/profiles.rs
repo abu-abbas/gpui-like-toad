@@ -17,6 +17,7 @@ pub(super) struct ConnectionForm {
     /// "Save password" checkbox in the connection dialog. Off by default;
     /// follows the profile when editing one.
     pub(super) save_password: bool,
+    pub(super) access: ConnectionAccess,
     pub(super) editing_profile: Option<usize>,
     /// Whether the connection dialog (modal) is open. Closing it never
     /// clears the inputs: the form keeps its input entities.
@@ -54,6 +55,7 @@ impl ConnectionForm {
             form_notice: None,
             password_input,
             save_password: false,
+            access: ConnectionAccess::default(),
             editing_profile: None,
             show_connection_form: false,
         }
@@ -243,6 +245,7 @@ impl Workbench {
             window,
             cx,
         );
+        self.connection_form.access = profile.access;
         self.connection_form.save_password = profile.save_password;
     }
 
@@ -312,6 +315,7 @@ impl Workbench {
             cx,
         );
         self.connection_form.save_password = false;
+        self.connection_form.access = ConnectionAccess::default();
         cx.notify();
     }
 
@@ -371,6 +375,7 @@ impl Workbench {
             },
             username,
             connect_string,
+            access: self.connection_form.access,
             folder: Self::input_text(&self.connection_form.folder_input, cx),
             save_password: self.connection_form.save_password,
         };
@@ -418,3 +423,79 @@ impl Workbench {
 }
 
 pub(super) const FORM_INCOMPLETE: &str = "Isi username dan host (atau TNS) dulu.";
+
+impl Workbench {
+    pub(super) fn export_connections(&self, cx: &mut Context<Self>) {
+        let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let prompt = cx.prompt_for_new_path(&dir, Some("ora-connections.json"));
+        let settings = store::export_connection_profiles(&self.profiles);
+        cx.spawn(async move |view, cx| {
+            let Ok(Ok(Some(path))) = prompt.await else {
+                return;
+            };
+            let result = cx
+                .background_executor()
+                .spawn(async move { std::fs::write(path, settings) })
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                let message = match result {
+                    Ok(()) => "Connection profiles exported.".to_string(),
+                    Err(err) => format!("Could not export connection profiles: {err}"),
+                };
+                this.push_message(message.clone());
+                this.conn.status = message;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn import_connections(&self, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import Ora connections".into()),
+        });
+        cx.spawn(async move |view, cx| {
+            let Ok(Ok(Some(paths))) = prompt.await else { return; };
+            let Some(path) = paths.into_iter().next() else { return; };
+            let loaded = cx.background_executor().spawn(async move {
+                use std::io::Read as _;
+                let mut text = String::new();
+                const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024;
+                std::fs::File::open(path).and_then(|file| file.take(MAX_FILE_SIZE + 1).read_to_string(&mut text))
+                    .map_err(|err| err.to_string())?;
+                if text.len() as u64 > MAX_FILE_SIZE { return Err("Connections file exceeds 4 MiB.".into()); }
+                store::import_connection_profiles(&text)
+            }).await;
+            let _ = view.update(cx, |this, cx| {
+                let message = match loaded {
+                    Ok(profiles) => {
+                        let mut merged = this.profiles.clone();
+                        let before = merged.len();
+                        let mut duplicates = 0;
+                        for profile in profiles {
+                            let duplicate = merged.iter().any(|existing| existing.name == profile.name &&
+                                existing.username == profile.username && existing.connect_string == profile.connect_string &&
+                                existing.folder == profile.folder);
+                            if duplicate { duplicates += 1; } else { merged.push(profile); }
+                        }
+                        match store::save_profiles(&merged) {
+                            Ok(()) => {
+                                let added = merged.len() - before;
+                                this.profiles = merged;
+                                format!("{added} connection profiles imported. {duplicates} duplicates skipped.")
+                            }
+                            Err(err) => format!("Could not save imported profiles: {err}"),
+                        }
+                    }
+                    Err(err) => format!("Could not import connection profiles: {err}"),
+                };
+                this.push_message(message.clone());
+                this.conn.status = message;
+                cx.notify();
+            });
+        }).detach();
+    }
+}

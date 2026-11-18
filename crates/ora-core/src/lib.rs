@@ -28,8 +28,9 @@ pub use filter::{
     ROWID_COLUMN,
 };
 pub use model::{
-    compose_easy_connect, parse_easy_connect, ColumnDef, ColumnInfo, ConnectionProfile, IndexDef,
-    ObjectKind, PlanNode, QueryResult, SchemaObject, Value,
+    compose_easy_connect, parse_easy_connect, ColumnDef, ColumnInfo, ConnectionAccess,
+    ConnectionEnvironment, ConnectionProfile, IndexDef, ObjectKind, PlanNode, QueryResult,
+    SchemaObject, Value,
 };
 
 /// Default cap for rows fetched into the grid. Queries that hit the cap set

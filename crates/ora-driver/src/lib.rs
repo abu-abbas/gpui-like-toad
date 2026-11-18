@@ -20,11 +20,15 @@ use ora_core::{
 /// worker thread; all methods run off the UI thread.
 pub struct ThinClient {
     conn: Option<oracledb::Connection>,
+    read_only: bool,
 }
 
 impl ThinClient {
     pub fn new() -> Self {
-        ThinClient { conn: None }
+        ThinClient {
+            conn: None,
+            read_only: false,
+        }
     }
 
     fn conn(&self) -> Result<&oracledb::Connection, DbError> {
@@ -129,12 +133,69 @@ fn describe_type(
     }
 }
 
+fn fetch_rows(
+    conn: &oracledb::Connection,
+    sql: &str,
+    binds: &[String],
+    max_rows: usize,
+) -> Result<QueryResult, DbError> {
+    let sql = clean_statement(sql);
+    let started = Instant::now();
+    let params: Vec<&dyn oracledb::ToDbValue> = binds
+        .iter()
+        .map(|b| b as &dyn oracledb::ToDbValue)
+        .collect();
+    let cursor = conn.query(sql, &params).map_err(db_err)?;
+    let fetching = Instant::now();
+    // Column metadata comes from the cursor (not a row) so empty result
+    // sets still report their columns. DbType refs are 'static, so the
+    // borrow of the cursor ends here before iteration moves it.
+    let columns: Vec<ColumnInfo> = cursor
+        .columns()
+        .iter()
+        .map(|m| ColumnInfo {
+            name: m.name().to_string(),
+            data_type: m.data_type(),
+        })
+        .collect();
+    let db_types: Vec<&oracledb::DbType> = cursor.columns().iter().map(|m| m.db_type()).collect();
+    let mut rows = Vec::new();
+    let mut truncated = false;
+    for row in cursor {
+        let row = row.map_err(db_err)?;
+        if rows.len() >= max_rows {
+            truncated = true;
+            break;
+        }
+        let mut values = Vec::with_capacity(db_types.len());
+        for (ix, db_type) in db_types.iter().enumerate() {
+            values.push(cell_value(&row, ix, db_type)?);
+        }
+        rows.push(values);
+    }
+    Ok(QueryResult {
+        columns,
+        rows,
+        truncated,
+        fetch_time: Some(fetching.elapsed()),
+        elapsed: started.elapsed(),
+    })
+}
+
 impl DbClient for ThinClient {
     fn connect(&mut self, profile: &ConnectionProfile, password: &str) -> Result<DbInfo, DbError> {
-        let config = oracledb::Config::default()
+        if profile.access.read_only
+            && (profile.access.sysdba || profile.username.eq_ignore_ascii_case("SYS"))
+        {
+            return Err(DbError::new("Read Only requires a non-SYS connection."));
+        }
+        let mut config = oracledb::Config::default()
             .set_credentials(&profile.username, password)
             .set_connect_string(&profile.connect_string)
             .map_err(db_err)?;
+        if profile.access.sysdba {
+            config = config.set_auth_mode(oracledb::AUTH_MODE_SYSDBA);
+        }
         let conn = oracledb::connect(config).map_err(db_err)?;
         let user_row = conn
             .query_row("SELECT USER FROM DUAL", &[])
@@ -142,6 +203,7 @@ impl DbClient for ThinClient {
         let user: String = user_row.get(0).map_err(db_err)?;
         let version = conn.version().map(|v| v.to_string()).unwrap_or_default();
         let database = conn.db_name().unwrap_or("").to_string();
+        self.read_only = profile.access.read_only;
         self.conn = Some(conn);
         Ok(DbInfo {
             user,
@@ -160,6 +222,16 @@ impl DbClient for ThinClient {
         self.conn.is_some()
     }
 
+    fn ping(&self) -> Result<(), DbError> {
+        let conn = self.conn()?;
+        let timeout = conn.call_timeout().map_err(db_err)?;
+        conn.set_call_timeout(Some(std::time::Duration::from_secs(5)))
+            .map_err(db_err)?;
+        let result = conn.ping().map_err(db_err);
+        let reset = conn.set_call_timeout(timeout).map_err(db_err);
+        result.and(reset)
+    }
+
     fn query(&mut self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError> {
         self.query_binds(sql, &[], max_rows)
     }
@@ -171,48 +243,14 @@ impl DbClient for ThinClient {
         max_rows: usize,
     ) -> Result<QueryResult, DbError> {
         let conn = self.conn()?;
-        let sql = clean_statement(sql);
-        let started = Instant::now();
-        let params: Vec<&dyn oracledb::ToDbValue> = binds
-            .iter()
-            .map(|b| b as &dyn oracledb::ToDbValue)
-            .collect();
-        let cursor = conn.query(sql, &params).map_err(db_err)?;
-        let fetching = Instant::now();
-        // Column metadata comes from the cursor (not a row) so empty result
-        // sets still report their columns. DbType refs are 'static, so the
-        // borrow of the cursor ends here before iteration moves it.
-        let columns: Vec<ColumnInfo> = cursor
-            .columns()
-            .iter()
-            .map(|m| ColumnInfo {
-                name: m.name().to_string(),
-                data_type: m.data_type(),
-            })
-            .collect();
-        let db_types: Vec<&oracledb::DbType> =
-            cursor.columns().iter().map(|m| m.db_type()).collect();
-        let mut rows = Vec::new();
-        let mut truncated = false;
-        for row in cursor {
-            let row = row.map_err(db_err)?;
-            if rows.len() >= max_rows {
-                truncated = true;
-                break;
-            }
-            let mut values = Vec::with_capacity(db_types.len());
-            for (ix, db_type) in db_types.iter().enumerate() {
-                values.push(cell_value(&row, ix, db_type)?);
-            }
-            rows.push(values);
+        if !self.read_only {
+            return fetch_rows(conn, sql, binds, max_rows);
         }
-        Ok(QueryResult {
-            columns,
-            rows,
-            truncated,
-            fetch_time: Some(fetching.elapsed()),
-            elapsed: started.elapsed(),
-        })
+        conn.execute("SET TRANSACTION READ ONLY", &[])
+            .map_err(db_err)?;
+        let result = fetch_rows(conn, sql, binds, max_rows);
+        let rollback = conn.rollback().map_err(db_err);
+        result.and_then(|rows| rollback.map(|()| rows))
     }
 
     fn execute(&mut self, sql: &str) -> Result<u64, DbError> {
@@ -576,6 +614,7 @@ mod tests {
                     name: "refused".into(),
                     username: "hr".into(),
                     connect_string: "127.0.0.1:1/nonexistent".into(),
+                    access: Default::default(),
                 },
                 "password",
             )

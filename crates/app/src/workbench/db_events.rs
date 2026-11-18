@@ -24,10 +24,10 @@ impl Workbench {
     /// thread. The generation tag lets [`Workbench::stop`] drop the
     /// response of a superseded operation.
     pub(super) fn spawn_db(&mut self, job: Job, op: PendingOp, cx: &mut Context<Self>) {
-        let Some(db) = self.conn.db.clone() else {
+        if self.conn.db.is_none() {
             self.push_message("Belum terhubung.".to_string());
             return;
-        };
+        }
         // Work that lands in the active tab must run on that tab's own
         // connection; a tab whose connection was closed has none.
         let tab_op = matches!(
@@ -68,7 +68,85 @@ impl Workbench {
                 tab.conn = Some(id);
             }
         }
-        let rx: Receiver<Response> = db.request(job);
+        let access = self.conn.access();
+        if self.conn.session.is_some() {
+            if let Some(operation) = job.protected_operation() {
+                if access.protect_production && !access.read_only {
+                    self.confirm_production_job(job, op, operation, cx);
+                    return;
+                }
+            }
+        }
+        self.dispatch_db(job, op, false, cx);
+    }
+
+    fn confirm_production_job(
+        &mut self,
+        job: Job,
+        op: PendingOp,
+        operation: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        self.conn.busy = true;
+        cx.notify();
+        let handle = self.window_handle;
+        let conn_id = self.conn.id;
+        let generation = self.conn.op_generation;
+        let tab_id = self.tabs.get(self.active_tab).map(|t| t.id);
+        let connection = self.conn.label();
+        let database = self
+            .conn
+            .session
+            .as_ref()
+            .map(|info| format!("{} @ {}", info.user, info.database))
+            .unwrap_or_default();
+        cx.spawn(async move |view, cx| {
+            let prompt = cx.update_window(handle, |_, window, cx| {
+                window.prompt(
+                    gpui_kit::PromptLevel::Warning,
+                    "Confirm production operation",
+                    Some(&format!("{operation} on {connection} ({database})?")),
+                    &["Cancel", "Continue"],
+                    cx,
+                )
+            });
+            let confirmed = match prompt {
+                Ok(prompt) => prompt.await == Ok(1),
+                Err(_) => false,
+            };
+            let _ = view.update(cx, |this, cx| {
+                this.with_conn(conn_id, cx, |this, background, cx| {
+                    if this.conn.op_generation != generation {
+                        return;
+                    }
+                    this.conn.busy = false;
+                    if confirmed
+                        && !background
+                        && this.tabs.get(this.active_tab).map(|t| t.id) == tab_id
+                        && this.conn.session.is_some()
+                    {
+                        this.dispatch_db(job, op, true, cx);
+                    } else {
+                        this.conn.pending_sql = None;
+                        this.conn.cancel_script = None;
+                        this.conn.status = "Production operation cancelled.".to_string();
+                        cx.notify();
+                    }
+                });
+            });
+        })
+        .detach();
+    }
+
+    fn dispatch_db(&mut self, job: Job, op: PendingOp, confirmed: bool, cx: &mut Context<Self>) {
+        let Some(db) = self.conn.db.as_ref() else {
+            return;
+        };
+        let rx: Receiver<Response> = if confirmed {
+            db.request_confirmed(job)
+        } else {
+            db.request(job)
+        };
         self.conn.op_generation += 1;
         let generation = self.conn.op_generation;
         self.conn.pending_op = Some(op);
@@ -95,6 +173,94 @@ impl Workbench {
         .detach();
     }
 
+    pub(super) fn start_heartbeat(cx: &mut Context<Self>) {
+        cx.spawn(async move |view, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(15))
+                .await;
+            let Ok(requests) = view.update(cx, |this, _| {
+                std::iter::once(&this.conn)
+                    .chain(&this.parked)
+                    .filter(|conn| !conn.busy && !conn.demo_mode && conn.session.is_some())
+                    .filter_map(|conn| {
+                        Some((
+                            conn.id,
+                            conn.op_generation,
+                            conn.db.as_ref()?.request(Job::Ping),
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+            }) else {
+                break;
+            };
+            for (id, generation, rx) in requests {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { rx.recv() })
+                    .await;
+                if let Ok(Response::ConnectionLost(reason)) = result {
+                    let _ = view.update(cx, |this, cx| {
+                        this.with_conn(id, cx, |this, _, cx| {
+                            if this.conn.op_generation == generation {
+                                this.connection_was_lost(reason, cx);
+                            }
+                        })
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn connection_was_lost(&mut self, error: String, cx: &mut Context<Self>) {
+        if self.conn.session.take().is_none() {
+            return;
+        }
+        let had_writes = self.conn.uncommitted
+            || matches!(
+                self.conn.pending_op,
+                Some(
+                    PendingOp::ApplyEdits
+                        | PendingOp::ImportCsv { .. }
+                        | PendingOp::Commit
+                        | PendingOp::Rollback
+                        | PendingOp::Run
+                )
+            );
+        let connection = self.conn.label();
+        self.conn.connection_lost = true;
+        self.conn.db = None;
+        self.conn.busy = false;
+        self.conn.pending_op = None;
+        self.conn.pending_tab = None;
+        self.conn.pending_sql = None;
+        self.conn.op_generation += 1;
+        self.conn.uncommitted = false;
+        self.conn.current_schema = None;
+        self.conn.selected_object = None;
+        self.conn.objects.clear();
+        self.conn.schemas.clear();
+        self.reset_catalog(None);
+        if self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.conn == Some(self.conn.id))
+        {
+            self.cell_editor = None;
+        }
+        self.clear_edit_marks(cx);
+        self.invalidate_connection_results(cx);
+        self.conn.status = "Connection lost. Reconnect to continue.".to_string();
+        self.push_message(format!("Connection lost ({connection}): {error}"));
+        if had_writes {
+            self.push_message(
+                "Check the database before retrying. The last operation may have reached Oracle."
+                    .into(),
+            );
+        }
+        cx.notify();
+    }
+
     fn on_db_response(
         &mut self,
         generation: u64,
@@ -109,6 +275,10 @@ impl Workbench {
             return;
         }
         self.conn.cancel_script = None;
+        if let Ok(Response::ConnectionLost(error)) = resp {
+            self.connection_was_lost(error, cx);
+            return;
+        }
         let pending = self.conn.pending_op.take();
         let pending_sql = self.conn.pending_sql.take();
         self.conn.busy = false;
@@ -154,6 +324,7 @@ impl Workbench {
         match (pending, resp) {
             (Some(PendingOp::Connect), Response::Connected(info)) => {
                 self.conn.session = Some(info.clone());
+                self.conn.connection_lost = false;
                 self.reset_catalog(Some(info.user.clone()));
                 self.conn.current_schema = None;
                 self.conn.connect_error = None;

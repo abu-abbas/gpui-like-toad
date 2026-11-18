@@ -220,10 +220,15 @@ impl Workbench {
                     .child(
                         div()
                             .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                            .line_height(px(LEADING_LABEL))
+                            .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(label_color)
                             .child(tab.title.clone()),
+                    )
+                    .children(
+                        tab.conn
+                            .and_then(|id| self.conn_by_id(id))
+                            .and_then(|conn| ui_helpers::environment_badge(conn.access(), theme)),
                     )
                     // Which connection the tab runs on, once more than one
                     // is open (or "closed" when its connection is gone).
@@ -241,7 +246,7 @@ impl Workbench {
                                     theme.secondary
                                 })
                                 .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
-                                .line_height(px(LEADING_CAPTION))
+                                .line_height(crate::theme::ui_size(&theme, LEADING_CAPTION))
                                 .text_color(if closed {
                                     theme.danger
                                 } else {

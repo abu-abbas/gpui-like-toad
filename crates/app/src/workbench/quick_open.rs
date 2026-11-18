@@ -135,7 +135,7 @@ impl Workbench {
                 .px(px(SPACE_2))
                 .rounded(px(RADIUS_SM))
                 .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                .line_height(px(LEADING_LABEL))
+                .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.confirm_quick_open(Some(ix), window, cx)
                 }));

@@ -9,6 +9,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use ora_core::completion::CatalogObject;
 use ora_core::credentials::{CredentialStore as _, ExposeSecret as _, SecretString};
@@ -17,8 +18,9 @@ use ora_core::export::{to_csv, to_xlsx};
 use ora_core::import::{map_columns, parse_csv, quote_ident};
 use ora_core::sql::statement_kind;
 use ora_core::{
-    ColumnDef, ConnectionProfile, DbClient, DbError, DbInfo, IndexDef, ObjectKind, PlanNode,
-    QueryResult, SchemaObject, TableFilter, TablePage, DEFAULT_MAX_ROWS, EXPORT_MAX_ROWS,
+    ColumnDef, ConnectionAccess, ConnectionProfile, DbClient, DbError, DbInfo, IndexDef,
+    ObjectKind, PlanNode, QueryResult, SchemaObject, TableFilter, TablePage, DEFAULT_MAX_ROWS,
+    EXPORT_MAX_ROWS,
 };
 
 /// File format for "Export Data" on a whole table.
@@ -155,7 +157,28 @@ pub enum Job {
     Catalog {
         owner: String,
     },
+    Ping,
     Disconnect,
+}
+
+impl Job {
+    pub(crate) fn protected_operation(&self) -> Option<&'static str> {
+        use ora_core::sql::is_read_query;
+        match self {
+            Self::Run { sql } if !is_read_query(sql) => Some("Execute SQL"),
+            Self::SelectScript { statements, .. }
+                if !statements.iter().all(|sql| is_read_query(sql)) =>
+            {
+                Some("Run script")
+            }
+            Self::UpdateCells { .. } => Some("Apply table changes"),
+            Self::ImportCsv { .. } => Some("Import CSV rows"),
+            Self::Explain { .. } => Some("Write to the Oracle plan table"),
+            Self::Commit => Some("Commit changes"),
+            Self::Rollback => Some("Roll back changes"),
+            _ => None,
+        }
+    }
 }
 
 pub struct StatementResult {
@@ -194,13 +217,15 @@ pub enum Response {
     /// lines for the Explain Plan sub-tab (empty when the text path failed).
     PlanTree(Vec<PlanNode>, Vec<String>),
     Catalog(Vec<CatalogObject>),
+    Alive,
+    ConnectionLost(String),
     Disconnected,
     Failed(String),
 }
 
 /// Cloneable handle to the worker thread.
 pub struct DbHandle {
-    tx: Sender<(Job, Sender<Response>)>,
+    tx: Sender<(Job, bool, Sender<Response>)>,
 }
 
 impl Clone for DbHandle {
@@ -213,16 +238,26 @@ impl Clone for DbHandle {
 
 impl DbHandle {
     pub fn spawn() -> Self {
-        let (tx, rx) = mpsc::channel::<(Job, Sender<Response>)>();
+        let (tx, rx) = mpsc::channel::<(Job, bool, Sender<Response>)>();
         std::thread::spawn(move || {
             let mut client: Option<Box<dyn DbClient>> = None;
-            while let Ok((job, reply)) = rx.recv() {
+            let mut access = ConnectionAccess::default();
+            let mut last_activity = Instant::now();
+            let mut lost = None;
+            while let Ok((job, confirmed, reply)) = rx.recv() {
                 // A panic in one job must not kill the session: report it
                 // and keep the worker (and its connection) alive.
-                let response = catch_unwind(AssertUnwindSafe(|| handle_job(job, &mut client)))
-                    .unwrap_or_else(|_| {
-                        Response::Failed("internal error di DB worker".to_string())
-                    });
+                let response = catch_unwind(AssertUnwindSafe(|| {
+                    handle_live_job(
+                        job,
+                        confirmed,
+                        &mut client,
+                        &mut access,
+                        &mut last_activity,
+                        &mut lost,
+                    )
+                }))
+                .unwrap_or_else(|_| Response::Failed("internal error di DB worker".to_string()));
                 let _ = reply.send(response);
             }
         });
@@ -233,16 +268,119 @@ impl DbHandle {
     /// worker thread is gone, the receiver yields a `Failed` immediately
     /// instead of blocking forever.
     pub fn request(&self, job: Job) -> Receiver<Response> {
+        self.dispatch(job, false)
+    }
+
+    pub(crate) fn request_confirmed(&self, job: Job) -> Receiver<Response> {
+        self.dispatch(job, true)
+    }
+
+    fn dispatch(&self, job: Job, confirmed: bool) -> Receiver<Response> {
         let (tx, rx) = mpsc::channel();
-        if self.tx.send((job, tx.clone())).is_err() {
+        if self.tx.send((job, confirmed, tx.clone())).is_err() {
             let _ = tx.send(Response::Failed("DB worker tidak berjalan".to_string()));
         }
         rx
     }
 }
 
+const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(45);
+
+fn handle_live_job(
+    job: Job,
+    confirmed: bool,
+    client: &mut Option<Box<dyn DbClient>>,
+    access: &mut ConnectionAccess,
+    last_activity: &mut Instant,
+    lost: &mut Option<String>,
+) -> Response {
+    let lifecycle = matches!(
+        job,
+        Job::Connect { .. } | Job::Disconnect | Job::TestConnect { .. }
+    );
+    if !lifecycle {
+        if let Some(reason) = lost {
+            return Response::ConnectionLost(reason.clone());
+        }
+        if last_activity.elapsed() >= IDLE_CHECK_INTERVAL {
+            if let Some(active) = client.as_ref() {
+                if let Err(err) = active.ping() {
+                    return mark_connection_lost(client, lost, err.to_string());
+                }
+                *last_activity = Instant::now();
+            }
+        }
+    }
+    if matches!(job, Job::Ping) {
+        return Response::Alive;
+    }
+    let response = handle_guarded_job(job, confirmed, client, access);
+    if matches!(response, Response::Connected(_) | Response::Disconnected) {
+        *lost = None;
+    }
+    if !lifecycle {
+        let operation_error = match &response {
+            Response::Failed(error)
+            | Response::CellsUpdated {
+                error: Some(error), ..
+            } => Some(error),
+            Response::ScriptDone(results) => results.last().and_then(|r| r.outcome.as_ref().err()),
+            _ => None,
+        };
+        if let (Some(active), Some(error)) = (client.as_ref(), operation_error) {
+            if let Err(ping_error) = active.ping() {
+                return mark_connection_lost(client, lost, format!("{error} (ping: {ping_error})"));
+            }
+        }
+    }
+    if !matches!(response, Response::Tested(_)) {
+        *last_activity = Instant::now();
+    }
+    response
+}
+
+fn mark_connection_lost(
+    client: &mut Option<Box<dyn DbClient>>,
+    lost: &mut Option<String>,
+    reason: String,
+) -> Response {
+    // Do not replay a pending write or commit after reconnecting. A response
+    // could have been lost after Oracle executed the operation.
+    *lost = Some(reason.clone());
+    *client = None;
+    Response::ConnectionLost(reason)
+}
+
+fn handle_guarded_job(
+    job: Job,
+    confirmed: bool,
+    client: &mut Option<Box<dyn DbClient>>,
+    access: &mut ConnectionAccess,
+) -> Response {
+    if let Some(operation) = job.protected_operation() {
+        if access.read_only {
+            return Response::Failed(format!("{operation}: this connection is Read Only."));
+        }
+        if access.protect_production && !confirmed {
+            return Response::Failed(format!("{operation}: production confirmation is required."));
+        }
+    }
+    let requested = match &job {
+        Job::Connect { profile, .. } => Some(profile.access),
+        _ => None,
+    };
+    let result = handle_job(job, client);
+    match result {
+        Response::Connected(_) => *access = requested.unwrap_or_default(),
+        Response::Disconnected => *access = ConnectionAccess::default(),
+        _ => {}
+    }
+    result
+}
+
 fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
     match job {
+        Job::Ping => Response::Alive,
         Job::Connect {
             profile,
             password,
@@ -540,11 +678,74 @@ mod tests {
                     name: "demo".into(),
                     username: "hr".into(),
                     connect_string: "demo".into(),
+                    access: Default::default(),
                 },
                 "",
             )
             .unwrap();
         client
+    }
+
+    #[test]
+    fn protected_jobs_require_confirmation_and_read_only_takes_precedence() {
+        let mut client: Option<Box<dyn DbClient>> = Some(Box::new(demo()));
+        let mut access = ConnectionAccess {
+            protect_production: true,
+            ..ConnectionAccess::default()
+        };
+        let write = || Job::Run {
+            sql: "DELETE FROM departments".into(),
+        };
+        assert!(matches!(
+            handle_guarded_job(write(), false, &mut client, &mut access),
+            Response::Failed(_)
+        ));
+        assert!(matches!(
+            handle_guarded_job(write(), true, &mut client, &mut access),
+            Response::Executed(1)
+        ));
+        access.read_only = true;
+        assert!(matches!(
+            handle_guarded_job(write(), true, &mut client, &mut access),
+            Response::Failed(_)
+        ));
+        let read = Job::Run {
+            sql: "SELECT 1 FROM dual".into(),
+        };
+        assert!(matches!(
+            handle_guarded_job(read, false, &mut client, &mut access),
+            Response::QueryDone(_)
+        ));
+    }
+
+    #[test]
+    fn failed_idle_probe_prevents_later_queries_on_that_worker() {
+        let mut client: Option<Box<dyn DbClient>> = Some(Box::new(DemoClient::new()));
+        let mut access = ConnectionAccess::default();
+        let mut activity = Instant::now() - IDLE_CHECK_INTERVAL;
+        let mut lost = None;
+        let ping = handle_live_job(
+            Job::Ping,
+            false,
+            &mut client,
+            &mut access,
+            &mut activity,
+            &mut lost,
+        );
+        assert!(matches!(ping, Response::ConnectionLost(_)));
+        assert!(client.is_none());
+        let write = Job::Run {
+            sql: "DELETE FROM departments".into(),
+        };
+        let response = handle_live_job(
+            write,
+            false,
+            &mut client,
+            &mut access,
+            &mut activity,
+            &mut lost,
+        );
+        assert!(matches!(response, Response::ConnectionLost(_)));
     }
 
     #[test]

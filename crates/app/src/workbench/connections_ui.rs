@@ -70,6 +70,7 @@ impl Workbench {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(self.conn.label()),
                         )
+                        .children(ui_helpers::environment_badge(self.conn.access(), theme))
                         .child(icon(IconName::ChevronDown, 14., theme.muted_foreground)),
                 )
                 .dropdown_menu(move |menu, _, _| {
@@ -338,6 +339,7 @@ impl Workbench {
                             theme,
                         )
                         .when(active || focused, |row| row.text_color(theme.primary))
+                        .children(ui_helpers::environment_badge(profile.access, theme))
                         .when(connected, |row| row.child(status_dot(theme.success))),
                     ),
             )
@@ -463,6 +465,54 @@ impl Workbench {
                         cx.notify();
                     })),
             );
+        let access = form.access;
+        let environment = Button::new("connection-environment")
+            .small()
+            .label(access.environment.label())
+            .dropdown_caret(true);
+        let view = cx.entity();
+        let environment = environment.dropdown_menu(move |menu, _, _| {
+            ConnectionEnvironment::ALL
+                .into_iter()
+                .fold(menu, |menu, option| {
+                    let view = view.clone();
+                    menu.item(
+                        PopupMenuItem::new(option.label())
+                            .checked(option == access.environment)
+                            .on_click(move |_, _, cx| {
+                                view.update(cx, |this, cx| {
+                                    this.connection_form.access.environment = option;
+                                    if option == ConnectionEnvironment::Production {
+                                        this.connection_form.access.protect_production = true;
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                })
+        });
+        body = body.child(div().flex().flex_col().gap(px(SPACE_2)).pt(px(SPACE_2)).border_t_1().border_color(theme.border)
+            .child(form_label("Access and protection", theme))
+            .child(div().flex().items_center().gap(px(SPACE_2)).child("Environment").child(environment))
+            .child(Checkbox::new("read-only").small().label("Read Only").checked(access.read_only)
+                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                    this.connection_form.access.read_only = *checked;
+                    if *checked { this.connection_form.access.sysdba = false; }
+                    cx.notify();
+                })))
+            .child(Checkbox::new("production-protection").small().label("Confirm production operations").checked(access.protect_production)
+                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                    this.connection_form.access.protect_production = *checked;
+                    cx.notify();
+                })))
+            .child(Checkbox::new("connect-sysdba").small().label("Connect as SYSDBA").checked(access.sysdba)
+                .disabled(access.read_only)
+                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                    this.connection_form.access.sysdba = *checked;
+                    cx.notify();
+                })))
+            .when(access.read_only, |section| section.child(caption_text(
+                "Use an Oracle account with read-only grants for database-enforced permissions.".into(), theme))));
         let notice = self
             .conn
             .connect_error
@@ -475,7 +525,7 @@ impl Workbench {
                     .p(px(SPACE_2))
                     .rounded(px(RADIUS_SM))
                     .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
-                    .line_height(px(LEADING_CAPTION))
+                    .line_height(crate::theme::ui_size(&theme, LEADING_CAPTION))
                     .text_color(if is_error {
                         theme.danger
                     } else {
@@ -601,7 +651,7 @@ impl Workbench {
                         div()
                             .flex_1()
                             .text_size(crate::theme::ui_size(&theme, FONT_BODY))
-                            .line_height(px(LEADING_BODY))
+                            .line_height(crate::theme::ui_size(&theme, LEADING_BODY))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child(title),

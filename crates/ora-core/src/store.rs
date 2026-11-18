@@ -13,6 +13,7 @@
 //! flag. When that flag is set the password lives in the OS keychain
 //! under the profile id (see [`crate::credentials`]), never on disk here.
 
+use crate::{ConnectionAccess, ConnectionEnvironment};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -33,6 +34,7 @@ pub struct SavedProfile {
     pub connect_string: String,
     /// Optional folder in the Connections tree.
     pub folder: String,
+    pub access: ConnectionAccess,
     /// The user ticked "Save password": connect without asking.
     pub save_password: bool,
 }
@@ -220,7 +222,7 @@ pub fn parse_json(input: &str) -> Result<Json, String> {
         pos: 0,
     };
     p.skip_ws();
-    let value = p.parse_value()?;
+    let value = p.parse_value(0)?;
     p.skip_ws();
     if p.pos != p.chars.len() {
         return Err(format!("trailing characters at offset {}", p.pos));
@@ -260,11 +262,14 @@ impl Parser {
         }
     }
 
-    fn parse_value(&mut self) -> Result<Json, String> {
+    fn parse_value(&mut self, depth: usize) -> Result<Json, String> {
+        if depth >= 64 {
+            return Err("JSON is nested too deeply".into());
+        }
         self.skip_ws();
         match self.peek() {
-            Some('{') => self.parse_object(),
-            Some('[') => self.parse_array(),
+            Some('{') => self.parse_object(depth + 1),
+            Some('[') => self.parse_array(depth + 1),
             Some('"') => Ok(Json::Str(self.parse_string()?)),
             Some('t') => self.parse_literal("true", Json::Bool(true)),
             Some('f') => self.parse_literal("false", Json::Bool(false)),
@@ -377,7 +382,7 @@ impl Parser {
         Ok(value)
     }
 
-    fn parse_array(&mut self) -> Result<Json, String> {
+    fn parse_array(&mut self, depth: usize) -> Result<Json, String> {
         self.expect('[')?;
         let mut items = Vec::new();
         self.skip_ws();
@@ -386,7 +391,7 @@ impl Parser {
             return Ok(Json::Arr(items));
         }
         loop {
-            items.push(self.parse_value()?);
+            items.push(self.parse_value(depth)?);
             self.skip_ws();
             match self.next() {
                 Some(',') => {}
@@ -396,7 +401,7 @@ impl Parser {
         }
     }
 
-    fn parse_object(&mut self) -> Result<Json, String> {
+    fn parse_object(&mut self, depth: usize) -> Result<Json, String> {
         self.expect('{')?;
         let mut pairs = Vec::new();
         self.skip_ws();
@@ -412,7 +417,7 @@ impl Parser {
             let key = self.parse_string()?;
             self.skip_ws();
             self.expect(':')?;
-            let value = self.parse_value()?;
+            let value = self.parse_value(depth)?;
             pairs.push((key, value));
             self.skip_ws();
             match self.next() {
@@ -516,6 +521,16 @@ fn profile_to_json(p: &SavedProfile) -> Json {
             Json::Str(p.connect_string.clone()),
         ),
         ("folder".to_string(), Json::Str(p.folder.clone())),
+        (
+            "environment".into(),
+            Json::Str(p.access.environment.label().into()),
+        ),
+        ("read_only".into(), Json::Bool(p.access.read_only)),
+        (
+            "protect_production".into(),
+            Json::Bool(p.access.protect_production),
+        ),
+        ("sysdba".into(), Json::Bool(p.access.sysdba)),
         ("save_password".to_string(), Json::Bool(p.save_password)),
     ])
 }
@@ -539,6 +554,19 @@ fn profile_from_json(v: &Json) -> Option<SavedProfile> {
             .unwrap_or_default()
             .trim()
             .to_string(),
+        access: ConnectionAccess {
+            environment: ConnectionEnvironment::parse(
+                v.get("environment")
+                    .and_then(Json::as_str)
+                    .unwrap_or_default(),
+            ),
+            read_only: v.get("read_only").and_then(Json::as_bool).unwrap_or(false),
+            protect_production: v
+                .get("protect_production")
+                .and_then(Json::as_bool)
+                .unwrap_or(false),
+            sysdba: v.get("sysdba").and_then(Json::as_bool).unwrap_or(false),
+        },
         save_password: v
             .get("save_password")
             .and_then(Json::as_bool)
@@ -583,6 +611,67 @@ pub fn load_profiles() -> Vec<SavedProfile> {
 
 pub fn save_profiles(profiles: &[SavedProfile]) -> std::io::Result<()> {
     save_profiles_in(&config_dir(), profiles)
+}
+
+/// A portable list of connection settings. Keychain IDs and the saved
+/// password flag stay machine-local.
+pub fn export_connection_profiles(profiles: &[SavedProfile]) -> String {
+    let items = profiles
+        .iter()
+        .map(profile_to_json)
+        .map(|json| {
+            let Json::Obj(mut fields) = json else {
+                unreachable!("profile is an object");
+            };
+            fields.retain(|(key, _)| !matches!(key.as_str(), "id" | "save_password"));
+            Json::Obj(fields)
+        })
+        .collect();
+    to_json(&Json::Obj(vec![
+        ("format".into(), Json::Str("ora-connections-v1".into())),
+        ("connections".into(), Json::Arr(items)),
+    ]))
+}
+
+/// Read Ora's portable format or its older bare connection list. A
+/// transferred profile never points to another machine's keychain and
+/// must explicitly be opted into SYSDBA after import.
+pub fn import_connection_profiles(text: &str) -> Result<Vec<SavedProfile>, String> {
+    let value = parse_json(text)?;
+    let items = match &value {
+        Json::Arr(items) => items.as_slice(),
+        _ if value.get("format").and_then(Json::as_str) == Some("ora-connections-v1") => value
+            .get("connections")
+            .and_then(Json::as_arr)
+            .ok_or("Connections must be a JSON array")?,
+        _ => {
+            return Err(
+                "Unsupported connection file. Expected an Ora connections JSON file.".into(),
+            )
+        }
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let mut profile = profile_from_json(item)
+                .filter(|p| {
+                    !p.name.trim().is_empty()
+                        && !p.username.trim().is_empty()
+                        && !p.connect_string.trim().is_empty()
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "Connection {} needs a name, username, and connect string",
+                        index + 1
+                    )
+                })?;
+            profile.id = new_profile_id();
+            profile.save_password = false;
+            profile.access.sysdba = false;
+            Ok(profile)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -909,6 +998,39 @@ mod tests {
     }
 
     #[test]
+    fn import_preserves_environment_without_reusing_credentials() {
+        let original = SavedProfile {
+            id: "machine-keychain-id".into(),
+            name: "Production".into(),
+            username: "REPORTS".into(),
+            connect_string: "host:1521/prod".into(),
+            folder: "Oracle".into(),
+            access: ConnectionAccess {
+                read_only: true,
+                protect_production: true,
+                sysdba: true,
+                environment: ConnectionEnvironment::Production,
+            },
+            save_password: true,
+        };
+        let portable = export_connection_profiles(std::slice::from_ref(&original));
+        assert!(!portable.contains(&original.id));
+        assert!(!portable.contains("save_password"));
+        let imported = &import_connection_profiles(&portable).unwrap()[0];
+        assert_ne!(imported.id, original.id);
+        assert_eq!(imported.folder, original.folder);
+        assert!(imported.access.read_only);
+        assert!(imported.access.protect_production);
+        assert_eq!(
+            imported.access.environment,
+            ConnectionEnvironment::Production
+        );
+        assert!(!imported.access.sysdba);
+        assert!(!imported.save_password);
+        assert!(import_connection_profiles(&"[".repeat(80)).is_err());
+    }
+
+    #[test]
     fn appearance_round_trips_alongside_theme_preference() {
         let dir = scratch("appearance");
         let prefs = AppearancePrefs {
@@ -996,6 +1118,7 @@ mod tests {
                 username: "hr".to_string(),
                 connect_string: "localhost:1521/FREEPDB1".to_string(),
                 folder: "Work".into(),
+                access: Default::default(),
                 save_password: true,
             },
             SavedProfile {
@@ -1004,6 +1127,7 @@ mod tests {
                 username: "app".to_string(),
                 connect_string: "db:1521/PROD".to_string(),
                 folder: String::new(),
+                access: Default::default(),
                 save_password: false,
             },
         ];
@@ -1031,6 +1155,7 @@ mod tests {
             username: "hr".to_string(),
             connect_string: "db:1521/X".to_string(),
             folder: String::new(),
+            access: Default::default(),
             save_password: true,
         }];
         save_profiles_in(&dir, &profiles).unwrap();

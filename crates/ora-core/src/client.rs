@@ -55,6 +55,15 @@ pub trait DbClient: Send {
 
     fn is_connected(&self) -> bool;
 
+    /// Check that the established session still responds.
+    fn ping(&self) -> Result<(), DbError> {
+        if self.is_connected() {
+            Ok(())
+        } else {
+            Err(DbError::new("not connected"))
+        }
+    }
+
     /// Run a SELECT/WITH statement and fetch up to `max_rows` rows.
     /// Implementations strip a trailing `;`/`/` before executing (the thin
     /// driver rejects them) and set `QueryResult::truncated` when the cap

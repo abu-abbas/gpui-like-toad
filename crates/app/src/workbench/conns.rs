@@ -63,7 +63,7 @@ impl Workbench {
         };
         self.swap_active(ix);
         let prev = &self.parked[ix];
-        if !prev.is_open() && !prev.busy {
+        if !prev.is_open() && !prev.busy && !prev.connection_lost {
             self.parked.remove(ix);
         }
         cx.notify();
@@ -142,8 +142,8 @@ impl Workbench {
     /// Before a connect: keep the active connection open (parked) and give
     /// the new one a fresh slot with its own worker. A disconnected active
     /// slot is reused, so tabs bound to it work again after a reconnect.
-    pub(super) fn prepare_new_conn(&mut self) {
-        if !self.conn.is_open() && !self.conn.busy {
+    fn prepare_new_conn(&mut self, resuming: bool) {
+        if !self.conn.is_open() && !self.conn.busy && (!self.conn.connection_lost || resuming) {
             return;
         }
         // Keep the previous connection’s tab open while the new
@@ -210,6 +210,19 @@ impl Workbench {
     /// With no other connection the disconnected slot stays active, so
     /// the sidebar can offer to reconnect it.
     pub(super) fn after_disconnect(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_connection_results(cx);
+        if let Some(next) = self.parked.iter().rev().find(|c| c.is_open()).map(|c| c.id) {
+            self.activate_conn(next, cx);
+            // Stay on a tab of the connection now active, when there is one.
+            if !self.show_empty_workspace && self.active_tab_orphaned() {
+                if let Some(ix) = self.tabs.iter().rposition(|t| t.conn == Some(next)) {
+                    self.activate_tab(ix, cx);
+                }
+            }
+        }
+    }
+
+    pub(super) fn invalidate_connection_results(&mut self, cx: &mut Context<Self>) {
         let closed = self.conn.id;
         for tab in &mut self.tabs {
             if tab.conn == Some(closed) {
@@ -222,15 +235,6 @@ impl Workbench {
                     state.delegate_mut().set_result(QueryResult::default());
                     state.refresh(cx);
                 });
-            }
-        }
-        if let Some(next) = self.parked.iter().rev().find(|c| c.is_open()).map(|c| c.id) {
-            self.activate_conn(next, cx);
-            // Stay on a tab of the connection now active, when there is one.
-            if !self.show_empty_workspace && self.active_tab_orphaned() {
-                if let Some(ix) = self.tabs.iter().rposition(|t| t.conn == Some(next)) {
-                    self.activate_tab(ix, cx);
-                }
             }
         }
     }
@@ -308,7 +312,7 @@ impl Workbench {
                     .min_w(px(0.))
                     .truncate()
                     .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                    .line_height(px(LEADING_LABEL))
+                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
                     .child(pill_label),
@@ -322,7 +326,7 @@ impl Workbench {
                     .rounded(px(RADIUS_SM))
                     .bg(theme.secondary)
                     .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
-                    .line_height(px(LEADING_CAPTION))
+                    .line_height(crate::theme::ui_size(&theme, LEADING_CAPTION))
                     .text_color(theme.muted_foreground)
                     .child(format!("+{others}")),
             );
@@ -530,7 +534,7 @@ impl Workbench {
                     .child(
                         div()
                             .text_size(crate::theme::ui_size(&theme, FONT_HEADING_MD))
-                            .line_height(px(LEADING_HEADING_MD))
+                            .line_height(crate::theme::ui_size(&theme, LEADING_HEADING_MD))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child(format!("Disconnect {}?", prompt.label)),
@@ -538,7 +542,7 @@ impl Workbench {
                     .child(
                         div()
                             .text_size(crate::theme::ui_size(&theme, FONT_BODY))
-                            .line_height(px(LEADING_BODY))
+                            .line_height(crate::theme::ui_size(&theme, LEADING_BODY))
                             .text_color(theme.muted_foreground)
                             .child(text),
                     ),
@@ -653,6 +657,7 @@ impl Workbench {
                     name: "Demo database".to_string(),
                     username: "DEMO".to_string(),
                     connect_string: "demo".to_string(),
+                    access: Default::default(),
                 },
                 Password::Typed(SecretString::from(String::new())),
             )
@@ -686,6 +691,7 @@ impl Workbench {
                     },
                     username,
                     connect_string,
+                    access: self.connection_form.access,
                 },
                 password,
             )
@@ -722,6 +728,7 @@ impl Workbench {
             name: saved.name.clone(),
             username: saved.username.clone(),
             connect_string: saved.connect_string.clone(),
+            access: saved.access,
         };
         self.start_connect(
             profile,
@@ -742,7 +749,33 @@ impl Workbench {
         profile_ix: Option<usize>,
         cx: &mut Context<Self>,
     ) {
-        self.prepare_new_conn();
+        let resume = std::iter::once(&self.conn)
+            .chain(&self.parked)
+            .find(|conn| {
+                conn.connection_lost
+                    && !conn.busy
+                    && conn.last_connection.as_ref().is_some_and(|last| {
+                        last.demo == demo
+                            && last.profile_ix == profile_ix
+                            && last.profile.username == profile.username
+                            && last.profile.connect_string == profile.connect_string
+                            && last.profile.access.sysdba == profile.access.sysdba
+                    })
+            })
+            .map(|conn| conn.id);
+        if let Some(id) = resume {
+            self.activate_conn(id, cx);
+            if self
+                .tabs
+                .get(self.active_tab)
+                .is_none_or(|tab| tab.conn != Some(id))
+            {
+                if let Some(ix) = self.tabs.iter().rposition(|tab| tab.conn == Some(id)) {
+                    self.activate_tab(ix, cx);
+                }
+            }
+        }
+        self.prepare_new_conn(resume.is_some());
         if self.conn.db.is_none() {
             self.conn.db = Some(DbHandle::spawn());
         }
@@ -788,6 +821,7 @@ impl Workbench {
                     name,
                     username,
                     connect_string,
+                    access: self.connection_form.access,
                 },
                 password: self.dialog_password(cx),
             },
@@ -849,6 +883,7 @@ impl Workbench {
                     username: last.profile.username.clone(),
                     connect_string: last.profile.connect_string.clone(),
                     folder: String::new(),
+                    access: last.profile.access,
                     save_password: false,
                 };
                 self.connection_form.editing_profile = None;
