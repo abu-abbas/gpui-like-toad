@@ -1,5 +1,17 @@
 use super::*;
 
+fn result_tab_label(
+    label: impl Into<gpui_kit::SharedString>,
+    theme: &gpui_kit::component::Theme,
+) -> impl IntoElement {
+    div()
+        .text_size(theme::ui_size(theme, FONT_LABEL))
+        .line_height(theme::ui_size(theme, LEADING_LABEL))
+        .font_weight(FontWeight::MEDIUM)
+        .whitespace_nowrap()
+        .child(label.into())
+}
+
 impl Workbench {
     /// Full-area grid of a data tab, with pagination under it.
     pub(super) fn render_data_grid(
@@ -94,7 +106,7 @@ impl Workbench {
                 .flex_1()
                 .min_h(px(0.))
                 .overflow_hidden()
-                .child(Editor::new(&data.ddl).readonly(true).flex_1())
+                .child(query::sql_editor(&data.ddl).readonly(true))
                 .into_any_element(),
             _ => div()
                 .flex()
@@ -299,9 +311,11 @@ impl Workbench {
             ] {
                 strip = strip.child(
                     Button::new(label)
+                        .flex_none()
                         .small()
                         .ghost()
-                        .label(label)
+                        .accessibility_label(label)
+                        .child(result_tab_label(label, theme))
                         .selected(tab.results_tab == dest)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.active_tab_mut().results_tab = dest;
@@ -310,11 +324,14 @@ impl Workbench {
                 );
             }
             for ix in 0..tab.statement_results.len() {
+                let label = format!("Result {}", ix + 1);
                 strip = strip.child(
                     Button::new(("statement-result", ix))
+                        .flex_none()
                         .small()
                         .ghost()
-                        .label(format!("Result {}", ix + 1))
+                        .accessibility_label(label.clone())
+                        .child(result_tab_label(label, theme))
                         .selected(
                             ix == tab.result_ix
                                 && matches!(
@@ -440,15 +457,7 @@ impl Workbench {
                     .text_color(theme.muted_foreground)
                     .hover(|this| this.text_color(theme.foreground));
             }
-            bar = bar.child(
-                item.child(
-                    div()
-                        .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                        .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(label),
-                ),
-            );
+            bar = bar.child(item.child(result_tab_label(label, theme)));
         }
         bar = bar.child(div().flex_1());
         bar.child(
@@ -470,13 +479,7 @@ impl Workbench {
         Button::new("export")
             .ghost()
             .small()
-            .child(
-                div()
-                    .text_size(theme::ui_size(cx.theme(), FONT_LABEL))
-                    .line_height(crate::theme::ui_size(cx.theme(), LEADING_LABEL))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child("Export"),
-            )
+            .child(result_tab_label("Export", cx.theme()))
             .icon(IconName::Download)
             .disabled(!has_result)
             .dropdown_menu(move |menu, _, _| {

@@ -613,6 +613,31 @@ pub fn save_profiles(profiles: &[SavedProfile]) -> std::io::Result<()> {
     save_profiles_in(&config_dir(), profiles)
 }
 
+/// Local colors for sidebar folders. A color can outlive a folder becoming
+/// empty so it is restored when a connection is moved back into that folder.
+pub fn load_connection_folder_colors() -> BTreeMap<String, String> {
+    match read_json_file(&config_dir().join("connection-folder-colors.json")) {
+        Some(Json::Obj(entries)) => entries
+            .into_iter()
+            .filter_map(|(name, value)| Some((name, value.as_str()?.to_owned())))
+            .collect(),
+        _ => BTreeMap::new(),
+    }
+}
+
+pub fn save_connection_folder_colors(colors: &BTreeMap<String, String>) -> std::io::Result<()> {
+    write_json_file(
+        &config_dir(),
+        "connection-folder-colors.json",
+        &Json::Obj(
+            colors
+                .iter()
+                .map(|(folder, color)| (folder.clone(), Json::Str(color.clone())))
+                .collect(),
+        ),
+    )
+}
+
 /// A portable list of connection settings. Keychain IDs and the saved
 /// password flag stay machine-local.
 pub fn export_connection_profiles(profiles: &[SavedProfile]) -> String {
@@ -920,6 +945,8 @@ pub struct UpdatePrefs {
     pub last_checked: u64,
     /// Version the user dismissed the banner for; not announced again.
     pub dismissed_version: Option<String>,
+    /// Most recent app version launched on this machine.
+    pub last_launched_version: Option<String>,
 }
 
 impl Default for UpdatePrefs {
@@ -928,6 +955,7 @@ impl Default for UpdatePrefs {
             auto_check: true,
             last_checked: 0,
             dismissed_version: None,
+            last_launched_version: None,
         }
     }
 }
@@ -949,6 +977,10 @@ pub fn load_update_prefs_in(dir: &Path) -> UpdatePrefs {
             .get("update_dismissed_version")
             .and_then(Json::as_str)
             .map(str::to_string),
+        last_launched_version: v
+            .get("update_last_launched_version")
+            .and_then(Json::as_str)
+            .map(str::to_string),
     }
 }
 
@@ -966,6 +998,10 @@ pub fn save_update_prefs_in(dir: &Path, prefs: &UpdatePrefs) -> std::io::Result<
     match &prefs.dismissed_version {
         Some(v) => pairs.insert("update_dismissed_version".into(), Json::Str(v.clone())),
         None => pairs.remove("update_dismissed_version"),
+    };
+    match &prefs.last_launched_version {
+        Some(v) => pairs.insert("update_last_launched_version".into(), Json::Str(v.clone())),
+        None => pairs.remove("update_last_launched_version"),
     };
     write_json_file(
         dir,
@@ -1272,6 +1308,7 @@ mod tests {
             auto_check: false,
             last_checked: 1_700_000_000,
             dismissed_version: Some("0.2.0".into()),
+            last_launched_version: Some("0.1.0".into()),
         };
         save_update_prefs_in(&dir, &prefs).unwrap();
         assert_eq!(load_update_prefs_in(&dir), prefs);

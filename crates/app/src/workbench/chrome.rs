@@ -52,17 +52,14 @@ impl Workbench {
                 .flex_col()
                 .min_w(px(0.))
                 .child(
-                    div().p(px(SPACE_2)).child(
-                        Button::new("back-to-connections")
-                            .small()
-                            .ghost()
-                            .icon(IconName::ChevronLeft)
-                            .label("Connections")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.leave_whats_new();
-                                cx.notify();
-                            })),
-                    ),
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .h(px(TAB_BAR_HEIGHT))
+                        .px(px(SPACE_2))
+                        .bg(theme.tab_bar)
+                        .child(self.render_whats_new_tab(theme, cx)),
                 )
                 .child(self.render_whats_new_page(theme, cx))
                 .into_any_element();

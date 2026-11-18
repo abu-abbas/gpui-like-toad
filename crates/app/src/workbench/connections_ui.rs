@@ -1,5 +1,33 @@
 use super::*;
 
+#[derive(Clone)]
+struct ProfileDrag {
+    id: String,
+    name: String,
+}
+
+impl Render for ProfileDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .px(px(SPACE_2))
+            .py(px(SPACE_1))
+            .rounded(px(RADIUS_MD))
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .child(self.name.clone())
+    }
+}
+
+fn folder_color(name: &str, theme: &gpui_kit::component::Theme) -> Hsla {
+    theme::ACCENTS
+        .iter()
+        .find(|(label, _, _)| *label == name)
+        .map_or(theme.muted_foreground, |(_, light, dark)| {
+            gpui_kit::rgb(if theme.is_dark() { *dark } else { *light }).into()
+        })
+}
+
 impl Workbench {
     pub(super) fn render_connection_explorer(
         &self,
@@ -14,8 +42,6 @@ impl Workbench {
             .min_h(px(0.))
             .overflow_hidden()
             .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.border)
             .child(self.render_session_card(theme, cx))
             .child(
                 div().px(px(SPACE_2)).flex_none().child(
@@ -130,24 +156,34 @@ impl Workbench {
             .flex_col()
             .min_h(px(0.))
             .overflow_y_scroll();
+        let drop_highlight = theme.accent;
         tree = tree.child(
-            sidebar::tree_button(Button::new("saved-connections"), keyboard, cx)
-                .small()
-                .w_full()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.side_conn_folded = !this.side_conn_folded;
-                    cx.notify();
+            div()
+                .id("connections-root-drop")
+                .rounded(px(RADIUS_MD))
+                .drag_over::<ProfileDrag>(move |style, _, _, _| style.bg(drop_highlight))
+                .on_drop(cx.listener(|this, drag: &ProfileDrag, _, cx| {
+                    this.move_profile_to_folder(&drag.id, "", cx);
                 }))
-                .child(connection_tree_label(
-                    if folded {
-                        IconName::ChevronRight
-                    } else {
-                        IconName::ChevronDown
-                    },
-                    "My Connections".into(),
-                    Some(profiles),
-                    theme,
-                )),
+                .child(
+                    sidebar::tree_button(Button::new("saved-connections"), keyboard, cx)
+                        .small()
+                        .w_full()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.side_conn_folded = !this.side_conn_folded;
+                            cx.notify();
+                        }))
+                        .child(connection_tree_label(
+                            if folded {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            },
+                            "My Connections".into(),
+                            Some(profiles),
+                            theme,
+                        )),
+                ),
         );
         if folded {
             return tree;
@@ -171,30 +207,81 @@ impl Workbench {
         for (folder, entries) in folders {
             let name = folder.to_owned();
             let collapsed = self.collapsed_connection_folders.contains(&name);
+            let drop_folder = name.clone();
+            let menu_folder = name.clone();
+            let view = cx.entity();
+            let color = folder_color(
+                self.connection_folder_colors
+                    .get(folder)
+                    .map_or("", String::as_str),
+                theme,
+            );
             branches = branches.child(
-                sidebar::tree_button(
-                    Button::new(format!("connection-folder-{name}")),
-                    keyboard,
-                    cx,
-                )
-                .small()
-                .w_full()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.collapsed_connection_folders.remove(&name) {
-                        this.collapsed_connection_folders.insert(name.clone());
-                    }
-                    cx.notify();
-                }))
-                .child(connection_tree_label(
-                    if collapsed {
-                        IconName::Folder
-                    } else {
-                        IconName::FolderOpen
-                    },
-                    folder.to_owned(),
-                    None,
-                    theme,
-                )),
+                div()
+                    .id(format!("folder-drop-{folder}"))
+                    .rounded(px(RADIUS_MD))
+                    .drag_over::<ProfileDrag>(move |style, _, _, _| style.bg(drop_highlight))
+                    .on_drop(cx.listener(move |this, drag: &ProfileDrag, _, cx| {
+                        this.move_profile_to_folder(&drag.id, &drop_folder, cx);
+                    }))
+                    .context_menu(move |menu, window, cx| {
+                        let folder = menu_folder.clone();
+                        let view = view.clone();
+                        menu.submenu("Folder color", window, cx, move |mut menu, _, cx| {
+                            let current = view
+                                .read(cx)
+                                .connection_folder_colors
+                                .get(&folder)
+                                .map_or("", String::as_str);
+                            for label in std::iter::once("Default")
+                                .chain(theme::ACCENTS.iter().map(|(label, _, _)| *label))
+                            {
+                                let value = if label == "Default" { "" } else { label };
+                                let view = view.clone();
+                                let folder = folder.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(label)
+                                        .icon(
+                                            Icon::new(IconName::Folder)
+                                                .text_color(folder_color(value, cx.theme())),
+                                        )
+                                        .checked(current == value)
+                                        .on_click(move |_, _, cx| {
+                                            view.update(cx, |this, cx| {
+                                                this.set_connection_folder_color(&folder, value, cx)
+                                            })
+                                        }),
+                                );
+                            }
+                            menu
+                        })
+                    })
+                    .child(
+                        sidebar::tree_button(
+                            Button::new(format!("connection-folder-{folder}")),
+                            keyboard,
+                            cx,
+                        )
+                        .small()
+                        .w_full()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.collapsed_connection_folders.remove(&name) {
+                                this.collapsed_connection_folders.insert(name.clone());
+                            }
+                            cx.notify();
+                        }))
+                        .child(tree_label(
+                            if collapsed {
+                                IconName::Folder
+                            } else {
+                                IconName::FolderOpen
+                            },
+                            folder.to_owned(),
+                            None,
+                            color,
+                            theme,
+                        )),
+                    ),
             );
             if !collapsed {
                 branches = branches.child(
@@ -251,11 +338,28 @@ impl Workbench {
             .find_open_conn(Some(ix), false)
             .and_then(|id| self.conn_by_id(id))
             .is_some_and(|c| c.session.is_some());
+        let environment = profile.access.environment;
+        let environment_color = match environment {
+            ConnectionEnvironment::Development => theme.success,
+            ConnectionEnvironment::Staging => theme.warning,
+            ConnectionEnvironment::Production => theme.danger,
+            ConnectionEnvironment::None => theme.muted_foreground,
+        };
         let focused = self.focused_profile_id.as_deref() == Some(profile.id.as_str());
         let profile_id = profile.id.clone();
         let view = cx.entity();
         div()
             .id(("profile-row", ix))
+            .on_drag(
+                ProfileDrag {
+                    id: profile.id.clone(),
+                    name: profile.name.clone(),
+                },
+                |drag, _, _, cx| {
+                    let preview = drag.clone();
+                    cx.new(|_| preview)
+                },
+            )
             .flex()
             .items_center()
             .flex_none()
@@ -338,9 +442,27 @@ impl Workbench {
                             None,
                             theme,
                         )
-                        .when(active || focused, |row| row.text_color(theme.primary))
-                        .children(ui_helpers::environment_badge(profile.access, theme))
-                        .when(connected, |row| row.child(status_dot(theme.success))),
+                        .when(active || focused, |row| {
+                            row.font_weight(FontWeight::SEMIBOLD)
+                        })
+                        .when(environment != ConnectionEnvironment::None, |row| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(theme::ui_size(theme, FONT_CAPTION))
+                                    .text_color(if connected {
+                                        environment_color
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(environment.label()),
+                            )
+                        })
+                        .when(
+                            connected && environment == ConnectionEnvironment::None,
+                            |row| row.child(status_dot(theme.success)),
+                        ),
                     ),
             )
     }
@@ -696,13 +818,23 @@ fn connection_tree_label(
     count: Option<usize>,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::Div {
+    tree_label(symbol, text, count, theme.muted_foreground, theme)
+}
+
+fn tree_label(
+    symbol: IconName,
+    text: String,
+    count: Option<usize>,
+    icon_color: Hsla,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
     div()
         .flex()
         .items_center()
         .w_full()
         .min_w(px(0.))
         .gap(px(6.))
-        .child(icon(symbol, 14., theme.muted_foreground))
+        .child(icon(symbol, 14., icon_color))
         .child(
             div()
                 .flex_1()

@@ -363,6 +363,7 @@ pub struct Workbench {
     rail: RailPanel,
     sidebar_compact: bool,
     collapsed_connection_folders: HashSet<String>,
+    connection_folder_colors: std::collections::BTreeMap<String, String>,
     focused_profile_id: Option<String>,
     settings: settings::SettingsState,
     profiles: Vec<SavedProfile>,
@@ -449,6 +450,7 @@ impl Workbench {
             rail: RailPanel::Connections,
             sidebar_compact: false,
             collapsed_connection_folders: HashSet::new(),
+            connection_folder_colors: store::load_connection_folder_colors(),
             focused_profile_id: None,
             settings,
             profiles: store::load_profiles(),
@@ -478,7 +480,7 @@ impl Workbench {
             messages: Vec::new(),
             catalog,
             completion,
-            updates: UpdateState::load(),
+            updates: UpdateState::load(cx),
             _subscriptions: vec![appearance_sub, settings_search_sub],
         }
     }
@@ -544,21 +546,21 @@ impl Render for Workbench {
             .key_context("Workbench")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &RunQuery, _, cx| {
-                if !this.settings.open {
+                if !this.settings.open && !this.update_check_open() {
                     this.run(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &RunCurrent, _, cx| {
-                if !this.settings.open {
+                if !this.settings.open && !this.update_check_open() {
                     this.run_current(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings(window, cx);
             }))
-            .on_action(
-                cx.listener(|this, _action: &CheckForUpdates, _, cx| this.check_updates(true, cx)),
-            )
+            .on_action(cx.listener(|this, _action: &CheckForUpdates, window, cx| {
+                this.open_update_check(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| {
                 this.rail = RailPanel::Connections;
                 this.open_new_connection(window, cx);
@@ -596,28 +598,57 @@ impl Render for Workbench {
                     .flex_1()
                     .min_h(px(0.))
                     .child(self.render_navigation(window.last_input_was_keyboard(), &theme, cx))
-                    .child(div().flex().flex_1().min_w(px(0.)).child(
-                        if self.conn.session.is_some() {
-                            // Each layout starts with the same explorer width.
-                            // The resizable group otherwise scales both panels
-                            // when the navigation rail changes width.
+                    .child(div().flex().flex_1().min_w(px(0.)).child({
+                        let connected = self.conn.session.is_some();
+                        let secondary = match self.rail {
+                            RailPanel::Connections if connected => Some(
+                                self.render_connection_explorer(&theme, cx)
+                                    .into_any_element(),
+                            ),
+                            RailPanel::Connections => None,
+                            RailPanel::Favorites | RailPanel::History => Some(
+                                self.render_history_panel(
+                                    self.rail == RailPanel::Favorites,
+                                    &theme,
+                                    cx,
+                                )
+                                .into_any_element(),
+                            ),
+                        };
+                        let main = if connected {
+                            self.render_main(&theme, cx).into_any_element()
+                        } else {
+                            self.render_disconnected(&theme, cx).into_any_element()
+                        };
+                        if let Some(secondary) = secondary {
+                            // Use the same resizable column for all three sidebar pages.
                             h_resizable(if self.sidebar_compact {
                                 "compact-workbench-explorer"
                             } else {
                                 "expanded-workbench-explorer"
                             })
+                            .with_handle_appearance(Rc::new(|handle, window, cx| {
+                                use gpui_kit::base::ResizeHandleState;
+                                if handle.state() == ResizeHandleState::Idle {
+                                    Some(div().into_any_element())
+                                } else {
+                                    gpui_kit::component::resizable::resize_handle_appearance()(
+                                        handle, window, cx,
+                                    )
+                                }
+                            }))
                             .child(
                                 resizable_panel()
                                     .size(px(EXPLORER_WIDTH))
                                     .size_range(px(190.)..px(440.))
-                                    .child(self.render_connection_explorer(&theme, cx)),
+                                    .child(secondary),
                             )
-                            .child(resizable_panel().child(self.render_main(&theme, cx)))
+                            .child(resizable_panel().child(main))
                             .into_any_element()
                         } else {
-                            self.render_disconnected(&theme, cx).into_any_element()
-                        },
-                    )),
+                            main
+                        }
+                    })),
             )
             .child(self.render_status_bar(&theme))
             .when(self.connection_form.show_connection_form, |this| {
@@ -635,6 +666,7 @@ impl Render for Workbench {
             .when(self.settings.open, |this| {
                 this.child(self.render_settings_dialog(&theme, cx))
             })
+            .children(self.render_update_check(&theme, cx))
     }
 }
 

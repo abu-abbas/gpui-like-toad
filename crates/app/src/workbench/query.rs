@@ -1,5 +1,14 @@
 use super::*;
 
+pub(super) fn sql_editor(state: &Entity<EditorState>) -> Editor {
+    Editor::new(state)
+        .bordered(false)
+        .rounded_none()
+        .flex_1()
+        .px(px(SPACE_2))
+        .py(px(SPACE_1))
+}
+
 impl Workbench {
     pub(super) fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -28,7 +37,7 @@ impl Workbench {
                     );
                 }
             }))
-            .child(Editor::new(&self.active_tab().editor).flex_1())
+            .child(sql_editor(&self.active_tab().editor))
     }
 }
 

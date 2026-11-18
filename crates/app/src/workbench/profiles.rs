@@ -147,6 +147,51 @@ impl Workbench {
         }
     }
 
+    pub(super) fn move_profile_to_folder(
+        &mut self,
+        id: &str,
+        folder: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self
+            .profiles
+            .iter()
+            .position(|profile| profile.id == id && profile.folder != folder)
+        else {
+            return;
+        };
+        let mut updated = self.profiles.clone();
+        updated[ix].folder = folder.to_owned();
+        match store::save_profiles(&updated) {
+            Ok(()) => {
+                self.profiles = updated;
+                self.collapsed_connection_folders.remove(folder);
+                self.side_conn_folded = false;
+            }
+            Err(err) => self.push_message(format!("Could not move connection: {err}")),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn set_connection_folder_color(
+        &mut self,
+        folder: &str,
+        color: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let mut colors = self.connection_folder_colors.clone();
+        if color.is_empty() {
+            colors.remove(folder);
+        } else {
+            colors.insert(folder.to_owned(), color.to_owned());
+        }
+        match store::save_connection_folder_colors(&colors) {
+            Ok(()) => self.connection_folder_colors = colors,
+            Err(err) => self.push_message(format!("Could not save folder color: {err}")),
+        }
+        cx.notify();
+    }
+
     /// The connect string the dialog describes: the TNS field as typed,
     /// or `host:port/service` built from the Basic fields. Empty when the
     /// required field (TNS text or host) is blank.

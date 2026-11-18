@@ -10,15 +10,27 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gpui_kit::component::progress::Progress;
 use gpui_kit::component::spinner::Spinner;
 use ora_core::store::{self, UpdatePrefs};
 use ora_core::update::{self, ReleaseInfo};
 
 use super::*;
 
+enum CheckDialog {
+    Checking,
+    UpToDate,
+    Available,
+    Failed(String),
+}
+
 pub(super) struct UpdateState {
     prefs: UpdatePrefs,
     checking: bool,
+    check_generation: u64,
+    dialog: Option<CheckDialog>,
+    dialog_focus: gpui_kit::FocusHandle,
+    previous_focus: Option<gpui_kit::FocusHandle>,
     /// Newest release, when newer than this build.
     available: Option<ReleaseInfo>,
     /// Banner visible (hidden by "Nanti" until the next newer version).
@@ -26,6 +38,8 @@ pub(super) struct UpdateState {
     /// "What's new" tab exists (next to Home) and is the shown page.
     tab_open: bool,
     tab_active: bool,
+    installed_notes_selected: bool,
+    installed_notes: Option<Result<ReleaseInfo, String>>,
     /// Result of the last manual check, shown in Settings.
     status: Option<String>,
     /// Download of the release file in progress / its outcome.
@@ -38,14 +52,20 @@ pub(super) struct UpdateState {
 }
 
 impl UpdateState {
-    pub(super) fn load() -> Self {
+    pub(super) fn load(cx: &mut Context<Workbench>) -> Self {
         Self {
             prefs: store::load_update_prefs(),
             checking: false,
+            check_generation: 0,
+            dialog: None,
+            dialog_focus: cx.focus_handle(),
+            previous_focus: None,
             available: None,
             banner: false,
             tab_open: false,
             tab_active: false,
+            installed_notes_selected: false,
+            installed_notes: None,
             status: None,
             downloading: false,
             download_note: None,
@@ -78,10 +98,10 @@ fn http_agent() -> ureq::Agent {
 }
 
 /// Blocking fetch of the latest release; run on a background thread.
-fn fetch_latest() -> Result<Option<ReleaseInfo>, String> {
+fn fetch_release(url: &str) -> Result<ReleaseInfo, String> {
     let agent = http_agent();
     let mut resp = agent
-        .get(update::LATEST_RELEASE_API)
+        .get(url)
         .header("Accept", "application/vnd.github+json")
         .call()
         .map_err(|e| e.to_string())?;
@@ -91,7 +111,7 @@ fn fetch_latest() -> Result<Option<ReleaseInfo>, String> {
         .limit(2 * 1024 * 1024)
         .read_to_string()
         .map_err(|e| e.to_string())?;
-    Ok(update::parse_release(&body))
+    update::parse_release(&body).ok_or_else(|| "Could not read the latest release.".to_string())
 }
 
 /// Where downloads go: `~/Downloads` when it exists, else the temp dir.
@@ -307,28 +327,51 @@ impl Workbench {
         if let Ok(root) = gpui_updater_core::current_install_root() {
             gpui_updater_core::install::remove_leftovers(&root);
         }
+        self.show_installed_update(cx);
         let u = &self.updates;
         if update::should_auto_check(u.prefs.auto_check, u.prefs.last_checked, now_secs()) {
-            self.check_updates(false, cx);
+            self.check_updates(cx);
         }
     }
 
-    /// `manual`: report "up to date" / errors and ignore a dismissed version.
-    pub(super) fn check_updates(&mut self, manual: bool, cx: &mut Context<Self>) {
-        if self.updates.checking {
+    fn show_installed_update(&mut self, cx: &mut Context<Self>) {
+        let current_text = env!("CARGO_PKG_VERSION");
+        let Some(current) = update::Version::parse(current_text) else {
+            return;
+        };
+        let previous = self.updates.prefs.last_launched_version.as_deref();
+        if previous == Some(current_text) {
             return;
         }
-        self.updates.checking = true;
-        if manual {
-            self.updates.status = Some("Mengecek update...".to_string());
+        let upgraded = previous.and_then(update::Version::parse).map_or_else(
+            // Legacy builds did not record their running version. A prior
+            // check distinguishes an existing installation from a clean one.
+            || self.updates.prefs.last_checked != 0,
+            |version| version < current,
+        );
+        self.updates.prefs.last_launched_version = Some(current_text.to_string());
+        self.save_update_prefs();
+        if !upgraded {
+            return;
         }
-        let task = cx
-            .background_executor()
-            .spawn(async move { fetch_latest() });
+        self.updates.installed_notes_selected = true;
+        self.open_whats_new();
+
+        let task = cx.background_executor().spawn(async move {
+            let url = format!(
+                "https://api.github.com/repos/abu-abbas/gpui-like-toad/releases/tags/v{current}"
+            );
+            let release = fetch_release(&url)?;
+            if release.version == current {
+                Ok(release)
+            } else {
+                Err("The release does not match the installed version.".into())
+            }
+        });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |this, cx| {
-                this.finish_update_check(result, manual);
+                this.updates.installed_notes = Some(result);
                 cx.notify();
             });
         })
@@ -336,40 +379,226 @@ impl Workbench {
         cx.notify();
     }
 
-    fn finish_update_check(&mut self, result: Result<Option<ReleaseInfo>, String>, manual: bool) {
+    pub(super) fn open_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let u = &mut self.updates;
+        if u.dialog.is_none() {
+            u.previous_focus = window.focused(cx);
+        }
+        u.dialog = Some(CheckDialog::Checking);
+        u.status = None;
+        window.focus(&u.dialog_focus, cx);
+        self.check_updates(cx);
+        cx.notify();
+    }
+
+    fn check_updates(&mut self, cx: &mut Context<Self>) {
+        if self.updates.checking {
+            return;
+        }
+        self.updates.checking = true;
+        self.updates.check_generation += 1;
+        let generation = self.updates.check_generation;
+        let task = cx
+            .background_executor()
+            .spawn(async move { fetch_release(update::LATEST_RELEASE_API) });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |this, cx| {
+                if this.updates.check_generation == generation {
+                    this.finish_update_check(result);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_update_check(&mut self, result: Result<ReleaseInfo, String>) {
         let u = &mut self.updates;
         u.checking = false;
+        let manual = matches!(u.dialog, Some(CheckDialog::Checking));
         match result {
             Err(err) => {
-                // Silent at startup (offline is normal); retry next launch.
                 if manual {
-                    u.status = Some(format!("Gagal mengecek update: {err}"));
+                    u.status = Some(format!("Could not check for updates. {err}"));
+                    u.dialog = Some(CheckDialog::Failed(err));
                 }
             }
             Ok(release) => {
                 u.prefs.last_checked = now_secs();
-                let newer = release.and_then(|r| update::newer_than(r, env!("CARGO_PKG_VERSION")));
-                match newer {
+                match update::newer_than(release, env!("CARGO_PKG_VERSION")) {
                     Some(r) => {
                         let dismissed = u.prefs.dismissed_version.as_deref() == Some(&r.tag);
-                        u.status = Some(format!("Versi {} tersedia.", r.version));
+                        u.status = Some(format!("Version {} is available.", r.version));
                         u.banner = manual || !dismissed;
-                        // Like VS Code: the tab appears by itself, without
-                        // taking over the page the user is on.
                         u.tab_open |= u.banner;
                         u.available = Some(r);
+                        if manual {
+                            u.dialog = Some(CheckDialog::Available);
+                        }
                     }
                     None => {
                         u.available = None;
                         u.banner = false;
                         if manual {
-                            u.status = Some("Sudah versi terbaru.".to_string());
+                            u.status = Some("You're up to date.".to_string());
+                            u.dialog = Some(CheckDialog::UpToDate);
                         }
                     }
                 }
                 self.save_update_prefs();
             }
         }
+    }
+
+    fn close_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let u = &mut self.updates;
+        if matches!(u.dialog.take(), Some(CheckDialog::Checking)) {
+            // The blocking HTTP request can finish on its thread. Ignore its
+            // response so a later check owns the result and the UI.
+            u.checking = false;
+            u.check_generation += 1;
+        }
+        let focus = u
+            .previous_focus
+            .take()
+            .unwrap_or_else(|| self.focus_handle.clone());
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    pub(super) fn update_check_open(&self) -> bool {
+        self.updates.dialog.is_some()
+    }
+
+    pub(super) fn render_update_check(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        let u = &self.updates;
+        let dialog = u.dialog.as_ref()?;
+        let checking = matches!(dialog, CheckDialog::Checking);
+        let available = matches!(dialog, CheckDialog::Available);
+        let version = env!("CARGO_PKG_VERSION");
+        let (title, detail) = match dialog {
+            CheckDialog::Checking => ("Checking for updates…", None),
+            CheckDialog::UpToDate => (
+                "You're up to date",
+                Some(format!("{} {version} is the latest version.", app_name!())),
+            ),
+            CheckDialog::Available => (
+                "Update available",
+                u.available.as_ref().map(|release| {
+                    format!(
+                        "Version {} is available. You're running {version}.",
+                        release.version
+                    )
+                }),
+            ),
+            CheckDialog::Failed(err) => ("Couldn't check for updates", Some(err.clone())),
+        };
+        Some(
+            div()
+                .id("update-check-overlay")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .justify_center()
+                .items_center()
+                .bg(gpui_kit::black().opacity(0.25))
+                .child(
+                    div()
+                        .id("update-check-dialog")
+                        .track_focus(&u.dialog_focus)
+                        .on_key_down(cx.listener(
+                            |this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                                if event.keystroke.key == "escape" {
+                                    cx.stop_propagation();
+                                    this.close_update_check(window, cx);
+                                }
+                            },
+                        ))
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .max_w(px(380.))
+                        .rounded(px(RADIUS_MD))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.popover)
+                        .shadow_lg()
+                        .gap(px(SPACE_3))
+                        .p(px(SPACE_4))
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(SPACE_3))
+                                .items_start()
+                                .child(crate::about::app_icon(40.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(SPACE_2))
+                                        .child(
+                                            div()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(theme.popover_foreground)
+                                                .child(title),
+                                        )
+                                        .children(detail.map(|text| body_text(text, theme)))
+                                        .when(checking, |content| {
+                                            content.child(
+                                                Progress::new("check-update-progress")
+                                                    .loading(true)
+                                                    .small()
+                                                    .accessibility_label("Checking for updates"),
+                                            )
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(SPACE_2))
+                                .child(
+                                    Button::new("update-check-close")
+                                        .small()
+                                        .label(if checking || available {
+                                            "Cancel"
+                                        } else {
+                                            "OK"
+                                        })
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.close_update_check(window, cx)
+                                        })),
+                                )
+                                .when(available, |actions| {
+                                    actions.child(
+                                        Button::new("update-check-details")
+                                            .small()
+                                            .primary()
+                                            .label("View Update")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.close_update_check(window, cx);
+                                                if this.settings.open {
+                                                    this.close_settings(window, cx);
+                                                }
+                                                this.open_available_update();
+                                                cx.notify();
+                                            })),
+                                    )
+                                }),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn save_update_prefs(&mut self) {
@@ -417,8 +646,9 @@ impl Workbench {
                     Button::new("check-updates")
                         .label("Check for Updates")
                         .icon(IconName::RefreshCw)
-                        .disabled(u.checking)
-                        .on_click(cx.listener(|this, _, _, cx| this.check_updates(true, cx))),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_update_check(window, cx)),
+                        ),
                 ),
             );
         if let Some(status) = &u.status {
@@ -448,6 +678,11 @@ impl Workbench {
         self.updates.tab_active = true;
         // Suspend query shortcuts while release notes are active.
         self.show_empty_workspace = true;
+    }
+
+    fn open_available_update(&mut self) {
+        self.updates.installed_notes_selected = false;
+        self.open_whats_new();
     }
 
     /// Minimal one-line banner above the whole window when a newer release
@@ -492,7 +727,7 @@ impl Workbench {
                         .primary()
                         .small()
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.open_whats_new();
+                            this.open_available_update();
                             cx.notify();
                         })),
                 )
@@ -607,6 +842,43 @@ impl Workbench {
             .overflow_y_scroll()
             .gap(px(SPACE_2))
             .p(px(SPACE_6));
+        if self.updates.installed_notes_selected {
+            let current = env!("CARGO_PKG_VERSION");
+            let url =
+                format!("https://github.com/abu-abbas/gpui-like-toad/releases/tag/v{current}");
+            return page
+                .child(
+                    div()
+                        .text_size(theme::ui_size(theme, FONT_HEADING_XL))
+                        .line_height(theme::ui_size(theme, LEADING_HEADING_XL))
+                        .child(format!("What's new in {current}")),
+                )
+                .child(
+                    div().flex().child(
+                        Button::new("installed-release-page")
+                            .small()
+                            .label("Open release page")
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    ),
+                )
+                .children(match &self.updates.installed_notes {
+                    Some(Ok(release)) if !release.notes.trim().is_empty() => release
+                        .notes
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .map(|line| body_text(line.to_string(), theme))
+                        .collect::<Vec<_>>(),
+                    Some(Ok(_)) => vec![caption_text(
+                        "No release notes were published.".into(),
+                        theme,
+                    )],
+                    Some(Err(_)) => {
+                        vec![caption_text("Couldn't load release notes.".into(), theme)]
+                    }
+                    None => vec![caption_text("Loading release notes…".into(), theme)],
+                })
+                .into_any_element();
+        }
         let Some(release) = self.updates.available.as_ref() else {
             return page
                 .child(

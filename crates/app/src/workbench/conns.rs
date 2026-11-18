@@ -301,7 +301,7 @@ impl Workbench {
         let busy = self.conn.busy;
         let view = cx.entity();
         let mut pill = Button::new("conn-pill")
-            .outline()
+            .ghost()
             .small()
             .flex_none()
             .max_w(px(240.))

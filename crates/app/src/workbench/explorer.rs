@@ -32,7 +32,10 @@ impl Workbench {
                     .child(select_trigger(label, theme).flex_1()),
             )
         } else {
-            Button::new(id).small().child(select_trigger(label, theme))
+            Button::new(id)
+                .ghost()
+                .small()
+                .child(select_trigger(label, theme))
         };
         button
             .disabled(self.conn.schemas.is_empty())
