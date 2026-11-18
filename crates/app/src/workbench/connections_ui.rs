@@ -338,6 +338,13 @@ impl Workbench {
             .find_open_conn(Some(ix), false)
             .and_then(|id| self.conn_by_id(id))
             .is_some_and(|c| c.session.is_some());
+        let environment = profile.access.environment;
+        let environment_color = match environment {
+            ConnectionEnvironment::Development => theme.success,
+            ConnectionEnvironment::Staging => theme.warning,
+            ConnectionEnvironment::Production => theme.danger,
+            ConnectionEnvironment::None => theme.muted_foreground,
+        };
         let focused = self.focused_profile_id.as_deref() == Some(profile.id.as_str());
         let profile_id = profile.id.clone();
         let view = cx.entity();
@@ -435,9 +442,27 @@ impl Workbench {
                             None,
                             theme,
                         )
-                        .when(active || focused, |row| row.text_color(theme.primary))
-                        .children(ui_helpers::environment_badge(profile.access, theme))
-                        .when(connected, |row| row.child(status_dot(theme.success))),
+                        .when(active || focused, |row| {
+                            row.font_weight(FontWeight::SEMIBOLD)
+                        })
+                        .when(environment != ConnectionEnvironment::None, |row| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(theme::ui_size(theme, FONT_CAPTION))
+                                    .text_color(if connected {
+                                        environment_color
+                                    } else {
+                                        theme.muted_foreground
+                                    })
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(environment.label()),
+                            )
+                        })
+                        .when(
+                            connected && environment == ConnectionEnvironment::None,
+                            |row| row.child(status_dot(theme.success)),
+                        ),
                     ),
             )
     }

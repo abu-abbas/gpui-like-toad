@@ -49,6 +49,10 @@ impl Render for About {
     }
 }
 
+pub(crate) fn app_icon(size: f32) -> impl IntoElement {
+    img(APP_ICON).size(px(size)).flex_none()
+}
+
 pub(crate) fn content(theme: &gpui_kit::component::Theme) -> impl IntoElement {
     div()
         .flex()
@@ -58,7 +62,7 @@ pub(crate) fn content(theme: &gpui_kit::component::Theme) -> impl IntoElement {
         .text_center()
         .gap(px(14.))
         .p(px(20.))
-        .child(img(APP_ICON).size(px(76.)).flex_none())
+        .child(app_icon(76.))
         .child(
             div()
                 .text_size(crate::theme::ui_size(theme, 22.))

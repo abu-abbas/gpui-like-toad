@@ -945,6 +945,8 @@ pub struct UpdatePrefs {
     pub last_checked: u64,
     /// Version the user dismissed the banner for; not announced again.
     pub dismissed_version: Option<String>,
+    /// Most recent app version launched on this machine.
+    pub last_launched_version: Option<String>,
 }
 
 impl Default for UpdatePrefs {
@@ -953,6 +955,7 @@ impl Default for UpdatePrefs {
             auto_check: true,
             last_checked: 0,
             dismissed_version: None,
+            last_launched_version: None,
         }
     }
 }
@@ -974,6 +977,10 @@ pub fn load_update_prefs_in(dir: &Path) -> UpdatePrefs {
             .get("update_dismissed_version")
             .and_then(Json::as_str)
             .map(str::to_string),
+        last_launched_version: v
+            .get("update_last_launched_version")
+            .and_then(Json::as_str)
+            .map(str::to_string),
     }
 }
 
@@ -991,6 +998,10 @@ pub fn save_update_prefs_in(dir: &Path, prefs: &UpdatePrefs) -> std::io::Result<
     match &prefs.dismissed_version {
         Some(v) => pairs.insert("update_dismissed_version".into(), Json::Str(v.clone())),
         None => pairs.remove("update_dismissed_version"),
+    };
+    match &prefs.last_launched_version {
+        Some(v) => pairs.insert("update_last_launched_version".into(), Json::Str(v.clone())),
+        None => pairs.remove("update_last_launched_version"),
     };
     write_json_file(
         dir,
@@ -1297,6 +1308,7 @@ mod tests {
             auto_check: false,
             last_checked: 1_700_000_000,
             dismissed_version: Some("0.2.0".into()),
+            last_launched_version: Some("0.1.0".into()),
         };
         save_update_prefs_in(&dir, &prefs).unwrap();
         assert_eq!(load_update_prefs_in(&dir), prefs);

@@ -480,7 +480,7 @@ impl Workbench {
             messages: Vec::new(),
             catalog,
             completion,
-            updates: UpdateState::load(),
+            updates: UpdateState::load(cx),
             _subscriptions: vec![appearance_sub, settings_search_sub],
         }
     }
@@ -546,21 +546,21 @@ impl Render for Workbench {
             .key_context("Workbench")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &RunQuery, _, cx| {
-                if !this.settings.open {
+                if !this.settings.open && !this.update_check_open() {
                     this.run(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &RunCurrent, _, cx| {
-                if !this.settings.open {
+                if !this.settings.open && !this.update_check_open() {
                     this.run_current(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings(window, cx);
             }))
-            .on_action(
-                cx.listener(|this, _action: &CheckForUpdates, _, cx| this.check_updates(true, cx)),
-            )
+            .on_action(cx.listener(|this, _action: &CheckForUpdates, window, cx| {
+                this.open_update_check(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &NewConnection, window, cx| {
                 this.rail = RailPanel::Connections;
                 this.open_new_connection(window, cx);
@@ -647,6 +647,7 @@ impl Render for Workbench {
             .when(self.settings.open, |this| {
                 this.child(self.render_settings_dialog(&theme, cx))
             })
+            .children(self.render_update_check(&theme, cx))
     }
 }
 
