@@ -21,6 +21,7 @@ impl Workbench {
                 div().px(px(SPACE_2)).pt(px(SPACE_1)).flex_none().child(
                     Button::new("explorer-new-sql")
                         .small()
+                        .h(px(explorer::EXPLORER_CONTROL_HEIGHT))
                         .w_full()
                         .icon(IconName::SquarePen)
                         .label("New SQL editor")

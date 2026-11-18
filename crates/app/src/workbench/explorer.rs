@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) const EXPLORER_CONTROL_HEIGHT: f32 = 32.;
+
 impl Workbench {
     pub(super) fn schema_picker(
         &self,
@@ -16,7 +18,9 @@ impl Workbench {
                 theme,
             ))
             .small()
-            .when(id == "schema-select", |button| button.w_full())
+            .when(id == "schema-select", |button| {
+                button.w_full().h(px(EXPLORER_CONTROL_HEIGHT))
+            })
             .disabled(self.conn.schemas.is_empty())
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.scrollable(true).max_h(px(360.)).min_w(px(220.));
@@ -57,7 +61,9 @@ impl Workbench {
                 ),
                 theme,
             ))
+            .small()
             .w_full()
+            .h(px(EXPLORER_CONTROL_HEIGHT))
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.min_w(px(220.));
                 for (category, count) in &counts {
@@ -159,7 +165,7 @@ impl Workbench {
                         Button::new("explorer-quick-open")
                             .ghost()
                             .icon(IconName::Search)
-                            .size(px(32.))
+                            .size(px(EXPLORER_CONTROL_HEIGHT))
                             .flex_none()
                             .tooltip("Quick Open (Ctrl/Cmd+P)")
                             .on_click(cx.listener(|this, _, window, cx| {
