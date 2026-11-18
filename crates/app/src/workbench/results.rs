@@ -53,7 +53,13 @@ impl Workbench {
                 .on_action(
                     cx.listener(|this, _: &gpui_kit::component::input::Copy, _, cx| {
                         let state = this.active_tab().table_state.read(cx);
-                        if let Some(text) = state.delegate().selected_tsv(state.selected_row()) {
+                        let grid = state.delegate();
+                        // Picked cells copy just those cells, as in
+                        // Navicat; rows picked on the gutter copy rows.
+                        let text = grid
+                            .picked_cells_text()
+                            .or_else(|| grid.selected_tsv(state.selected_row()));
+                        if let Some(text) = text {
                             cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
                         }
                     }),
@@ -74,7 +80,26 @@ impl Workbench {
                 ))
                 .on_action(cx.listener(
                     |this, _: &gpui_kit::component::input::Paste, window, cx| {
-                        if this.focused_insert_cell(window, cx).is_none() {
+                        if this.focused_insert_cell(window, cx).is_some() {
+                            return;
+                        }
+                        // Picked cells take the paste as edits; otherwise
+                        // the clipboard becomes new rows.
+                        let picked = this
+                            .active_tab()
+                            .table_state
+                            .read(cx)
+                            .delegate()
+                            .has_cell_selection();
+                        if picked
+                            && this
+                                .active_tab()
+                                .data
+                                .as_ref()
+                                .is_some_and(|d| d.kind == ObjectKind::Table)
+                        {
+                            this.paste_into_cells(cx);
+                        } else {
                             this.paste_grid_rows(None, window, cx);
                         }
                     },

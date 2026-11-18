@@ -25,6 +25,8 @@ use ora_core::{FilterCondition, FilterOp, QueryResult, Value, ROWID_COLUMN};
 
 use crate::theme::{FONT_GRID, LEADING_GRID};
 
+mod cell_range;
+
 /// Rows per grid page (design-system pagination: "10 / page").
 pub const PAGE_SIZE: usize = 10;
 
@@ -50,6 +52,10 @@ pub struct ResultsDelegate {
     row_numbers: bool,
     selected_rows: std::collections::BTreeSet<usize>,
     selection_anchor: usize,
+    /// Picked cell range on data grids (see `cell_range`): where the
+    /// pick started and its far corner, as (result row, shown column).
+    cell_anchor: Option<cell_range::CellPos>,
+    cell_focus: Option<cell_range::CellPos>,
     page: usize,
     page_size: usize,
     /// Table column of the last right mouse-down on a cell: the table's
@@ -59,6 +65,9 @@ pub struct ResultsDelegate {
     on_quick_filter: Option<QuickFilterHandler>,
     /// Set on editable data tabs: called for double click / "Edit nilai".
     on_edit: Option<EditHandler>,
+    /// Set on editable data tabs: the context menu's "Paste" into the
+    /// picked cells.
+    on_cell_paste: Option<PasteHandler>,
     /// Result column holding each row's ROWID (never shown), if fetched.
     rowid_col: Option<usize>,
     /// Edited cells by (ROWID, column name), tinted until commit.
@@ -79,6 +88,8 @@ pub struct CellEditRequest {
 }
 
 pub type EditHandler = Rc<dyn Fn(CellEditRequest, &mut Window, &mut App)>;
+
+pub type PasteHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// Where an edited cell stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,11 +199,14 @@ impl ResultsDelegate {
             row_numbers: false,
             selected_rows: Default::default(),
             selection_anchor: 0,
+            cell_anchor: None,
+            cell_focus: None,
             page: 0,
             page_size: PAGE_SIZE,
             right_col: None,
             on_quick_filter: None,
             on_edit: None,
+            on_cell_paste: None,
             rowid_col: None,
             table_name: None,
             pending: HashMap::new(),
@@ -221,6 +235,12 @@ impl ResultsDelegate {
     /// Let cells be edited (double click or the context menu).
     pub fn with_cell_edit(mut self, handler: EditHandler) -> Self {
         self.on_edit = Some(handler);
+        self
+    }
+
+    /// Offer "Paste" (into the picked cells) in the cell context menu.
+    pub fn with_cell_paste(mut self, handler: PasteHandler) -> Self {
+        self.on_cell_paste = Some(handler);
         self
     }
 
@@ -362,6 +382,7 @@ impl ResultsDelegate {
     /// right away; the caller refreshes the table state.
     pub fn set_hidden(&mut self, hidden: HashSet<String>) {
         self.hidden = hidden;
+        self.clear_cell_selection();
         self.rebuild_columns();
     }
 
@@ -407,6 +428,7 @@ impl ResultsDelegate {
     pub fn set_result(&mut self, result: QueryResult) {
         self.selected_rows.clear();
         self.selection_anchor = 0;
+        self.clear_cell_selection();
         self.numeric = numeric_columns(&result);
         self.rowid_col = result.columns.iter().position(|c| c.name == ROWID_COLUMN);
         self.result = result;
@@ -421,15 +443,11 @@ impl ResultsDelegate {
                 self.visible
                     .iter()
                     .map(|&column| {
-                        let text = row
-                            .get(column)
-                            .map(ora_core::copy::plain)
-                            .unwrap_or_default();
-                        if text.contains(['\t', '\r', '\n', '"']) {
-                            format!("\"{}\"", text.replace('"', "\"\""))
-                        } else {
-                            text
-                        }
+                        tsv_field(
+                            row.get(column)
+                                .map(ora_core::copy::plain)
+                                .unwrap_or_default(),
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join("\t"),
@@ -465,6 +483,7 @@ impl ResultsDelegate {
     }
 
     pub fn set_page(&mut self, page: usize) {
+        self.clear_cell_selection();
         self.page = page.min(self.total_pages().saturating_sub(1));
     }
 
@@ -508,6 +527,16 @@ impl ResultsDelegate {
     /// Map a visible row index to the underlying result row.
     fn absolute_row(&self, row_ix: usize) -> usize {
         self.page * self.page_size + row_ix
+    }
+}
+
+/// One field of a spreadsheet-style copy: quoted when it holds a tab,
+/// line break or quote, so a paste reads it back as one field.
+fn tsv_field(text: String) -> String {
+    if text.contains(['\t', '\r', '\n', '"']) {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    } else {
+        text
     }
 }
 
@@ -644,14 +673,43 @@ impl TableDelegate for ResultsDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        let pickable = self.row_numbers && !self.is_insert_row(row_ix);
+        let abs_row = self.absolute_row(row_ix);
+        // Shown-column position of this cell; `None` on the gutter.
+        let vis = self
+            .data_col(col_ix)
+            .map(|_| col_ix - usize::from(self.row_numbers));
         let cell = div()
             .w_full()
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |table, _, _, _| {
-                    table.delegate_mut().right_col = Some(col_ix);
+                cx.listener(move |table, _, _, cx| {
+                    let data = table.delegate_mut();
+                    data.right_col = Some(col_ix);
+                    // Right click outside the pick picks that cell, so
+                    // the menu's Paste goes where the user clicked.
+                    if let (true, Some(vis)) = (pickable, vis) {
+                        if !data.cell_picked(abs_row, vis) {
+                            data.pick_cell((abs_row, vis), false);
+                            cx.notify();
+                        }
+                    }
                 }),
             )
+            .when(pickable, |cell| {
+                cell.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |table, event: &gpui_kit::MouseDownEvent, _, cx| {
+                        let data = table.delegate_mut();
+                        match vis {
+                            Some(vis) => data.pick_cell((abs_row, vis), event.modifiers.shift),
+                            // The gutter picks whole rows, not cells.
+                            None => data.clear_cell_selection(),
+                        }
+                        cx.notify();
+                    }),
+                )
+            })
             .text_size(crate::theme::ui_size(theme, FONT_GRID))
             .line_height(crate::theme::ui_size(theme, LEADING_GRID))
             .truncate();
@@ -672,7 +730,6 @@ impl TableDelegate for ResultsDelegate {
                     }),
             );
         }
-        let abs_row = self.absolute_row(row_ix);
         let Some(data_col) = self.data_col(col_ix) else {
             return cell
                 .text_right()
@@ -687,10 +744,15 @@ impl TableDelegate for ResultsDelegate {
             .and_then(|r| self.pending.get(&(r.rowid.clone(), r.column.clone())))
             .copied();
         let theme = cx.theme();
-        let cell = match mark {
-            Some(CellMark::Staged) => cell.bg(theme.warning.opacity(0.28)),
-            Some(CellMark::Applied) => cell.bg(theme.primary.opacity(0.22)),
-            None => cell,
+        let picked = vis.is_some_and(|vis| pickable && self.cell_picked(abs_row, vis));
+        let cell = match (picked, mark) {
+            // A picked cell shows the pick; an edit mark stays visible as
+            // a stronger tint of its own color.
+            (true, Some(CellMark::Staged)) => cell.bg(theme.warning.opacity(0.55)),
+            (true, _) => cell.bg(theme.primary.opacity(0.38)),
+            (false, Some(CellMark::Staged)) => cell.bg(theme.warning.opacity(0.28)),
+            (false, Some(CellMark::Applied)) => cell.bg(theme.primary.opacity(0.22)),
+            (false, None) => cell,
         };
         let cell = match (self.on_edit.clone(), request) {
             (Some(handler), Some(request)) => cell.on_mouse_down(
@@ -743,6 +805,15 @@ impl TableDelegate for ResultsDelegate {
                     handler(request.clone(), window, cx);
                 }),
             );
+            if let Some(paste) = self.on_cell_paste.clone() {
+                let label = match self.picked_cell_count() {
+                    0 | 1 => "Paste".to_string(),
+                    n => format!("Paste ke {n} cell"),
+                };
+                menu = menu.item(
+                    PopupMenuItem::new(label).on_click(move |_, window, cx| paste(window, cx)),
+                );
+            }
             if self.on_quick_filter.is_some() {
                 menu = menu.separator();
             }
@@ -794,6 +865,7 @@ impl TableDelegate for ResultsDelegate {
         };
         self.selected_rows.clear();
         self.selection_anchor = 0;
+        self.clear_cell_selection();
         match sort {
             ColumnSort::Ascending => self
                 .result
