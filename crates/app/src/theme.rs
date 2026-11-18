@@ -1,9 +1,9 @@
 //! DB Explorer design-system theme: violet accent scale, light/dark
 //! palettes, density tokens, and the Light/Dark/System preference.
 //!
-//! All color values come verbatim from the v0.1 design-system spec
-//! (§1). Hover/active shades not listed in the spec are derived from the
-//! violet scale and noted as such. Density numbers (§3) are the single
+//! The light palette and violet scale follow the v0.1 design-system spec.
+//! Ora Dark uses layered charcoal surfaces and the same semantic accents.
+//! Density numbers (§3) are the single
 //! source of truth for component heights, spacing, radius, and font sizes
 //! used by the workbench layout.
 //!
@@ -461,10 +461,28 @@ fn apply_light(theme: &mut Theme) {
 }
 
 fn apply_dark(theme: &mut Theme) {
-    theme.background = hex(0x09090B);
-    theme.foreground = hex(0xFAFAFA);
-    theme.popover = hex(0x18181B);
-    theme.popover_foreground = hex(0xFAFAFA);
+    let workspace = hex(0x1B1B1B);
+    let stripe = hex(0x202020);
+    let panel = hex(0x242424);
+    let control = hex(0x2D2D2D);
+    let hover = hex(0x353535);
+    let pressed = hex(0x424242);
+    let divider = hex(0x383838);
+    let text = hex(0xE9E9E9);
+    let subtle_text = hex(0xB2B2B2);
+
+    let editor = &mut std::sync::Arc::make_mut(&mut theme.highlight_theme).style;
+    editor.editor_background = Some(hex(0x1E1E1E));
+    editor.editor_gutter_background = Some(panel);
+    editor.editor_foreground = Some(text);
+    editor.editor_active_line = Some(hex(0x252525));
+    editor.editor_line_number = Some(subtle_text);
+    editor.editor_active_line_number = Some(text);
+
+    theme.background = workspace;
+    theme.foreground = text;
+    theme.popover = control;
+    theme.popover_foreground = text;
     theme.primary = hex(VIOLET_400);
     theme.primary_hover = hex(VIOLET_300);
     theme.primary_active = hex(VIOLET_500);
@@ -473,24 +491,24 @@ fn apply_dark(theme: &mut Theme) {
     theme.button_primary_hover = hex(VIOLET_300);
     theme.button_primary_active = hex(VIOLET_500);
     theme.button_primary_foreground = hex(0xFFFFFF);
-    theme.button = hex(0x18181B);
-    theme.button_hover = hex(0x27272A);
-    theme.button_active = hex(0x3F3F46);
-    theme.button_foreground = hex(0xFAFAFA);
-    theme.secondary = hex(0x27272A);
-    theme.secondary_hover = hex(0x3F3F46);
-    theme.secondary_active = hex(0x52525B);
-    theme.secondary_foreground = hex(0xFAFAFA);
-    theme.button_secondary = hex(0x27272A);
-    theme.button_secondary_hover = hex(0x3F3F46);
-    theme.button_secondary_active = hex(0x52525B);
-    theme.button_secondary_foreground = hex(0xFAFAFA);
-    theme.muted = hex(0x27272A);
-    theme.muted_foreground = hex(0xA1A1AA);
+    theme.button = control;
+    theme.button_hover = hover;
+    theme.button_active = pressed;
+    theme.button_foreground = text;
+    theme.secondary = control;
+    theme.secondary_hover = hover;
+    theme.secondary_active = pressed;
+    theme.secondary_foreground = text;
+    theme.button_secondary = control;
+    theme.button_secondary_hover = hover;
+    theme.button_secondary_active = pressed;
+    theme.button_secondary_foreground = text;
+    theme.muted = control;
+    theme.muted_foreground = subtle_text;
     theme.accent = hex(0x30264F);
     theme.accent_foreground = hex(0xE9DDFF);
-    theme.border = hex(0x3F3F46);
-    theme.input = hex(0x3F3F46);
+    theme.border = divider;
+    theme.input = divider;
     theme.ring = hex(VIOLET_300);
     theme.danger = hex(0xF87171);
     theme.danger_hover = hex(0xEF4444);
@@ -527,49 +545,49 @@ fn apply_dark(theme: &mut Theme) {
     theme.link = hex(VIOLET_300);
     theme.link_hover = hex(VIOLET_200);
     theme.link_active = hex(VIOLET_400);
-    theme.sidebar = hex(0x16161A);
-    theme.sidebar_foreground = hex(0xFAFAFA);
-    theme.sidebar_border = hex(0x3F3F46);
+    theme.sidebar = panel;
+    theme.sidebar_foreground = text;
+    theme.sidebar_border = divider;
     theme.sidebar_accent = hex(0x30264F);
     theme.sidebar_accent_foreground = hex(0xE9DDFF);
     theme.sidebar_primary = hex(VIOLET_400);
     theme.sidebar_primary_foreground = hex(0xFFFFFF);
-    theme.tab = hex(0x27272A);
-    theme.tab_active = hex(0x18181B);
-    theme.tab_active_foreground = hex(0xFAFAFA);
-    theme.tab_foreground = hex(0xA1A1AA);
-    theme.tab_bar = hex(0x09090B);
-    theme.tab_bar_segmented = hex(0x27272A);
-    theme.table = hex(0x09090B);
-    theme.table_head = hex(0x27272A);
-    theme.table_head_foreground = hex(0xFAFAFA);
-    theme.table_even = hex(0x18181B);
-    theme.table_hover = hex(0x30264F);
-    theme.table_active = hex(0x30264F);
+    theme.tab = panel;
+    theme.tab_active = control;
+    theme.tab_active_foreground = text;
+    theme.tab_foreground = subtle_text;
+    theme.tab_bar = workspace;
+    theme.tab_bar_segmented = control;
+    theme.table = workspace;
+    theme.table_head = panel;
+    theme.table_head_foreground = text;
+    theme.table_even = stripe;
+    theme.table_hover = hover;
+    theme.table_active = theme.accent;
     theme.table_active_border = hex(VIOLET_300);
     theme.table_row_border = gpui_kit::hsla(0., 0., 0., 0.);
-    theme.table_foot = hex(0x27272A);
-    theme.table_foot_foreground = hex(0xFAFAFA);
-    theme.list_hover = hex(0x30264F);
-    theme.list_active = hex(0x30264F);
+    theme.table_foot = panel;
+    theme.table_foot_foreground = text;
+    theme.list_hover = hover;
+    theme.list_active = theme.accent;
     theme.list_active_border = hex(VIOLET_300);
-    theme.list_even = hex(0x18181B);
-    theme.list_head = hex(0x27272A);
-    theme.selection = hex(0x30264F);
+    theme.list_even = stripe;
+    theme.list_head = panel;
+    theme.selection = theme.accent;
     theme.caret = hex(VIOLET_300);
-    theme.scrollbar = hex(0x27272A);
-    theme.scrollbar_thumb = hex(0x3F3F46);
-    theme.scrollbar_thumb_hover = hex(0x52525B);
-    theme.title_bar = hex(0x09090B);
-    theme.title_bar_border = hex(0x3F3F46);
-    theme.status_bar = hex(0x09090B);
-    theme.status_bar_border = hex(0x3F3F46);
-    theme.window_border = hex(0x3F3F46);
-    theme.skeleton = hex(0x27272A);
+    theme.scrollbar = panel;
+    theme.scrollbar_thumb = pressed;
+    theme.scrollbar_thumb_hover = hex(0x565656);
+    theme.title_bar = control;
+    theme.title_bar_border = divider;
+    theme.status_bar = panel;
+    theme.status_bar_border = divider;
+    theme.window_border = divider;
+    theme.skeleton = control;
     theme.drag_border = hex(VIOLET_300);
     theme.drop_target = hex(VIOLET_300);
-    theme.group_box = hex(0x18181B);
-    theme.group_box_foreground = hex(0xFAFAFA);
+    theme.group_box = panel;
+    theme.group_box_foreground = text;
     theme.progress_bar = hex(VIOLET_400);
 }
 
