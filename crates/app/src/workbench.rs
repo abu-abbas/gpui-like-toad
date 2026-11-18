@@ -412,8 +412,7 @@ pub struct Workbench {
 impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let connection_form = ConnectionForm::new(window, cx);
-        let search_input =
-            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Filter…"));
+        let search_input = cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Filter…"));
         let catalog = Rc::new(RefCell::new(Catalog::new()));
         let workbench = cx.weak_entity();
         let completion = Rc::new(SqlCompletionProvider::new(
@@ -609,15 +608,22 @@ impl Render for Workbench {
                     .child(self.render_navigation(&theme, cx))
                     .child(div().flex().flex_1().min_w(px(0.)).child(
                         if self.conn.session.is_some() {
-                            h_resizable("workbench-explorer")
-                                .child(
-                                    resizable_panel()
-                                        .size(px(EXPLORER_WIDTH))
-                                        .size_range(px(190.)..px(440.))
-                                        .child(self.render_connection_explorer(&theme, cx)),
-                                )
-                                .child(resizable_panel().child(self.render_main(&theme, cx)))
-                                .into_any_element()
+                            // Each layout starts with the same explorer width.
+                            // The resizable group otherwise scales both panels
+                            // when the navigation rail changes width.
+                            h_resizable(if self.sidebar_compact {
+                                "compact-workbench-explorer"
+                            } else {
+                                "expanded-workbench-explorer"
+                            })
+                            .child(
+                                resizable_panel()
+                                    .size(px(EXPLORER_WIDTH))
+                                    .size_range(px(190.)..px(440.))
+                                    .child(self.render_connection_explorer(&theme, cx)),
+                            )
+                            .child(resizable_panel().child(self.render_main(&theme, cx)))
+                            .into_any_element()
                         } else {
                             self.render_disconnected(&theme, cx).into_any_element()
                         },
