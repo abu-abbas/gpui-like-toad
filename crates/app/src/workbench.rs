@@ -76,6 +76,7 @@ mod results;
 mod results_grid;
 mod settings;
 mod sidebar;
+mod splash;
 mod tabs;
 mod ui_helpers;
 mod updates;
@@ -362,6 +363,7 @@ impl QueryTab {
 }
 
 pub struct Workbench {
+    splash_visible: bool,
     connection_form: ConnectionForm,
     rail: RailPanel,
     sidebar_compact: bool,
@@ -450,6 +452,7 @@ impl Workbench {
         });
 
         Workbench {
+            splash_visible: false,
             connection_form,
             rail: RailPanel::Connections,
             sidebar_compact: false,
@@ -533,6 +536,9 @@ impl Workbench {
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        if self.splash_visible {
+            return splash::screen(&theme).into_any_element();
+        }
         // Match the app's default layout at 13px and pass changes through to
         // GPUI controls whose text and row dimensions use rem units.
         window.set_rem_size(theme::ui_size(&theme, 16.));
@@ -662,6 +668,7 @@ impl Render for Workbench {
                 this.child(self.render_settings_dialog(&theme, cx))
             })
             .children(self.render_update_check(&theme, cx))
+            .into_any_element()
     }
 }
 
