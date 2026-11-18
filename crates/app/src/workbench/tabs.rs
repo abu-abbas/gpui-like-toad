@@ -6,10 +6,7 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Home stays pinned on the left and "+" on the right; the tabs in
-        // between scroll sideways (mouse wheel or trackpad) when they no
-        // longer fit. `flex_none` keeps the bar at its full height: as a
-        // flex child it used to shrink when the content below was tall.
+        // Tabs scroll sideways while the add button stays pinned on the right.
         let view = cx.weak_entity();
         let scroll = self.tab_scroll.clone();
         let was_overflowing = self.tab_overflow;
@@ -31,7 +28,7 @@ impl Workbench {
             .overflow_x_scroll()
             .track_scroll(&self.tab_scroll);
         for (ix, tab) in self.tabs.iter().enumerate() {
-            let active = !self.show_home && ix == self.active_tab;
+            let active = !self.show_empty_workspace && ix == self.active_tab;
             strip = strip.child(self.render_query_tab(ix, tab, active, theme, cx));
         }
         // Always the last tab, after every query/data tab.
@@ -69,7 +66,6 @@ impl Workbench {
             .bg(theme.tab_bar)
             .border_b_1()
             .border_color(theme.border)
-            .child(self.render_home_tab(theme, cx))
             .child(strip)
             .child(
                 div()
@@ -118,56 +114,6 @@ impl Workbench {
                 }
                 bar.child(controls)
             })
-    }
-
-    fn render_home_tab(
-        &self,
-        theme: &gpui_kit::component::Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let active = self.show_home && !self.whats_new_active();
-        let mut tab = div()
-            .id("tab-home")
-            .flex()
-            .flex_row()
-            .flex_none()
-            .items_center()
-            .h(px(28.))
-            .gap(px(SPACE_1))
-            .px(px(SPACE_2))
-            .rounded(px(RADIUS_MD))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.show_home = true;
-                this.leave_whats_new();
-                cx.notify();
-            }));
-        if active {
-            tab = tab
-                .bg(theme.tab_active)
-                .border_1()
-                .border_color(theme.border)
-                .text_color(theme.tab_active_foreground);
-        } else {
-            tab = tab
-                .text_color(theme.tab_foreground)
-                .hover(|this| this.bg(theme.secondary));
-        }
-        tab.child(icon(
-            IconName::House,
-            14.,
-            if active {
-                theme.primary
-            } else {
-                theme.muted_foreground
-            },
-        ))
-        .child(
-            div()
-                .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                .line_height(px(LEADING_LABEL))
-                .font_weight(FontWeight::MEDIUM)
-                .child("Home"),
-        )
     }
 
     fn render_query_tab(
@@ -344,14 +290,13 @@ impl Workbench {
         tab.conn = self.conn.is_open().then_some(self.conn.id);
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
-        self.show_home = false;
+        self.show_empty_workspace = false;
         self.leave_whats_new();
         self.tab_scroll.scroll_to_item(self.active_tab);
         cx.notify();
     }
 
-    /// Every tab can be closed; only Home stays. Closing the last one
-    /// goes back to Home.
+    /// Closing the last tab returns to the empty workspace.
     fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix >= self.tabs.len() {
             return;
@@ -359,7 +304,7 @@ impl Workbench {
         self.tabs.remove(ix);
         if self.tabs.is_empty() {
             self.active_tab = 0;
-            self.show_home = true;
+            self.show_empty_workspace = true;
         } else if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
         } else if ix < self.active_tab {
@@ -372,7 +317,7 @@ impl Workbench {
 
     /// Close every tab for which `close(ix, tab)` is true. The active tab
     /// stays active when it survives; otherwise the nearest survivor is
-    /// shown (or Home when none is left).
+    /// shown (or the workspace is empty when none is left).
     pub(super) fn close_tabs_where(
         &mut self,
         close: impl Fn(usize, &QueryTab, &App) -> bool,
@@ -394,7 +339,7 @@ impl Workbench {
         });
         if self.tabs.is_empty() {
             self.active_tab = 0;
-            self.show_home = true;
+            self.show_empty_workspace = true;
         } else if let Some(pos) = self.tabs.iter().position(|t| Some(t.id) == active_id) {
             self.active_tab = pos;
         } else {
@@ -418,7 +363,7 @@ impl Workbench {
             return;
         }
         self.active_tab = ix;
-        self.show_home = false;
+        self.show_empty_workspace = false;
         self.leave_whats_new();
         self.tab_scroll.scroll_to_item(ix);
         self.follow_tab_conn(cx);
@@ -442,7 +387,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.show_home {
+        if self.show_empty_workspace {
             self.new_tab_with_sql(sql, window, cx);
             return;
         }

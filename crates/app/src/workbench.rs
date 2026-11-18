@@ -66,7 +66,6 @@ mod conns;
 mod data_tab;
 mod db_events;
 mod explorer;
-mod home;
 mod profiles;
 mod query;
 mod quick_open;
@@ -78,7 +77,6 @@ mod ui_helpers;
 mod updates;
 use cell_edit::CellEditor;
 use data_tab::{DataTab, DataView};
-use home::HomeViewState;
 use profiles::{ConnectionForm, FORM_INCOMPLETE};
 use quick_open::QuickOpen;
 use ui_helpers::{
@@ -116,10 +114,6 @@ const ORPHAN_TAB: &str =
     "Koneksi tab ini sudah ditutup. Pilih koneksi lewat tombol koneksi di kanan atas.";
 
 const MAX_MESSAGES_SHOWN: usize = 30;
-
-const WELCOME_SQL: &str = "-- Klik Demo di kiri untuk coba tanpa database,\n\
-     -- atau isi koneksi lalu Connect.\n\
-     SELECT * FROM employees";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ResultsTab {
@@ -212,9 +206,6 @@ struct ConnState {
     current_schema: Option<String>,
     selected_object: Option<String>,
     objects: Vec<SchemaObject>,
-    /// Connect was started from a tab bound to another connection: open a
-    /// new tab for this one once it connects.
-    open_tab_on_connect: bool,
     /// DML ran since the last commit/rollback (best effort: DDL commits
     /// on its own and is not tracked). Shown in the connection switcher.
     uncommitted: bool,
@@ -250,7 +241,6 @@ impl ConnState {
             current_schema: None,
             selected_object: None,
             objects: Vec::new(),
-            open_tab_on_connect: false,
             uncommitted: false,
             status: "Belum terhubung.".to_string(),
             catalog: Catalog::new(),
@@ -354,12 +344,13 @@ pub struct Workbench {
     rail: RailPanel,
     sidebar_compact: bool,
     collapsed_connection_folders: HashSet<String>,
+    focused_profile_id: Option<String>,
     settings: settings::SettingsState,
     profiles: Vec<SavedProfile>,
     history: Vec<HistoryEntry>,
     tabs: Vec<QueryTab>,
     active_tab: usize,
-    /// Stand-in used while every tab is closed (only Home is left), so
+    /// Stand-in used while every tab is closed (the workspace is empty), so
     /// `active_tab()` never indexes an empty `tabs`. Never shown.
     scratch_tab: QueryTab,
     /// Horizontal scroll of the tab strip, so tabs past the right edge
@@ -369,7 +360,7 @@ pub struct Workbench {
     plan_collapsed: bool,
     /// Messages tab scroll; follows the newest message.
     messages_scroll: ScrollHandle,
-    show_home: bool,
+    show_empty_workspace: bool,
     /// Demo database is offered in the UI only with ORA_DEMO set (kept for
     /// screenshots and tests; real use connects to Oracle).
     show_demo: bool,
@@ -392,7 +383,6 @@ pub struct Workbench {
     disconnect_prompt: Option<conns::DisconnectPrompt>,
     /// The Info panel under data / script tabs is folded to its header.
     info_collapsed: bool,
-    home_view: HomeViewState,
     side_conn_folded: bool,
     /// Keeps shortcuts (Quick Open, Run) working when no input has focus.
     focus_handle: gpui_kit::FocusHandle,
@@ -421,14 +411,6 @@ impl Workbench {
                 });
             }),
         ));
-        let first_tab = QueryTab::new(
-            1,
-            "Query 1".to_string(),
-            WELCOME_SQL,
-            &completion,
-            window,
-            cx,
-        );
         let scratch_tab = QueryTab::new(0, String::new(), "", &completion, window, cx);
 
         // Follow OS appearance changes while the preference is System.
@@ -447,20 +429,20 @@ impl Workbench {
             rail: RailPanel::Connections,
             sidebar_compact: false,
             collapsed_connection_folders: HashSet::new(),
+            focused_profile_id: None,
             settings,
             profiles: store::load_profiles(),
             history: store::load_history(),
-            tabs: vec![first_tab],
+            tabs: Vec::new(),
             active_tab: 0,
             scratch_tab,
             tab_scroll: ScrollHandle::new(),
             tab_overflow: false,
             plan_collapsed: false,
             messages_scroll: ScrollHandle::new(),
-            // Start on the Navicat-style Home page.
-            show_home: true,
+            show_empty_workspace: true,
             show_demo: std::env::var_os("ORA_DEMO").is_some(),
-            next_tab_id: 1,
+            next_tab_id: 0,
             conn: ConnState::new(1),
             parked: Vec::new(),
             next_conn_id: 1,
@@ -471,7 +453,6 @@ impl Workbench {
             cell_editor: None,
             disconnect_prompt: None,
             info_collapsed: false,
-            home_view: HomeViewState::default(),
             side_conn_folded: false,
             focus_handle: cx.focus_handle(),
             messages: Vec::new(),

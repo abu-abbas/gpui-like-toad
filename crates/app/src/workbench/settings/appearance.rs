@@ -57,19 +57,11 @@ impl Workbench {
             .flex_col()
             .gap(px(SPACE_2))
             .child(form_label("Visual style", theme))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .rounded(px(10.))
-                    .bg(theme.table_even)
-                    .child(setting_row(
-                        "Mode",
-                        "System follows your OS appearance",
-                        mode,
-                        theme,
-                    ))
-                    .child(setting_row(
+            .child(setting_group(
+                theme,
+                [
+                    setting_row("Mode", "System follows your OS appearance", mode, theme),
+                    setting_row(
                         if dark { "Dark theme" } else { "Light theme" },
                         if dark {
                             "Themes for dark mode"
@@ -78,58 +70,52 @@ impl Workbench {
                         },
                         self.render_theme_picker(dark, cx),
                         theme,
-                    ))
-                    .child(setting_row(
+                    ),
+                    setting_row(
                         "Accent",
                         "",
                         self.render_accent_picker(&prefs.accent, theme, cx),
                         theme,
-                    ))
-                    .child(setting_row(
+                    ),
+                    setting_row(
                         "Background",
                         "",
                         color_value(theme.background, theme),
                         theme,
-                    ))
-                    .child(setting_row(
+                    ),
+                    setting_row(
                         "Foreground",
                         "",
                         color_value(theme.foreground, theme),
                         theme,
-                    ))
-                    .child(setting_row(
-                        "UI font",
-                        "",
-                        body_text("System".into(), theme),
-                        theme,
-                    )),
-            )
+                    ),
+                    setting_row("UI font", "", body_text("System".into(), theme), theme),
+                ],
+            ))
             .child(div().mt(px(SPACE_2)).child(form_label("Advanced", theme)))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .rounded(px(10.))
-                    .bg(theme.table_even)
-                    .child(setting_row(
+            .child(setting_group(
+                theme,
+                [
+                    setting_row(
                         "UI font size",
                         "Base size for menus, lists and the data grid",
                         self.render_size_picker(false, prefs.ui_font_size, cx),
                         theme,
-                    ))
-                    .child(setting_row(
+                    ),
+                    setting_row(
                         "SQL editor font size",
                         "JetBrains Mono in the SQL editor",
                         self.render_size_picker(true, prefs.sql_font_size, cx),
                         theme,
-                    ))
-                    .child(setting_row(
+                    ),
+                    setting_row(
                         "Reduce motion",
                         "Limit animations across the workbench",
                         motion,
                         theme,
-                    )),
-            )
+                    ),
+                ],
+            ))
     }
 
     fn render_theme_picker(&self, dark: bool, cx: &mut Context<Self>) -> impl IntoElement {
@@ -285,6 +271,20 @@ impl Workbench {
     }
 }
 
+fn setting_group(
+    theme: &gpui_kit::component::Theme,
+    rows: impl IntoIterator<Item = gpui_kit::Div>,
+) -> gpui_kit::Div {
+    div()
+        .flex()
+        .flex_col()
+        .rounded(px(10.))
+        .bg(theme.table_even)
+        .children(rows.into_iter().enumerate().map(|(index, row)| {
+            row.when(index > 0, |row| row.border_t_1().border_color(theme.border))
+        }))
+}
+
 fn setting_row(
     label: &'static str,
     description: &'static str,
@@ -298,8 +298,6 @@ fn setting_row(
         .gap(px(SPACE_2))
         .px(px(SPACE_4))
         .py(px(SPACE_1))
-        .border_b_1()
-        .border_color(theme.border)
         .child(
             div()
                 .flex()

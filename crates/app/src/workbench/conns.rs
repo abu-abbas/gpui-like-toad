@@ -102,7 +102,7 @@ impl Workbench {
 
     /// Activate the connection of the active tab, if it is open.
     pub(super) fn follow_tab_conn(&mut self, cx: &mut Context<Self>) {
-        if self.show_home {
+        if self.show_empty_workspace {
             return;
         }
         if let Some(id) = self.tabs.get(self.active_tab).and_then(|t| t.conn) {
@@ -146,9 +146,9 @@ impl Workbench {
         if !self.conn.is_open() && !self.conn.busy {
             return;
         }
-        // Connecting from a tab of the old connection: show Home while
-        // this one connects, then open a tab for it.
-        let from_tab = !self.show_home
+        // Keep the previous connection’s tab open while the new
+        // connection starts with an empty workspace.
+        let from_tab = !self.show_empty_workspace
             && self
                 .tabs
                 .get(self.active_tab)
@@ -158,18 +158,17 @@ impl Workbench {
         let ix = self.parked.len() - 1;
         self.swap_active(ix);
         if from_tab {
-            self.show_home = true;
-            self.conn.open_tab_on_connect = true;
+            self.show_empty_workspace = true;
         }
     }
 
     /// Switcher pick: activate `id` and make the active tab run on it.
     /// A SQL tab (unbound, orphaned, or bound to another connection) is
     /// rebound to `id`; a data tab makes way for `id`'s most recent tab,
-    /// or a new query tab.
-    pub(super) fn switch_conn(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    /// when available.
+    pub(super) fn switch_conn(&mut self, id: u64, cx: &mut Context<Self>) {
         self.activate_conn(id, cx);
-        if self.conn.id != id || self.show_home {
+        if self.conn.id != id || self.show_empty_workspace {
             cx.notify();
             return;
         }
@@ -198,7 +197,7 @@ impl Workbench {
             // the picked one instead.
             Some(_) => match self.tabs.iter().rposition(|t| t.conn == Some(id)) {
                 Some(ix) => self.activate_tab(ix, cx),
-                None => self.add_tab(window, cx),
+                None => self.show_empty_workspace = true,
             },
         }
         cx.notify();
@@ -226,7 +225,7 @@ impl Workbench {
         if let Some(next) = self.parked.iter().rev().find(|c| c.is_open()).map(|c| c.id) {
             self.activate_conn(next, cx);
             // Stay on a tab of the connection now active, when there is one.
-            if !self.show_home && self.active_tab_orphaned() {
+            if !self.show_empty_workspace && self.active_tab_orphaned() {
                 if let Some(ix) = self.tabs.iter().rposition(|t| t.conn == Some(next)) {
                     self.activate_tab(ix, cx);
                 }
@@ -337,8 +336,8 @@ impl Workbench {
                 menu = menu.item(
                     PopupMenuItem::new(format!("{name}  ({detail}){mark}"))
                         .checked(active)
-                        .on_click(move |_, window, cx: &mut App| {
-                            switch_view.update(cx, |this, cx| this.switch_conn(id, window, cx));
+                        .on_click(move |_, _, cx: &mut App| {
+                            switch_view.update(cx, |this, cx| this.switch_conn(id, cx));
                         }),
                 );
             }
@@ -360,8 +359,8 @@ impl Workbench {
                     .icon(Icon::new(IconName::Database))
                     .on_click(move |_, _, cx: &mut App| {
                         panel_view.update(cx, |this, cx| {
-                            this.show_home = true;
                             this.rail = RailPanel::Connections;
+                            this.sidebar_compact = false;
                             cx.notify();
                         });
                     }),
@@ -636,10 +635,10 @@ mod tests {
 }
 
 impl Workbench {
-    pub(super) fn connect(&mut self, demo: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn connect(&mut self, demo: bool, cx: &mut Context<Self>) {
         if demo {
             if let Some(id) = self.find_open_conn(None, true) {
-                self.switch_conn(id, window, cx);
+                self.switch_conn(id, cx);
                 return;
             }
         }
@@ -710,7 +709,7 @@ impl Workbench {
         };
         // Already open: switch to it rather than logging in twice.
         if let Some(id) = self.find_open_conn(Some(ix), false) {
-            self.switch_conn(id, window, cx);
+            self.switch_conn(id, cx);
             return;
         }
         if !saved.save_password || self.conn.busy {
@@ -824,7 +823,7 @@ impl Workbench {
             return;
         };
         if last.demo {
-            self.connect(true, window, cx);
+            self.connect(true, cx);
         } else if let Some(ix) = last.profile_ix.filter(|ix| *ix < self.profiles.len()) {
             self.open_profile(ix, window, cx);
         } else {

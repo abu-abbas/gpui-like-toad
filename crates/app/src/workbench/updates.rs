@@ -446,9 +446,8 @@ impl Workbench {
     fn open_whats_new(&mut self) {
         self.updates.tab_open = true;
         self.updates.tab_active = true;
-        // `show_home` means "no query tab is current"; the page replaces
-        // Home's content while the What's new tab is active.
-        self.show_home = true;
+        // Suspend query shortcuts while release notes are active.
+        self.show_empty_workspace = true;
     }
 
     /// Minimal one-line banner above the whole window when a newer release

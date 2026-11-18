@@ -236,7 +236,7 @@ impl Workbench {
                     .w_full()
                     .disabled(self.conn.busy)
                     .when(active, |button| button.bg(theme.accent))
-                    .on_click(cx.listener(|this, _, window, cx| this.connect(true, window, cx)))
+                    .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx)))
                     .child(
                         connection_tree_label(IconName::Database, "Demo".into(), None, theme)
                             .when(active, |row| row.child(status_dot(theme.success))),
@@ -260,6 +260,8 @@ impl Workbench {
                 .as_ref()
                 .and_then(|last| last.profile_ix)
                 == Some(ix);
+        let focused = self.focused_profile_id.as_deref() == Some(profile.id.as_str());
+        let profile_id = profile.id.clone();
         let view = cx.entity();
         div()
             .id(("profile-row", ix))
@@ -268,6 +270,7 @@ impl Workbench {
             .flex_none()
             .rounded(px(RADIUS_MD))
             .when(active, |row| row.bg(theme.accent))
+            .when(focused && !active, |row| row.bg(theme.secondary))
             .context_menu(move |menu, _, cx| {
                 let workbench = view.read(cx);
                 if let Some(id) = workbench.find_open_conn(Some(ix), false) {
@@ -324,9 +327,22 @@ impl Workbench {
                     .ghost()
                     .w_full()
                     .tooltip(profile.name.clone())
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.open_profile(ix, window, cx)),
-                    )
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        let Some(ix) = this
+                            .profiles
+                            .iter()
+                            .position(|profile| profile.id == profile_id)
+                        else {
+                            return;
+                        };
+                        this.focused_profile_id = Some(profile_id.clone());
+                        if matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count == 2)
+                        {
+                            this.open_profile(ix, window, cx);
+                        } else {
+                            cx.notify();
+                        }
+                    }))
                     .child(
                         connection_tree_label(
                             IconName::Database,
@@ -569,7 +585,7 @@ impl Workbench {
                     )
                     .primary()
                     .disabled(self.conn.busy)
-                    .on_click(cx.listener(|this, _, window, cx| this.connect(false, window, cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.connect(false, cx))),
             );
         let card = div()
             .id("connection-dialog")

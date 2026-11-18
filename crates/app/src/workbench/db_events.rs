@@ -40,7 +40,7 @@ impl Workbench {
                 | PendingOp::ApplyEdits
         );
         let tab_conn = self.tabs.get(self.active_tab).and_then(|t| t.conn);
-        if tab_op && !self.show_home {
+        if tab_op && !self.show_empty_workspace {
             // Safety net: the tab shows work of another open connection
             // but that one is not active (some tab switch did not follow
             // it). Run on the tab's own connection, never the active one.
@@ -130,7 +130,6 @@ impl Workbench {
         }
         if let Response::Failed(message) = &resp {
             if matches!(pending, Some(PendingOp::Connect)) {
-                self.conn.open_tab_on_connect = false;
                 // A direct connect with a saved password failed (wrong or
                 // missing password): open the dialog so it can be fixed.
                 if !self.connection_form.show_connection_form {
@@ -164,14 +163,6 @@ impl Workbench {
                     "Connected: {} @ {} ({})",
                     info.user, info.database, info.version
                 ));
-                // Connected from a tab of another connection: give this
-                // one a tab of its own to work in.
-                if std::mem::take(&mut self.conn.open_tab_on_connect)
-                    && !background
-                    && self.show_home
-                {
-                    self.add_tab(window, cx);
-                }
                 cx.notify();
                 self.refresh_schema(cx);
             }

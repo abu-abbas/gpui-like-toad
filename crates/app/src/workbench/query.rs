@@ -79,7 +79,7 @@ impl Workbench {
     }
 
     pub(super) fn run(&mut self, cx: &mut Context<Self>) {
-        if self.conn.busy || self.show_home {
+        if self.conn.busy || self.show_empty_workspace {
             return;
         }
         if self.conn.session.is_none() {
@@ -100,7 +100,7 @@ impl Workbench {
     /// "Run Current": the selection if there is one, else the statement
     /// the cursor sits in (statements end at `;`).
     pub(super) fn run_current(&mut self, cx: &mut Context<Self>) {
-        if self.conn.busy || self.show_home || self.conn.session.is_none() {
+        if self.conn.busy || self.show_empty_workspace || self.conn.session.is_none() {
             return self.run(cx);
         }
         if self.active_tab().data.is_some() {
@@ -133,7 +133,7 @@ impl Workbench {
     }
 
     pub(super) fn explain(&mut self, cx: &mut Context<Self>) {
-        if self.conn.busy || self.show_home {
+        if self.conn.busy || self.show_empty_workspace {
             return;
         }
         if self.conn.session.is_none() {
@@ -154,7 +154,7 @@ impl Workbench {
     }
 
     pub(super) fn format_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.show_home {
+        if self.show_empty_workspace {
             return;
         }
         let sql = self.editor_text(cx);

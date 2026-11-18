@@ -124,9 +124,7 @@ impl Workbench {
                         .icon(IconName::Play)
                         .label("Demo")
                         .disabled(self.conn.busy)
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.connect(true, window, cx)),
-                        ),
+                        .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
                 )
             })
             .into_any_element()
@@ -181,15 +179,42 @@ impl Workbench {
             .min_w(px(0.))
             .overflow_hidden()
             .bg(theme.background);
-        main = main.child(self.render_tab_bar(theme, cx));
-        main = main.child(self.render_toolbar(theme, cx));
+        if !self.tabs.is_empty() || self.show_whats_new_tab() {
+            main = main.child(self.render_tab_bar(theme, cx));
+        }
+        if !self.show_empty_workspace || self.conn.uncommitted {
+            main = main.child(self.render_toolbar(theme, cx));
+        }
         // The split wrappers below take `min_h(0)`: as flex items they
         // otherwise grow to their content (e.g. a long Messages list),
         // pushing the bottom panel past the window instead of scrolling.
         if self.whats_new_active() {
             main = main.child(self.render_whats_new_page(theme, cx));
-        } else if self.show_home {
-            main = main.child(self.render_home(theme, cx));
+        } else if self.show_empty_workspace {
+            main = main.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(SPACE_2))
+                    .p(px(SPACE_4))
+                    .bg(theme.table_even)
+                    .child(icon(IconName::Table, 28., theme.muted_foreground))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(theme::ui_size(theme, FONT_HEADING_MD))
+                            .child("Belum ada objek yang dibuka"),
+                    )
+                    .child(
+                        div()
+                            .text_center()
+                            .text_color(theme.muted_foreground)
+                            .child("Klik dua kali objek di explorer atau buka New SQL editor."),
+                    ),
+            );
         } else if self.active_tab().kind != TabKind::Query {
             // Toad-style object tabs: the data grid (or the script) fills
             // the work area, with info and errors in a strip below.
@@ -241,9 +266,9 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let on_home = self.show_home;
+        let no_active_tab = self.show_empty_workspace;
         let tab = self.active_tab();
-        let is_data_tab = !on_home && tab.kind == TabKind::Data;
+        let is_data_tab = !no_active_tab && tab.kind == TabKind::Data;
         let busy = self.conn.busy;
         let mut bar = div()
             .id("toolbar-actions")
@@ -256,9 +281,12 @@ impl Workbench {
             .overflow_x_scroll()
             .bg(theme.background)
             .border_b_1()
-            .border_color(theme.border)
-            .child(self.render_conn_pill(theme, cx))
-            .child(self.schema_picker("toolbar-schema", theme, cx));
+            .border_color(theme.border);
+        if !is_data_tab && !no_active_tab {
+            bar = bar
+                .child(self.render_conn_pill(theme, cx))
+                .child(self.schema_picker("toolbar-schema", theme, cx));
+        }
         if is_data_tab {
             let data_view = tab
                 .data
@@ -294,7 +322,7 @@ impl Workbench {
                             }
                         })),
                 );
-        } else if !on_home {
+        } else if !no_active_tab {
             bar = bar
                 .child(
                     Button::new("save-sql")
@@ -334,7 +362,7 @@ impl Workbench {
                 .tooltip("Stop (ignore the current operation’s response)")
                 .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
         );
-        if !on_home && !is_data_tab {
+        if !no_active_tab && !is_data_tab {
             bar = bar
                 .child(
                     Button::new("explain")

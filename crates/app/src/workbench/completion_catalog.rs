@@ -58,7 +58,7 @@ impl Workbench {
                 self.catalog.borrow_mut().set_owner(&owner, objects);
                 // The user typed `SCHEMA.` and got nothing because it was
                 // still loading: show the list now, if they are still there.
-                if waiting && !background && !self.show_home {
+                if waiting && !background && !self.show_empty_workspace {
                     let editor = self.active_tab().editor.clone();
                     if editor.read(cx).focus_handle(cx).is_focused(window) {
                         editor.update(cx, |state, cx| state.show_completions(window, cx));
