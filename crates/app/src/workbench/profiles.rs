@@ -396,7 +396,7 @@ impl Workbench {
     }
 
     pub(super) fn remove_profile(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if ix >= self.profiles.len() {
+        if ix >= self.profiles.len() || self.find_open_conn(Some(ix), false).is_some() {
             return;
         }
         let removed = self.profiles.remove(ix);

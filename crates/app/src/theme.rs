@@ -44,7 +44,7 @@ pub const STATUS_BAR_HEIGHT: f32 = 26.0;
 /// Width of the compact icon rail.
 pub const RAIL_WIDTH: f32 = 44.0;
 /// Width of the expanded connections tree.
-pub const CONNECTIONS_WIDTH: f32 = 206.0;
+pub const CONNECTIONS_WIDTH: f32 = 224.0;
 /// Default width of the schema and object explorer.
 pub const EXPLORER_WIDTH: f32 = 218.0;
 /// Height of the Results / Explain Plan / Messages sub-tab row.

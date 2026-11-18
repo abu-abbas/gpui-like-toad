@@ -36,8 +36,7 @@ impl Workbench {
             })
     }
 
-    /// Toad-style object browser: schema and category selectors, filter
-    /// box, and a flat virtualized list of objects with a context menu.
+    /// Schema and category selectors, Quick Open, and the object list.
     pub(super) fn render_explorer(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -75,22 +74,19 @@ impl Workbench {
                 menu
             });
 
-        let visible: Vec<ObjectRef> =
-            schema::objects_in(&self.conn.objects, self.category, &self.tree_filter)
-                .into_iter()
-                .map(|o| ObjectRef {
-                    owner: o.owner.clone(),
-                    name: o.name.clone(),
-                    kind: o.kind.clone(),
-                })
-                .collect();
+        let visible: Vec<ObjectRef> = schema::objects_in(&self.conn.objects, self.category, "")
+            .into_iter()
+            .map(|o| ObjectRef {
+                owner: o.owner.clone(),
+                name: o.name.clone(),
+                kind: o.kind.clone(),
+            })
+            .collect();
         let list = if visible.is_empty() {
             let message = if self.conn.busy && self.conn.objects.is_empty() {
                 "Memuat objek..."
-            } else if self.tree_filter.is_empty() {
-                "Tidak ada objek di kategori ini."
             } else {
-                "Tidak ada objek yang cocok dengan filter."
+                "Tidak ada objek di kategori ini."
             };
             div()
                 .flex_1()
@@ -138,13 +134,11 @@ impl Workbench {
             .pt(px(6.))
             .child(
                 div()
+                    .flex()
+                    .flex_col()
                     .px(px(SPACE_2))
                     .flex_none()
-                    .child(
-                        div()
-                            .flex()
-                            .child(self.schema_picker("schema-select", theme, cx)),
-                    ),
+                    .child(self.schema_picker("schema-select", theme, cx)),
             )
             .child(
                 div()
@@ -153,12 +147,24 @@ impl Workbench {
                     .gap(px(6.))
                     .px(px(SPACE_2))
                     .flex_none()
-                    .child(div().w(px(108.)).flex_none().child(category_button))
                     .child(
                         div()
+                            .flex()
+                            .flex_col()
                             .flex_1()
                             .min_w(px(0.))
-                            .child(Input::new(&self.search_input).small().w_full()),
+                            .child(category_button),
+                    )
+                    .child(
+                        Button::new("explorer-quick-open")
+                            .ghost()
+                            .icon(IconName::Search)
+                            .size(px(32.))
+                            .flex_none()
+                            .tooltip("Quick Open (Ctrl/Cmd+P)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_quick_open(window, cx)
+                            })),
                     ),
             )
             .child(list)
@@ -312,11 +318,6 @@ impl Workbench {
     fn select_category(&mut self, category: ObjectCategory, cx: &mut Context<Self>) {
         self.category = category;
         self.conn.selected_object = None;
-        cx.notify();
-    }
-
-    pub(super) fn apply_tree_filter(&mut self, cx: &mut Context<Self>) {
-        self.tree_filter = Self::input_text(&self.search_input, cx);
         cx.notify();
     }
 

@@ -351,7 +351,6 @@ impl QueryTab {
 
 pub struct Workbench {
     connection_form: ConnectionForm,
-    search_input: Entity<InputState>,
     rail: RailPanel,
     sidebar_compact: bool,
     collapsed_connection_folders: HashSet<String>,
@@ -397,7 +396,6 @@ pub struct Workbench {
     side_conn_folded: bool,
     /// Keeps shortcuts (Quick Open, Run) working when no input has focus.
     focus_handle: gpui_kit::FocusHandle,
-    tree_filter: String,
     messages: Vec<String>,
     /// Autocomplete metadata of the active connection, shared with every
     /// tab's completion provider. A parked connection keeps its own in
@@ -412,7 +410,6 @@ pub struct Workbench {
 impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let connection_form = ConnectionForm::new(window, cx);
-        let search_input = cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Filter…"));
         let catalog = Rc::new(RefCell::new(Catalog::new()));
         let workbench = cx.weak_entity();
         let completion = Rc::new(SqlCompletionProvider::new(
@@ -434,12 +431,6 @@ impl Workbench {
         );
         let scratch_tab = QueryTab::new(0, String::new(), "", &completion, window, cx);
 
-        // Rebuild the tree on every keystroke in the search box.
-        let search_sub = cx.subscribe(&search_input, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.apply_tree_filter(cx);
-            }
-        });
         // Follow OS appearance changes while the preference is System.
         let appearance_sub = window
             .observe_window_appearance(|window, cx| theme::sync_system_appearance(window, cx));
@@ -453,7 +444,6 @@ impl Workbench {
 
         Workbench {
             connection_form,
-            search_input,
             rail: RailPanel::Connections,
             sidebar_compact: false,
             collapsed_connection_folders: HashSet::new(),
@@ -484,12 +474,11 @@ impl Workbench {
             home_view: HomeViewState::default(),
             side_conn_folded: false,
             focus_handle: cx.focus_handle(),
-            tree_filter: String::new(),
             messages: Vec::new(),
             catalog,
             completion,
             updates: UpdateState::load(),
-            _subscriptions: vec![search_sub, appearance_sub, settings_search_sub],
+            _subscriptions: vec![appearance_sub, settings_search_sub],
         }
     }
 
