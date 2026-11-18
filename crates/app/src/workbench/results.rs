@@ -13,6 +13,17 @@ fn result_tab_label(
 }
 
 impl Workbench {
+    /// Remember which panels are minimized for the next launch.
+    fn save_panel_layout(&self) {
+        let layout = ora_core::store::PanelLayout {
+            info_collapsed: self.info_collapsed,
+            plan_collapsed: self.plan_collapsed,
+        };
+        if let Err(err) = ora_core::store::save_panel_layout(layout) {
+            eprintln!("could not save panel layout: {err}");
+        }
+    }
+
     /// Full-area grid of a data tab, with pagination under it.
     pub(super) fn render_data_grid(
         &self,
@@ -243,6 +254,7 @@ impl Workbench {
                             })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.info_collapsed = !this.info_collapsed;
+                                this.save_panel_layout();
                                 cx.notify();
                             })),
                     ),
@@ -861,6 +873,7 @@ impl Workbench {
             ))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.plan_collapsed = !this.plan_collapsed;
+                this.save_panel_layout();
                 cx.notify();
             }))
     }

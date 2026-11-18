@@ -453,6 +453,9 @@ impl Workbench {
             }
         });
 
+        // Panels the user minimized last time stay minimized.
+        let layout = store::load_panel_layout();
+
         Workbench {
             splash_visible: false,
             connection_form,
@@ -472,7 +475,7 @@ impl Workbench {
             scratch_tab,
             tab_scroll: ScrollHandle::new(),
             tab_overflow: false,
-            plan_collapsed: false,
+            plan_collapsed: layout.plan_collapsed,
             messages_scroll: ScrollHandle::new(),
             show_empty_workspace: true,
             show_demo: std::env::var_os("ORA_DEMO").is_some(),
@@ -486,7 +489,7 @@ impl Workbench {
             quick_open: None,
             cell_editor: None,
             disconnect_prompt: None,
-            info_collapsed: false,
+            info_collapsed: layout.info_collapsed,
             side_conn_folded: false,
             focus_handle: cx.focus_handle(),
             messages: Vec::new(),
