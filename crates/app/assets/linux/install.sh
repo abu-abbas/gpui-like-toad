@@ -1,5 +1,5 @@
 #!/bin/sh
-# Ora The Explorer: install for the current user (no sudo needed).
+# Kilat: install for the current user (no sudo needed).
 #
 #   sh install.sh             install or update
 #   sh install.sh --uninstall remove it again
@@ -31,7 +31,7 @@ if [ "${1:-}" = "--uninstall" ]; then
         rm -f "$data_dir/icons/hicolor/${s}x${s}/apps/$app.png"
     done
     refresh
-    echo "Ora The Explorer removed."
+    echo "Kilat removed."
     exit 0
 fi
 
@@ -48,5 +48,5 @@ sed "s|^Exec=.*|Exec=$bin_dir/$app|" \
 chmod 644 "$data_dir/applications/$app.desktop"
 refresh
 
-echo "Ora The Explorer installed: $bin_dir/$app"
+echo "Kilat installed: $bin_dir/$app"
 echo "Find it in the app menu (it may take a moment to appear)."

@@ -13,7 +13,7 @@
 /// saved passwords keep working.
 macro_rules! app_name {
     () => {
-        "Ora The Explorer"
+        "Kilat"
     };
 }
 
@@ -69,7 +69,7 @@ fn main() {
         // icons in default-icons.txt, so every other Lucide icon used by
         // this app (Database, Clock, Table, House, ChartColumn, ...) silently
         // rendered blank. AllAssets embeds the full catalog.
-        .with_assets(about::OraAssets);
+        .with_assets(about::KilatAssets);
     // macOS keeps the process alive after its last window is closed (red
     // button), with the icon still in the Dock. Without this handler a Dock
     // click did nothing and the only way back was Dock > Quit and relaunch.
@@ -217,7 +217,7 @@ fn open_main_window(cx: &mut App) {
     // the .desktop file installed (Wayland ignores this).
     #[cfg(target_os = "linux")]
     {
-        options.icon = linux_window_icon();
+        options.icon = linux_window_icon(theme::appearance(cx).app_icon);
     }
     if let Some(titlebar) = &mut options.titlebar {
         titlebar.title = Some(app_name!().into());
@@ -270,8 +270,8 @@ fn load_bundled_fonts(cx: &mut App) {
 
 /// 256 px app icon for the X11 window (`_NET_WM_ICON`).
 #[cfg(target_os = "linux")]
-fn linux_window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
-    let png = include_bytes!("../assets/icon/AppIcon.iconset/icon_256x256.png");
+fn linux_window_icon(icon: ora_core::store::AppIcon) -> Option<std::sync::Arc<image::RgbaImage>> {
+    let png = about::icon_png(icon);
     image::load_from_memory_with_format(png, image::ImageFormat::Png)
         .ok()
         .map(|img| std::sync::Arc::new(img.into_rgba8()))
@@ -281,7 +281,12 @@ fn linux_window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
 mod tests {
     #[test]
     fn linux_window_icon_decodes() {
-        let icon = super::linux_window_icon().expect("embedded PNG decodes");
-        assert_eq!((icon.width(), icon.height()), (256, 256));
+        for variant in [
+            ora_core::store::AppIcon::Folded,
+            ora_core::store::AppIcon::Bolt,
+        ] {
+            let icon = super::linux_window_icon(variant).expect("embedded PNG decodes");
+            assert_eq!((icon.width(), icon.height()), (256, 256));
+        }
     }
 }

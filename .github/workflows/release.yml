@@ -119,9 +119,9 @@ jobs:
         run: |
           VERSION="${VERSION#v}"
           bin="target/release/gpui-like-toad${{ matrix.ext }}"
-          out="Ora-The-Explorer-$VERSION-${{ matrix.suffix }}${{ matrix.ext }}"
+          out="Kilat-$VERSION-${{ matrix.suffix }}${{ matrix.ext }}"
           "$bin" --version
-          test "$("$bin" --version)" = "Ora The Explorer $VERSION"
+          test "$("$bin" --version)" = "Kilat $VERSION"
           mkdir -p out
           cp "$bin" "out/$out"
           # Linux: the in-app updater installs from a .tar.gz holding the
@@ -162,12 +162,12 @@ jobs:
         shell: bash
         run: |
           VERSION="${VERSION#v}"
-          app="bundle/Ora The Explorer.app"
+          app="bundle/Kilat.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp "target/release/gpui-like-toad" "$app/Contents/MacOS/gpui-like-toad"
           iconutil -c icns -o "$app/Contents/Resources/AppIcon.icns" \
             crates/app/assets/icon/AppIcon.iconset
-          # Nama tampilan "Ora The Explorer"; CFBundleIdentifier dan nama
+          # Nama tampilan "Kilat"; CFBundleIdentifier dan nama
           # executable sengaja tetap gpui-like-toad supaya izin Keychain dan
           # preferensi macOS dari build lama tidak hilang.
           cat > "$app/Contents/Info.plist" <<EOF
@@ -176,9 +176,9 @@ jobs:
           <plist version="1.0">
           <dict>
             <key>CFBundleName</key>
-            <string>Ora The Explorer</string>
+            <string>Kilat</string>
             <key>CFBundleDisplayName</key>
-            <string>Ora The Explorer</string>
+            <string>Kilat</string>
             <key>CFBundleIdentifier</key>
             <string>com.github.abu-abbas.gpui-like-toad</string>
             <key>CFBundleVersion</key>
@@ -204,14 +204,14 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           # Smoke test biner di dalam bundel (bukan cuma biner mentahnya).
           "$app/Contents/MacOS/gpui-like-toad" --version
-          test "$("$app/Contents/MacOS/gpui-like-toad" --version)" = "Ora The Explorer $VERSION"
+          test "$("$app/Contents/MacOS/gpui-like-toad" --version)" = "Kilat $VERSION"
           # DMG: .app + symlink ke /Applications (drag-and-drop).
           mkdir -p dmg-staging
           cp -R "$app" dmg-staging/
           ln -s /Applications dmg-staging/Applications
-          hdiutil create -volname "Ora The Explorer $VERSION" \
+          hdiutil create -volname "Kilat $VERSION" \
             -srcfolder dmg-staging -ov -format UDZO \
-            "out/Ora-The-Explorer-$VERSION-macos-arm64.dmg"
+            "out/Kilat-$VERSION-macos-arm64.dmg"
           ls -la out/
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -245,7 +245,7 @@ jobs:
           ls -la out/
           test "$(ls out/* | wc -l)" -eq 5
           cd out
-          sha256sum Ora-The-Explorer-* > SHA256SUMS
+          sha256sum Kilat-* > SHA256SUMS
           cat SHA256SUMS
           if [ -n "$MINISIGN_SECRET_KEY" ]; then
             sudo apt-get install -y minisign
@@ -257,7 +257,7 @@ jobs:
             if [ -f ../release-key.pub ] && ! diff -q <(tail -n 1 ../release-key.pub) <(tail -n 1 "$RUNNER_TEMP/release.pub") >/dev/null; then
               echo "::warning::release-key.pub di repo tidak cocok dengan MINISIGN_SECRET_KEY."
             fi
-            for f in Ora-The-Explorer-* SHA256SUMS; do
+            for f in Kilat-* SHA256SUMS; do
               # Trusted comment `version:X.Y.Z` binds the signature to this
               # release, so an older signed file cannot pass as a newer one.
               minisign -S -s "$RUNNER_TEMP/release.key" -t "version:${VERSION#v}" -m "$f"
@@ -275,7 +275,7 @@ jobs:
           notes=$(git log -n 15 --no-merges --pretty='- %s' -- crates | head -15)
           VERSION="${VERSION#v}"
           gh release create "v$VERSION" out/* --target "${{ github.sha }}" \
-            --title "Ora The Explorer $VERSION" \
+            --title "Kilat $VERSION" \
             --notes "Dibangun dari ${{ github.sha }}"$'\n\n'"$notes" --latest
           # Pangkas: sisakan KEEP_RELEASES terbaru, hapus sisanya beserta tag.
           gh release list --limit 100 --json tagName --jq '.[].tagName' \

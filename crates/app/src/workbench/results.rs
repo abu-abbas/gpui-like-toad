@@ -1042,12 +1042,12 @@ fn page_items(current: usize, total: usize) -> Vec<PageItem> {
 
 /// CSV export filename for a unix timestamp. Split out for tests.
 fn export_filename(stamp: u64) -> String {
-    format!("Ora-The-Explorer-export-{stamp}.csv")
+    format!("Kilat-export-{stamp}.csv")
 }
 
 /// XLSX export filename for a unix timestamp. Split out for tests.
 fn export_xlsx_filename(stamp: u64) -> String {
-    format!("Ora-The-Explorer-export-{stamp}.xlsx")
+    format!("Kilat-export-{stamp}.xlsx")
 }
 
 #[cfg(test)]
@@ -1112,14 +1112,14 @@ mod tests {
 
     #[test]
     fn export_filename_is_stable_and_suffixed() {
-        assert_eq!(export_filename(0), "Ora-The-Explorer-export-0.csv");
+        assert_eq!(export_filename(0), "Kilat-export-0.csv");
         assert_eq!(
             export_filename(1_700_000_000),
-            "Ora-The-Explorer-export-1700000000.csv"
+            "Kilat-export-1700000000.csv"
         );
         assert_eq!(
             export_xlsx_filename(1_700_000_000),
-            "Ora-The-Explorer-export-1700000000.xlsx"
+            "Kilat-export-1700000000.xlsx"
         );
     }
 }

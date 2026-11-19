@@ -12,7 +12,7 @@ Rilis dari workflow **Release** membawa:
 Kunci publik ada di `release-key.pub` (di-commit setelah kunci dibuat, lihat bawah). Verifikasi manual:
 
 ```sh
-minisign -V -p release-key.pub -m Ora-The-Explorer-X.Y.Z-linux-x86_64
+minisign -V -p release-key.pub -m Kilat-X.Y.Z-linux-x86_64
 ```
 
 ## Membuat kunci (sekali saja)

@@ -567,7 +567,7 @@ impl Workbench {
                                 .flex()
                                 .gap(px(SPACE_3))
                                 .items_start()
-                                .child(crate::about::app_icon(40.))
+                                .child(crate::about::app_icon(40., theme::appearance(cx).app_icon))
                                 .child(
                                     div()
                                         .flex_1()
