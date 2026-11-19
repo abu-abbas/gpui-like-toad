@@ -9,21 +9,82 @@ use ora_core::update::{self, ReleaseInfo};
 
 use crate::release_verify::{self, ReleaseProof};
 
-/// Proxy URL chosen in Settings; `None` falls back to the `HTTPS_PROXY` /
-/// `ALL_PROXY` environment variables (ureq's default).
-static HTTP_PROXY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// The proxy in use. The URL may carry a password, so it only ever lives in
+/// memory here; `settings.json` holds the URL without it and the OS keychain
+/// holds the password (see `ora_core::store::resolve_proxy_in`).
+struct ProxyState {
+    /// `None` falls back to the `HTTPS_PROXY` / `ALL_PROXY` environment
+    /// variables (ureq's default).
+    url: Option<String>,
+    /// Settings were read (and an old plaintext password migrated).
+    resolved: bool,
+}
 
+static HTTP_PROXY: std::sync::Mutex<ProxyState> = std::sync::Mutex::new(ProxyState {
+    url: None,
+    resolved: false,
+});
+/// Held while the keychain is read, so only one thread does it.
+static RESOLVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Use `url` as the proxy now (what the user just typed in Settings).
 pub(crate) fn set_http_proxy(url: Option<String>) {
-    if let Ok(mut slot) = HTTP_PROXY.lock() {
-        *slot = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+    if let Ok(mut state) = HTTP_PROXY.lock() {
+        state.url = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+        state.resolved = true;
     }
+}
+
+/// Load the saved proxy once: settings plus password from the keychain,
+/// moving an old plaintext password into the keychain. Blocks on the
+/// keychain, so call it off the UI thread. Returns a warning for the user.
+pub(crate) fn ensure_proxy_resolved() -> Option<String> {
+    let _guard = RESOLVING.lock().ok()?;
+    if HTTP_PROXY.lock().ok()?.resolved {
+        return None;
+    }
+    let found =
+        ora_core::store::resolve_proxy_in(&ora_core::store::config_dir(), crate::keychain::store());
+    let mut state = HTTP_PROXY.lock().ok()?;
+    // The user may have typed a proxy meanwhile; that wins.
+    if !state.resolved {
+        state.url = found.url;
+        state.resolved = true;
+    }
+    found.warning
+}
+
+/// An error as text that is safe to show and log: a proxy URL inside it
+/// loses its password.
+fn net_err(err: impl std::fmt::Display) -> String {
+    let text = err.to_string();
+    let secret = HTTP_PROXY
+        .lock()
+        .ok()
+        .and_then(|s| s.url.clone())
+        .and_then(|u| ora_core::redact::split_proxy_password(&u).1);
+    let text = match secret {
+        Some(pw) => ora_core::redact::scrub_secret(&text, &pw),
+        None => text,
+    };
+    ora_core::redact::mask_url_credentials(&text)
 }
 
 /// `Ok(None)` keeps the default; a bad URL is reported instead of ignored.
 fn configured_proxy() -> Result<Option<ureq::Proxy>, String> {
-    let url = HTTP_PROXY.lock().ok().and_then(|slot| slot.clone());
-    url.map(|u| ureq::Proxy::new(&u).map_err(|e| format!("Invalid proxy ({u}): {e}")))
-        .transpose()
+    ensure_proxy_resolved();
+    let url = HTTP_PROXY.lock().ok().and_then(|state| state.url.clone());
+    url.map(|u| {
+        ureq::Proxy::new(&u).map_err(|e| {
+            // Show the URL without its password.
+            format!(
+                "Invalid proxy ({}): {}",
+                ora_core::redact::split_proxy_password(&u).0,
+                net_err(e)
+            )
+        })
+    })
+    .transpose()
 }
 
 fn http_agent() -> Result<ureq::Agent, String> {
@@ -53,13 +114,13 @@ pub(crate) fn fetch_release(url: &str) -> Result<ReleaseInfo, String> {
         .get(url)
         .header("Accept", "application/vnd.github+json")
         .call()
-        .map_err(|e| e.to_string())?;
+        .map_err(net_err)?;
     let body = resp
         .body_mut()
         .with_config()
         .limit(2 * 1024 * 1024)
         .read_to_string()
-        .map_err(|e| e.to_string())?;
+        .map_err(net_err)?;
     update::parse_release(&body).ok_or_else(|| "Could not read the latest release.".to_string())
 }
 
@@ -95,12 +156,12 @@ fn download_agent() -> Result<ureq::Agent, String> {
 
 /// Blocking GET of a small text asset (checksum list, signature).
 fn fetch_text(agent: &ureq::Agent, asset: &update::Asset) -> Result<String, String> {
-    let mut resp = agent.get(&asset.url).call().map_err(|e| e.to_string())?;
+    let mut resp = agent.get(&asset.url).call().map_err(net_err)?;
     resp.body_mut()
         .with_config()
         .limit(1024 * 1024)
         .read_to_string()
-        .map_err(|e| format!("{}: {e}", asset.name))
+        .map_err(|e| format!("{}: {}", asset.name, net_err(e)))
 }
 
 /// Fetch and check the signed `SHA256SUMS` and `<asset>.minisig` of
@@ -142,7 +203,7 @@ pub(crate) fn download_asset(
     let staging = tempfile::Builder::new()
         .prefix("kilat-download-")
         .tempdir()
-        .map_err(|e| e.to_string())?;
+        .map_err(net_err)?;
     let temp = staging.path().join(&asset.name);
     {
         let limit = if asset.size > 0 {
@@ -150,14 +211,11 @@ pub(crate) fn download_asset(
         } else {
             MAX_DOWNLOAD_BYTES
         };
-        let mut resp = download_agent()?
-            .get(&asset.url)
-            .call()
-            .map_err(|e| e.to_string())?;
-        let mut file = std::fs::File::create(&temp).map_err(|e| e.to_string())?;
+        let mut resp = download_agent()?.get(&asset.url).call().map_err(net_err)?;
+        let mut file = std::fs::File::create(&temp).map_err(net_err)?;
         let mut reader = resp.body_mut().with_config().limit(limit).reader();
-        let copied = std::io::copy(&mut reader, &mut file).map_err(|e| e.to_string())?;
-        file.flush().map_err(|e| e.to_string())?;
+        let copied = std::io::copy(&mut reader, &mut file).map_err(net_err)?;
+        file.flush().map_err(net_err)?;
         if asset.size > 0 && copied != asset.size {
             return Err(format!(
                 "{} is incomplete ({copied} of {} bytes)",
@@ -218,12 +276,10 @@ pub(crate) fn install_release(info: &ReleaseInfo) -> Result<Option<std::path::Pa
     );
     let release = engine
         .check()
-        .map_err(|e| e.to_string())?
+        .map_err(net_err)?
         .ok_or_else(|| "You're up to date.".to_string())?;
-    let artifact = engine
-        .download(&release, |_, _| {})
-        .map_err(|e| e.to_string())?;
+    let artifact = engine.download(&release, |_, _| {}).map_err(net_err)?;
     proof.verify_file(artifact.path(), release_verify::release_public_key())?;
-    let installed = engine.install(&artifact).map_err(|e| e.to_string())?;
+    let installed = engine.install(&artifact).map_err(net_err)?;
     Ok(installed.restart_path)
 }

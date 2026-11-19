@@ -29,11 +29,23 @@ pub fn is_error_message(message: &str) -> bool {
         || lower.starts_with("demo:")
 }
 
+/// Whether a message goes to `errors.log`. A `private` message (it quotes
+/// data the user typed, such as the values of a cell edit) is shown in the
+/// Info panel only, whatever words it contains.
+pub fn should_log(message: &str, private: bool) -> bool {
+    !private && is_error_message(message)
+}
+
 /// Append one error line. Best effort: logging must never break the app.
 pub fn append(message: &str) {
-    let dir = ora_core::store::config_dir();
-    let _ = fs::create_dir_all(&dir);
+    append_in(&ora_core::store::config_dir(), message);
+}
+
+fn append_in(dir: &std::path::Path, message: &str) {
+    let _ = fs::create_dir_all(dir);
     let path = dir.join(LOG_FILE);
+    // A proxy URL quoted by a network error must not leave its password here.
+    let message = ora_core::redact::mask_url_credentials(message);
     trim(&path);
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
         let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -111,7 +123,58 @@ pub fn report() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_error_message;
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        // Test-only scratch dir, unique per process id and test name.
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let dir = std::env::temp_dir().join(format!("ora-errlog-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn cell_values_never_reach_the_log_or_the_report() {
+        // The value contains "failed" so the echo looks like an error.
+        let marker = "MARKER-7731 failed";
+        let echo = ora_core::edit::update_cell_sql(
+            &ora_core::dialect::OracleDialect,
+            "HR",
+            "EMP",
+            "NAME",
+            "AAABBB",
+            Some(marker),
+        )
+        .inlined();
+        assert!(echo.contains(marker) && is_error_message(&echo));
+        assert!(!should_log(&echo, true));
+        let dir = temp("marker");
+        for (text, private) in [
+            (echo.as_str(), true),
+            ("Failed to apply change #1 (ORA-00001)", false),
+        ] {
+            if should_log(text, private) {
+                append_in(&dir, text);
+            }
+        }
+        let log = tail_of(&dir.join(LOG_FILE));
+        assert!(log.contains("Failed to apply change #1"));
+        assert!(!log.contains("MARKER-7731"), "{log}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn proxy_passwords_are_masked_in_the_log() {
+        let dir = temp("proxy");
+        append_in(
+            &dir,
+            "Invalid proxy (http://bob:s3cret@proxy:8080): bad port",
+        );
+        let log = tail_of(&dir.join(LOG_FILE));
+        assert!(log.contains("http://bob:***@proxy:8080"), "{log}");
+        assert!(!log.contains("s3cret"));
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn errors_are_recognized_by_driver_prefix_or_wording() {

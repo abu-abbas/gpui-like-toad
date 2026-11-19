@@ -353,6 +353,22 @@ impl Workbench {
                             cx.notify();
                         })),
                 )
+                .child(
+                    Checkbox::new("record-history")
+                        .small()
+                        .label("Record query history")
+                        .checked(!access.skip_history)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.connection_form.access.skip_history = !*checked;
+                            cx.notify();
+                        })),
+                )
+                .when(access.skip_history, |section| {
+                    section.child(caption_text(
+                        "Statements run on this connection are not added to History. Takes effect the next time you connect.".into(),
+                        theme,
+                    ))
+                })
                 .when(caps.sysdba, |section| {
                     section.child(
                         Checkbox::new("connect-sysdba")

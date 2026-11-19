@@ -27,6 +27,8 @@ pub struct ConnectionAccess {
     pub read_only: bool,
     pub protect_production: bool,
     pub sysdba: bool,
+    /// Do not record this connection's statements in the query history.
+    pub skip_history: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

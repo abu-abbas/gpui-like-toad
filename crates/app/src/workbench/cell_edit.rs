@@ -308,7 +308,8 @@ impl Workbench {
                 &u.rowid,
                 u.value.as_deref(),
             );
-            self.push_message(query.inlined());
+            // The statement shows its values; keep them out of errors.log.
+            self.push_private_message(query.inlined());
         }
         self.conn.status = format!("Applying changes ({})…", updates.len());
         self.spawn_db(

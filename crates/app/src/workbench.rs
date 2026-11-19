@@ -476,7 +476,7 @@ impl Workbench {
             |this, input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
                     let text = input.read(cx).value().to_string();
-                    this.set_proxy(&text);
+                    this.set_proxy(&text, cx);
                     cx.notify();
                 }
             },
@@ -543,13 +543,23 @@ impl Workbench {
     }
 
     pub(crate) fn push_message(&mut self, message: String) {
+        self.push_message_with(message, false);
+    }
+
+    /// A message that quotes user data (cell values): shown in the Info
+    /// panel, never written to `errors.log`.
+    pub(crate) fn push_private_message(&mut self, message: String) {
+        self.push_message_with(message, true);
+    }
+
+    fn push_message_with(&mut self, message: String, private: bool) {
         // With several connections open, say which one a message is from.
         let message = if self.open_conn_count() > 1 {
             format!("[{}] {message}", self.conn.label())
         } else {
             message
         };
-        if crate::error_log::is_error_message(&message) {
+        if crate::error_log::should_log(&message, private) {
             crate::error_log::append(&message);
         }
         self.messages.push(message);
