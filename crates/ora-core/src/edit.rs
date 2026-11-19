@@ -5,6 +5,43 @@
 
 use crate::dialect::Dialect;
 use crate::filter::BoundQuery;
+use crate::model::ColumnDef;
+
+/// Columns the database fills in by itself: identity columns and columns
+/// whose default draws from a sequence. Oracle stores both as a default
+/// expression ending in `.NEXTVAL`.
+pub fn auto_generated_columns(defs: &[ColumnDef]) -> Vec<String> {
+    defs.iter()
+        .filter(|d| {
+            d.default
+                .as_deref()
+                .is_some_and(|expr| expr.to_ascii_uppercase().contains(".NEXTVAL"))
+        })
+        .map(|d| d.name.clone())
+        .collect()
+}
+
+/// Values for a duplicate of `row` laid out over `columns` (the grid's
+/// visible columns, in order). Auto-generated columns are left empty so
+/// the INSERT omits them and the database picks the next value.
+pub fn duplicate_row_values(
+    columns: &[String],
+    row: &[(String, String)],
+    auto: &[String],
+) -> Vec<String> {
+    columns
+        .iter()
+        .map(|column| {
+            if auto.iter().any(|a| a.eq_ignore_ascii_case(column)) {
+                return String::new();
+            }
+            row.iter()
+                .find(|(name, _)| name == column)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default()
+        })
+        .collect()
+}
 
 /// `UPDATE owner.table SET column = :1 WHERE <row id> = :2`, or
 /// `SET column = NULL` when `value` is `None` (then the row id is `:1`).
@@ -79,6 +116,37 @@ pub fn insert_row_sql(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn duplicate_blanks_identity_and_sequence_columns() {
+        let def = |name: &str, default: Option<&str>| ColumnDef {
+            name: name.into(),
+            data_type: "NUMBER".into(),
+            nullable: false,
+            default: default.map(str::to_string),
+        };
+        let defs = [
+            def("ID", Some("\"HR\".\"ISEQ$$_1\".nextval")),
+            def("SEQ_NO", Some("EMP_SEQ.NEXTVAL ")),
+            def("NAME", None),
+            def("STATUS", Some("'A'")),
+        ];
+        let auto = auto_generated_columns(&defs);
+        assert_eq!(auto, ["ID", "SEQ_NO"]);
+        let columns: Vec<String> = ["ID", "NAME", "SEQ_NO", "STATUS"]
+            .map(String::from)
+            .to_vec();
+        let row = [
+            ("ID".to_string(), "7".to_string()),
+            ("NAME".to_string(), "Ana".to_string()),
+            ("SEQ_NO".to_string(), "3".to_string()),
+            ("STATUS".to_string(), "A".to_string()),
+        ];
+        assert_eq!(
+            duplicate_row_values(&columns, &row, &auto),
+            ["", "Ana", "", "A"]
+        );
+    }
+
     use super::*;
     use crate::dialect::{OracleDialect, SqliteDialect};
 

@@ -73,6 +73,8 @@ pub struct ResultsDelegate {
     /// Set on editable data tabs: the context menu's "Delete row(s)",
     /// called with the ROWIDs to stage for deletion.
     on_delete_rows: Option<DeleteRowsHandler>,
+    /// Set on editable data tabs: the context menu's "Duplicate row(s)".
+    on_duplicate_rows: Option<DuplicateRowsHandler>,
     /// Result column holding each row's ROWID (never shown), if fetched.
     rowid_col: Option<usize>,
     /// Edited cells by (ROWID, column name), tinted until commit.
@@ -96,6 +98,9 @@ pub type EditHandler = Rc<dyn Fn(CellEditRequest, &mut Window, &mut App)>;
 
 pub type PasteHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 pub type DeleteRowsHandler = Rc<dyn Fn(Vec<String>, &mut Window, &mut App)>;
+
+/// Rows to duplicate, each as (column, value) pairs without the ROWID.
+pub type DuplicateRowsHandler = Rc<dyn Fn(Vec<Vec<(String, String)>>, &mut Window, &mut App)>;
 
 /// Where an edited cell stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,6 +218,7 @@ impl ResultsDelegate {
             on_quick_filter: None,
             on_edit: None,
             on_delete_rows: None,
+            on_duplicate_rows: None,
             on_cell_paste: None,
             rowid_col: None,
             table_name: None,
@@ -256,6 +262,34 @@ impl ResultsDelegate {
     pub fn with_delete_rows(mut self, handler: DeleteRowsHandler) -> Self {
         self.on_delete_rows = Some(handler);
         self
+    }
+
+    /// Offer "Duplicate row" (the selected rows, or the clicked one) in the
+    /// cell context menu.
+    pub fn with_duplicate_rows(mut self, handler: DuplicateRowsHandler) -> Self {
+        self.on_duplicate_rows = Some(handler);
+        self
+    }
+
+    /// Absolute rows a right click on `abs_row` acts on, in grid order.
+    fn target_rows(&self, abs_row: usize) -> Vec<usize> {
+        if self.selected_rows.contains(&abs_row) {
+            let mut rows: Vec<usize> = self.selected_rows.iter().copied().collect();
+            rows.sort_unstable();
+            return rows;
+        }
+        vec![abs_row]
+    }
+
+    /// Every field of result row `abs_row` as text, without the ROWID.
+    fn row_pairs(&self, abs_row: usize) -> Vec<(String, String)> {
+        self.result
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.name != ROWID_COLUMN)
+            .filter_map(|(ix, c)| Some((c.name.clone(), self.result.get(abs_row, ix)?.display())))
+            .collect()
     }
 
     /// ROWIDs a right click on result row `abs_row` deletes: the whole
@@ -838,6 +872,22 @@ impl TableDelegate for ResultsDelegate {
                 };
                 menu = menu.item(
                     PopupMenuItem::new(label).on_click(move |_, window, cx| paste(window, cx)),
+                );
+            }
+            if let Some(duplicate) = self.on_duplicate_rows.clone() {
+                let rows: Vec<_> = self
+                    .target_rows(abs_row)
+                    .into_iter()
+                    .map(|row| self.row_pairs(row))
+                    .collect();
+                let label = match rows.len() {
+                    1 => "Duplicate row".to_string(),
+                    n => format!("Duplicate {n} rows"),
+                };
+                menu = menu.item(
+                    PopupMenuItem::new(label)
+                        .icon(Icon::new(IconName::Copy))
+                        .on_click(move |_, window, cx| duplicate(rows.clone(), window, cx)),
                 );
             }
             if let Some(delete) = self.on_delete_rows.clone() {
