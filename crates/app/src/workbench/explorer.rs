@@ -437,9 +437,13 @@ impl Workbench {
                 }));
             // Only tables have a stable ROWID to find a row by.
             if editable {
+                let paste_view = edit_view.clone();
                 delegate = delegate.with_cell_edit(Rc::new(move |request, window, cx| {
                     let _ =
                         edit_view.update(cx, |this, cx| this.open_cell_editor(request, window, cx));
+                }));
+                delegate = delegate.with_cell_paste(Rc::new(move |_, cx| {
+                    let _ = paste_view.update(cx, |this, cx| this.paste_into_cells(cx));
                 }));
             }
             delegate.set_table_name(Some(table_name));

@@ -19,6 +19,30 @@ impl Render for ProfileDrag {
     }
 }
 
+#[derive(Clone)]
+struct FolderDrag {
+    path: String,
+}
+
+impl Render for FolderDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .px(px(SPACE_2))
+            .py(px(SPACE_1))
+            .rounded(px(RADIUS_MD))
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .child(
+                self.path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&self.path)
+                    .to_owned(),
+            )
+    }
+}
+
 fn folder_color(name: &str, theme: &gpui_kit::component::Theme) -> Hsla {
     theme::ACCENTS
         .iter()
@@ -26,6 +50,14 @@ fn folder_color(name: &str, theme: &gpui_kit::component::Theme) -> Hsla {
         .map_or(theme.muted_foreground, |(_, light, dark)| {
             gpui_kit::rgb(if theme.is_dark() { *dark } else { *light }).into()
         })
+}
+
+/// The "delete folder?" dialog: what the folder holds.
+pub(super) struct FolderDelete {
+    path: String,
+    connections: usize,
+    subfolders: usize,
+    open: usize,
 }
 
 pub(super) fn new_folder_item(view: &Entity<Workbench>, parent: &str) -> PopupMenuItem {
@@ -55,6 +87,285 @@ pub(super) fn new_folder_item(view: &Entity<Workbench>, parent: &str) -> PopupMe
 }
 
 impl Workbench {
+    fn start_rename_folder(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let name = path.rsplit('/').next().unwrap_or(path).to_owned();
+        let field = cx.new(|cx| InputState::new(window, cx).placeholder("Folder name"));
+        field.update(cx, |s, cx| s.set_value(name, window, cx));
+        cx.subscribe_in(&field, window, |this, _, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.rename_folder(cx);
+            }
+        })
+        .detach();
+        self.folder_draft = None;
+        self.folder_rename = Some((path.to_owned(), field.clone()));
+        window.defer(cx, move |window, cx| {
+            field.update(cx, |s, cx| s.focus(window, cx))
+        });
+        cx.notify();
+    }
+
+    fn all_folder_paths(&self) -> std::collections::BTreeSet<String> {
+        let mut all = std::collections::BTreeSet::new();
+        for folder in self
+            .profiles
+            .iter()
+            .map(|p| p.folder.as_str())
+            .chain(self.connection_folder_colors.keys().map(String::as_str))
+        {
+            let mut path = String::new();
+            for part in folder.split('/').filter(|p| !p.is_empty()) {
+                if !path.is_empty() {
+                    path.push('/');
+                }
+                path.push_str(part);
+                all.insert(path.clone());
+            }
+        }
+        all
+    }
+
+    /// Re-root every folder path at or below `from` (see
+    /// `store::folder_rebase`) in profiles, colors and fold state, and
+    /// save. `drop_from` removes the folder entry itself (delete case).
+    fn rebase_folders(&mut self, from: &str, to: &str, drop_from: bool) -> std::io::Result<()> {
+        let mut profiles = self.profiles.clone();
+        for p in &mut profiles {
+            if let Some(f) = store::folder_rebase(&p.folder, from, to) {
+                p.folder = f;
+            }
+        }
+        let mut colors = std::collections::BTreeMap::new();
+        for (path, color) in &self.connection_folder_colors {
+            if drop_from && path == from {
+                continue;
+            }
+            let path = store::folder_rebase(path, from, to).unwrap_or_else(|| path.clone());
+            colors.entry(path).or_insert_with(|| color.clone());
+        }
+        store::save_profiles(&profiles)?;
+        store::save_connection_folder_colors(&colors)?;
+        self.profiles = profiles;
+        self.connection_folder_colors = colors;
+        self.collapsed_connection_folders = self
+            .collapsed_connection_folders
+            .iter()
+            .filter(|f| !(drop_from && f.as_str() == from))
+            .map(|f| store::folder_rebase(f, from, to).unwrap_or_else(|| f.clone()))
+            .collect();
+        Ok(())
+    }
+
+    fn rename_folder(&mut self, cx: &mut Context<Self>) {
+        let Some((path, field)) = &self.folder_rename else {
+            return;
+        };
+        let path = path.clone();
+        let name = Self::input_text(field, cx);
+        let name = name.trim();
+        if name.is_empty() || name.contains('/') {
+            self.conn.status = "Enter one folder name without a slash.".into();
+            cx.notify();
+            return;
+        }
+        let new_path = match path.rsplit_once('/') {
+            Some((parent, _)) => format!("{parent}/{name}"),
+            None => name.to_owned(),
+        };
+        if new_path != path {
+            if self.all_folder_paths().contains(&new_path) {
+                self.conn.status = format!("Folder '{name}' already exists here.");
+                cx.notify();
+                return;
+            }
+            // Keep an open connection's folder in sync too: it is only a label.
+            if let Err(err) = self.rebase_folders(&path, &new_path, false) {
+                self.push_message(format!("Could not rename folder: {err}"));
+                cx.notify();
+                return;
+            }
+        }
+        self.folder_rename = None;
+        cx.notify();
+    }
+
+    fn request_delete_folder(&mut self, path: &str, cx: &mut Context<Self>) {
+        let inside: Vec<usize> = (0..self.profiles.len())
+            .filter(|&ix| store::folder_in(&self.profiles[ix].folder, path))
+            .collect();
+        let open = inside
+            .iter()
+            .filter(|&&ix| self.find_open_conn(Some(ix), false).is_some())
+            .count();
+        let subfolders = self
+            .all_folder_paths()
+            .iter()
+            .filter(|f| f.as_str() != path && store::folder_in(f, path))
+            .count();
+        self.folder_delete = Some(FolderDelete {
+            path: path.to_owned(),
+            connections: inside.len(),
+            subfolders,
+            open,
+        });
+        cx.notify();
+    }
+
+    /// Delete the folder; `with_connections` also removes the connections
+    /// (and subfolders) inside it, otherwise they move up one level.
+    fn confirm_delete_folder(&mut self, with_connections: bool, cx: &mut Context<Self>) {
+        let Some(dialog) = self.folder_delete.take() else {
+            return;
+        };
+        let path = dialog.path;
+        if with_connections {
+            let mut ids = Vec::new();
+            for ix in (0..self.profiles.len()).rev() {
+                if store::folder_in(&self.profiles[ix].folder, &path) {
+                    ids.push(ix);
+                }
+            }
+            for ix in ids {
+                self.remove_profile(ix, cx);
+            }
+            let colors: std::collections::BTreeMap<_, _> = self
+                .connection_folder_colors
+                .iter()
+                .filter(|(f, _)| !store::folder_in(f, &path))
+                .map(|(f, c)| (f.clone(), c.clone()))
+                .collect();
+            match store::save_connection_folder_colors(&colors) {
+                Ok(()) => self.connection_folder_colors = colors,
+                Err(err) => self.push_message(format!("Could not save folders: {err}")),
+            }
+            self.collapsed_connection_folders
+                .retain(|f| !store::folder_in(f, &path));
+        } else {
+            let parent = path.rsplit_once('/').map_or("", |(p, _)| p).to_owned();
+            if let Err(err) = self.rebase_folders(&path, &parent, true) {
+                self.push_message(format!("Could not delete folder: {err}"));
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn render_folder_delete(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let Some(dialog) = self.folder_delete.as_ref() else {
+            return div().into_any_element();
+        };
+        let name = dialog.path.rsplit('/').next().unwrap_or(&dialog.path);
+        let text = if dialog.connections == 0 && dialog.subfolders == 0 {
+            "Folder ini kosong.".to_owned()
+        } else {
+            format!(
+                "Folder ini berisi {} koneksi dan {} sub-folder. Pindahkan isinya satu level ke atas, atau hapus semuanya.{}",
+                dialog.connections,
+                dialog.subfolders,
+                if dialog.open > 0 {
+                    format!(" {} koneksi sedang terbuka, disconnect dulu kalau mau dihapus.", dialog.open)
+                } else {
+                    String::new()
+                }
+            )
+        };
+        let empty = dialog.connections == 0 && dialog.subfolders == 0;
+        let card = div()
+            .id("folder-delete")
+            .flex()
+            .flex_col()
+            .w(px(440.))
+            .rounded(px(RADIUS_MD))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .shadow_lg()
+            .overflow_hidden()
+            .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    this.folder_delete = None;
+                    cx.notify();
+                }
+            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(SPACE_2))
+                    .p(px(SPACE_4))
+                    .child(
+                        div()
+                            .text_size(crate::theme::ui_size(theme, FONT_HEADING_MD))
+                            .line_height(crate::theme::ui_size(theme, LEADING_HEADING_MD))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child(format!("Hapus folder {name}?")),
+                    )
+                    .child(
+                        div()
+                            .text_size(crate::theme::ui_size(theme, FONT_BODY))
+                            .line_height(crate::theme::ui_size(theme, LEADING_BODY))
+                            .text_color(theme.muted_foreground)
+                            .child(text),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(SPACE_2))
+                    .p(px(SPACE_4))
+                    .bg(theme.muted)
+                    .child(
+                        Button::new("folder-delete-cancel")
+                            .flex_1()
+                            .label("Batal")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.folder_delete = None;
+                                cx.notify();
+                            })),
+                    )
+                    .when(!empty, |row| {
+                        row.child(
+                            Button::new("folder-delete-all")
+                                .flex_1()
+                                .label("Hapus semua")
+                                .danger()
+                                .disabled(dialog.open > 0)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.confirm_delete_folder(true, cx)
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new("folder-delete-move")
+                            .flex_1()
+                            .label(if empty { "Hapus" } else { "Pindahkan isi" })
+                            .primary()
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.confirm_delete_folder(false, cx)),
+                            ),
+                    ),
+            );
+        div()
+            .id("folder-delete-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(160.))
+            .bg(gpui_kit::hsla(0., 0., 0., 0.35))
+            .occlude()
+            .child(card)
+            .into_any_element()
+    }
+
     fn create_folder(&mut self, cx: &mut Context<Self>) {
         let Some((parent, field)) = &self.folder_draft else {
             return;
@@ -89,7 +400,71 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Move folder `from` (with everything in it) under `target`
+    /// (`""` = top level). Refuses its own subtree and name clashes.
+    fn move_folder(&mut self, from: &str, target: &str, cx: &mut Context<Self>) {
+        let name = from.rsplit('/').next().unwrap_or(from);
+        let parent = from.rsplit_once('/').map_or("", |(p, _)| p);
+        if target == parent {
+            return;
+        }
+        if store::folder_in(target, from) {
+            self.conn.status = "A folder cannot go inside itself.".into();
+            cx.notify();
+            return;
+        }
+        let new_path = if target.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{target}/{name}")
+        };
+        if self.all_folder_paths().contains(&new_path) {
+            self.conn.status = format!("'{name}' already exists in that folder.");
+            cx.notify();
+            return;
+        }
+        match self.rebase_folders(from, &new_path, false) {
+            Ok(()) => {
+                self.collapsed_connection_folders.remove(target);
+                self.side_conn_folded = false;
+            }
+            Err(err) => self.push_message(format!("Could not move folder: {err}")),
+        }
+        cx.notify();
+    }
+
+    /// The connections tree inside a scroll area in both directions: deep
+    /// nesting can outgrow the column, then a horizontal scrollbar appears.
     pub(super) fn render_profile_list(
+        &self,
+        keyboard: bool,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let depth = self
+            .all_folder_paths()
+            .iter()
+            .map(|f| f.split('/').count())
+            .max()
+            .unwrap_or(0);
+        let min_width = EXPLORER_WIDTH + 28. * depth as f32;
+        div()
+            .id("connections-scroll")
+            .flex()
+            .flex_col()
+            .min_h(px(0.))
+            .overflow_scroll()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .min_w(px(min_width))
+                    .child(self.render_profile_tree(keyboard, theme, cx)),
+            )
+    }
+
+    fn render_profile_tree(
         &self,
         keyboard: bool,
         theme: &gpui_kit::component::Theme,
@@ -97,12 +472,7 @@ impl Workbench {
     ) -> impl IntoElement {
         let profiles = self.profiles.len();
         let folded = self.side_conn_folded;
-        let mut tree = div()
-            .id("connections-tree")
-            .flex()
-            .flex_col()
-            .min_h(px(0.))
-            .overflow_y_scroll();
+        let mut tree = div().id("connections-tree").flex().flex_col().min_h(px(0.));
         let drop_highlight = theme.accent;
         let root_view = cx.entity();
         tree = tree.child(
@@ -112,6 +482,10 @@ impl Workbench {
                 .drag_over::<ProfileDrag>(move |style, _, _, _| style.bg(drop_highlight))
                 .on_drop(cx.listener(|this, drag: &ProfileDrag, _, cx| {
                     this.move_profile_to_folder(&drag.id, "", cx);
+                }))
+                .drag_over::<FolderDrag>(move |style, _, _, _| style.bg(drop_highlight))
+                .on_drop(cx.listener(|this, drag: &FolderDrag, _, cx| {
+                    this.move_folder(&drag.path, "", cx);
                 }))
                 .context_menu(move |menu, _, _| menu.item(new_folder_item(&root_view, "")))
                 .child(
@@ -181,6 +555,42 @@ impl Workbench {
                     ),
             );
         }
+        if let Some((path, field)) = &self.folder_rename {
+            tree = tree.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(caption_text(format!("Rename {path}"), theme))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .child(Input::new(field).small()),
+                            )
+                            .child(
+                                Button::new("folder-rename-save")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Check)
+                                    .on_click(cx.listener(|this, _, _, cx| this.rename_folder(cx))),
+                            )
+                            .child(
+                                Button::new("folder-rename-cancel")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::X)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.folder_rename = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            );
+        }
         let mut branches = div()
             .flex()
             .flex_col()
@@ -227,6 +637,8 @@ impl Workbench {
             let indent = 12. * (parts.len() - 1) as f32;
             let collapsed = self.collapsed_connection_folders.contains(&name);
             let drop_folder = name.clone();
+            let drop_into = name.clone();
+            let drag_path = name.clone();
             let menu_folder = name.clone();
             let view = cx.entity();
             let color = folder_color(
@@ -244,14 +656,41 @@ impl Workbench {
                     .on_drop(cx.listener(move |this, drag: &ProfileDrag, _, cx| {
                         this.move_profile_to_folder(&drag.id, &drop_folder, cx);
                     }))
+                    .on_drag(FolderDrag { path: drag_path }, |drag, _, _, cx| {
+                        let preview = drag.clone();
+                        cx.new(|_| preview)
+                    })
+                    .drag_over::<FolderDrag>(move |style, _, _, _| style.bg(drop_highlight))
+                    .on_drop(cx.listener(move |this, drag: &FolderDrag, _, cx| {
+                        this.move_folder(&drag.path, &drop_into, cx);
+                    }))
                     .context_menu(move |menu, window, cx| {
                         let folder = menu_folder.clone();
                         let view = view.clone();
-                        menu.item(new_folder_item(&view, &folder)).submenu(
-                            "Folder color",
-                            window,
-                            cx,
-                            move |mut menu, _, cx| {
+                        let rename_view = view.clone();
+                        let rename_path = folder.clone();
+                        let delete_view = view.clone();
+                        let delete_path = folder.clone();
+                        menu.item(new_folder_item(&view, &folder))
+                            .item(
+                                PopupMenuItem::new("Rename folder…")
+                                    .icon(Icon::new(IconName::SquarePen))
+                                    .on_click(move |_, window, cx| {
+                                        rename_view.update(cx, |this, cx| {
+                                            this.start_rename_folder(&rename_path, window, cx)
+                                        })
+                                    }),
+                            )
+                            .item(
+                                PopupMenuItem::new("Delete folder…")
+                                    .icon(Icon::new(IconName::Trash))
+                                    .on_click(move |_, _, cx| {
+                                        delete_view.update(cx, |this, cx| {
+                                            this.request_delete_folder(&delete_path, cx)
+                                        })
+                                    }),
+                            )
+                            .submenu("Folder color", window, cx, move |mut menu, _, cx| {
                                 let current = view
                                     .read(cx)
                                     .connection_folder_colors
@@ -280,8 +719,7 @@ impl Workbench {
                                     );
                                 }
                                 menu
-                            },
-                        )
+                            })
                     })
                     .child(
                         sidebar::tree_button(

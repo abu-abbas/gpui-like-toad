@@ -76,7 +76,6 @@ mod results;
 mod results_grid;
 mod settings;
 mod sidebar;
-mod splash;
 mod tabs;
 mod ui_helpers;
 mod updates;
@@ -363,11 +362,12 @@ impl QueryTab {
 }
 
 pub struct Workbench {
-    splash_visible: bool,
     connection_form: ConnectionForm,
     rail: RailPanel,
     sidebar_compact: bool,
     folder_draft: Option<(String, Entity<InputState>)>,
+    folder_rename: Option<(String, Entity<InputState>)>,
+    folder_delete: Option<connection_tree::FolderDelete>,
     collapsed_connection_folders: HashSet<String>,
     connection_folder_colors: std::collections::BTreeMap<String, String>,
     focused_profile_id: Option<String>,
@@ -451,12 +451,16 @@ impl Workbench {
             }
         });
 
+        // Panels the user minimized last time stay minimized.
+        let layout = store::load_panel_layout();
+
         Workbench {
-            splash_visible: false,
             connection_form,
             rail: RailPanel::Connections,
             sidebar_compact: false,
             folder_draft: None,
+            folder_rename: None,
+            folder_delete: None,
             collapsed_connection_folders: HashSet::new(),
             connection_folder_colors: store::load_connection_folder_colors(),
             focused_profile_id: None,
@@ -468,7 +472,7 @@ impl Workbench {
             scratch_tab,
             tab_scroll: ScrollHandle::new(),
             tab_overflow: false,
-            plan_collapsed: false,
+            plan_collapsed: layout.plan_collapsed,
             messages_scroll: ScrollHandle::new(),
             show_empty_workspace: true,
             show_demo: std::env::var_os("ORA_DEMO").is_some(),
@@ -482,7 +486,7 @@ impl Workbench {
             quick_open: None,
             cell_editor: None,
             disconnect_prompt: None,
-            info_collapsed: false,
+            info_collapsed: layout.info_collapsed,
             side_conn_folded: false,
             focus_handle: cx.focus_handle(),
             messages: Vec::new(),
@@ -536,9 +540,6 @@ impl Workbench {
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        if self.splash_visible {
-            return splash::screen(&theme).into_any_element();
-        }
         // Match the app's default layout at 13px and pass changes through to
         // GPUI controls whose text and row dimensions use rem units.
         window.set_rem_size(theme::ui_size(&theme, 16.));
@@ -641,7 +642,7 @@ impl Render for Workbench {
                             .child(
                                 resizable_panel()
                                     .size(px(EXPLORER_WIDTH))
-                                    .size_range(px(190.)..px(440.))
+                                    .size_range(px(190.)..px(560.))
                                     .child(secondary),
                             )
                             .child(resizable_panel().child(main))
@@ -663,6 +664,9 @@ impl Render for Workbench {
             })
             .when(self.disconnect_prompt.is_some(), |this| {
                 this.child(self.render_disconnect_prompt(&theme, cx))
+            })
+            .when(self.folder_delete.is_some(), |this| {
+                this.child(self.render_folder_delete(&theme, cx))
             })
             .when(self.settings.open, |this| {
                 this.child(self.render_settings_dialog(&theme, cx))

@@ -116,6 +116,61 @@ impl Workbench {
         self.stage_edit(editor.request, new, cx);
     }
 
+    /// Paste the clipboard into the picked cells of the active data tab
+    /// as staged edits (amber), the same as typing each value in the edit
+    /// dialog. One value fills every picked cell; a block of tab
+    /// separated lines is laid out from the top-left picked cell.
+    pub(super) fn paste_into_cells(&mut self, cx: &mut Context<Self>) {
+        let tab = self.active_tab();
+        let ready = tab.conn == Some(self.conn.id)
+            && self.conn.session.is_some()
+            && tab.data.as_ref().is_some_and(|d| d.view == DataView::Data);
+        if !ready {
+            return;
+        }
+        if self.conn.busy {
+            self.conn.status = "Masih ada operasi berjalan.".to_string();
+            cx.notify();
+            return;
+        }
+        if self.conn.access().read_only {
+            self.conn.status = "Koneksi ini read only: cell tidak bisa diubah.".to_string();
+            cx.notify();
+            return;
+        }
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        let values = match ora_core::import::clipboard_rows(&text) {
+            Ok(values) => values,
+            Err(error) => {
+                self.conn.status = error;
+                cx.notify();
+                return;
+            }
+        };
+        let table = self.active_tab().table_state.clone();
+        let paste = table.read(cx).delegate().cell_paste(&values);
+        let count = paste.edits.len();
+        for (request, new) in paste.edits {
+            self.stage_edit(request, new, cx);
+        }
+        table.update(cx, |state, cx| {
+            state.delegate_mut().pick_pasted_block(&values);
+            cx.notify();
+        });
+        self.conn.status = match (count, paste.clipped) {
+            (0, 0) => "Nilai clipboard sama dengan isi cell, tidak ada yang berubah.".to_string(),
+            (n, 0) => {
+                format!("{n} cell diisi dari clipboard. Klik Apply untuk mengirim ke database.")
+            }
+            (n, c) => format!(
+                "{n} cell diisi dari clipboard; {c} nilai tidak muat di halaman/kolom yang tampil."
+            ),
+        };
+        cx.notify();
+    }
+
     fn stage_edit(
         &mut self,
         request: CellEditRequest,

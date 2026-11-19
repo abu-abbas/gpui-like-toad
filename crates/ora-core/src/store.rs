@@ -613,6 +613,29 @@ pub fn save_profiles(profiles: &[SavedProfile]) -> std::io::Result<()> {
     save_profiles_in(&config_dir(), profiles)
 }
 
+/// Whether `folder` is `root` or lies somewhere below it.
+pub fn folder_in(folder: &str, root: &str) -> bool {
+    folder == root
+        || folder
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Re-root `folder` from `from` to `to` (`to` empty means the top level):
+/// `a/b/c` moved from `a/b` to `x` becomes `x/c`, and `a/b` itself becomes
+/// `x`. `None` when `folder` is not inside `from`.
+pub fn folder_rebase(folder: &str, from: &str, to: &str) -> Option<String> {
+    if !folder_in(folder, from) {
+        return None;
+    }
+    let rest = folder[from.len()..].trim_start_matches('/');
+    Some(match (to.is_empty(), rest.is_empty()) {
+        (true, _) => rest.to_owned(),
+        (false, true) => to.to_owned(),
+        (false, false) => format!("{to}/{rest}"),
+    })
+}
+
 /// Local colors for sidebar folders. A color can outlive a folder becoming
 /// empty so it is restored when a connection is moved back into that folder.
 pub fn load_connection_folder_colors() -> BTreeMap<String, String> {
@@ -780,6 +803,51 @@ pub fn save_theme_preference_in(dir: &Path, pref: ThemePreference) -> std::io::R
         "settings.json",
         &Json::Obj(pairs.into_iter().collect()),
     )
+}
+
+/// Which panels of the work area the user minimized, remembered across
+/// restarts: the Info panel under a data tab's grid and the Explain Plan
+/// panel beside a SQL tab's results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PanelLayout {
+    pub info_collapsed: bool,
+    pub plan_collapsed: bool,
+}
+
+const INFO_COLLAPSED_KEY: &str = "info_panel_collapsed";
+const PLAN_COLLAPSED_KEY: &str = "plan_panel_collapsed";
+
+pub fn load_panel_layout_in(dir: &Path) -> PanelLayout {
+    let Some(v) = read_json_file(&dir.join("settings.json")) else {
+        return PanelLayout::default();
+    };
+    let flag = |key: &str| v.get(key).and_then(Json::as_bool).unwrap_or(false);
+    PanelLayout {
+        info_collapsed: flag(INFO_COLLAPSED_KEY),
+        plan_collapsed: flag(PLAN_COLLAPSED_KEY),
+    }
+}
+
+pub fn save_panel_layout_in(dir: &Path, layout: PanelLayout) -> std::io::Result<()> {
+    let mut pairs: BTreeMap<String, Json> = match read_json_file(&dir.join("settings.json")) {
+        Some(Json::Obj(pairs)) => pairs.into_iter().collect(),
+        _ => BTreeMap::new(),
+    };
+    pairs.insert(INFO_COLLAPSED_KEY.into(), Json::Bool(layout.info_collapsed));
+    pairs.insert(PLAN_COLLAPSED_KEY.into(), Json::Bool(layout.plan_collapsed));
+    write_json_file(
+        dir,
+        "settings.json",
+        &Json::Obj(pairs.into_iter().collect()),
+    )
+}
+
+pub fn load_panel_layout() -> PanelLayout {
+    load_panel_layout_in(&config_dir())
+}
+
+pub fn save_panel_layout(layout: PanelLayout) -> std::io::Result<()> {
+    save_panel_layout_in(&config_dir(), layout)
 }
 
 /// Names of the color themes picked for light and dark mode. `None` means
@@ -1020,6 +1088,17 @@ pub fn save_update_prefs(prefs: &UpdatePrefs) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn folder_paths_rebase() {
+        use super::{folder_in, folder_rebase};
+        assert!(folder_in("a/b", "a") && !folder_in("ab", "a") && folder_in("a", "a"));
+        assert_eq!(folder_rebase("a/b/c", "a/b", "x").as_deref(), Some("x/c"));
+        assert_eq!(folder_rebase("a/b", "a/b", "x").as_deref(), Some("x"));
+        assert_eq!(folder_rebase("a/b", "a/b", "").as_deref(), Some(""));
+        assert_eq!(folder_rebase("a/b/c", "a/b", "").as_deref(), Some("c"));
+        assert_eq!(folder_rebase("ab", "a", "x"), None);
+    }
+
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
@@ -1262,6 +1341,21 @@ mod tests {
         assert_eq!(load_theme_preference_in(&dir), ThemePreference::Light);
         fs::write(dir.join("settings.json"), r#"{"theme":"bogus"}"#).unwrap();
         assert_eq!(load_theme_preference_in(&dir), ThemePreference::System);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn panel_layout_round_trip_keeps_other_keys() {
+        let dir = scratch("panel-layout");
+        assert_eq!(load_panel_layout_in(&dir), PanelLayout::default());
+        save_theme_preference_in(&dir, ThemePreference::Dark).unwrap();
+        let layout = PanelLayout {
+            info_collapsed: true,
+            plan_collapsed: false,
+        };
+        save_panel_layout_in(&dir, layout).unwrap();
+        assert_eq!(load_panel_layout_in(&dir), layout);
+        assert_eq!(load_theme_preference_in(&dir), ThemePreference::Dark);
         let _ = fs::remove_dir_all(&dir);
     }
 
