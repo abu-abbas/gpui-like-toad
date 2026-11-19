@@ -130,7 +130,9 @@ pub(crate) fn fetch_rows(
         for ix in 0..width {
             values.push(cell_value(row.get_ref(ix).map_err(db_err)?, &rows));
         }
-        rows.push(values);
+        if !rows.push(values) {
+            break;
+        }
     }
     Ok(rows.finish(columns))
 }

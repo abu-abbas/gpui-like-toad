@@ -30,6 +30,19 @@ pub const EXPORT_MAX_RESULT_BYTES: usize = 512 * 1024 * 1024;
 /// Largest value "Load full value" brings into the grid.
 pub const MAX_FULL_CELL_BYTES: usize = 64 * 1024 * 1024;
 
+/// "12 KiB", "3.5 MiB": a byte count for messages.
+pub fn human_bytes(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KIB {
+        format!("{bytes} bytes")
+    } else if b < KIB * KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{:.1} MiB", b / (KIB * KIB))
+    }
+}
+
 /// How much one fetch may keep in memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FetchLimits {
@@ -39,6 +52,11 @@ pub struct FetchLimits {
     /// The fetch stops (and sets `truncated` + `byte_limited`) once the
     /// kept rows reach this many bytes.
     pub max_result_bytes: usize,
+    /// Oracle: read LOB values up to `max_cell_bytes` (exports, "Load full
+    /// value"). Off for the grid, which reads only the start of the first
+    /// few CLOBs and never a BLOB. Either way LOBs arrive as locators and
+    /// reads stop at the limit, so a huge LOB is never pulled whole.
+    pub read_lobs: bool,
 }
 
 impl Default for FetchLimits {
@@ -59,6 +77,7 @@ impl FetchLimits {
             max_rows,
             max_cell_bytes: MAX_CELL_BYTES,
             max_result_bytes: MAX_RESULT_BYTES,
+            read_lobs: false,
         }
     }
 
@@ -68,15 +87,24 @@ impl FetchLimits {
             max_rows: crate::EXPORT_MAX_ROWS,
             max_cell_bytes: EXPORT_MAX_CELL_BYTES,
             max_result_bytes: EXPORT_MAX_RESULT_BYTES,
+            read_lobs: true,
         }
     }
 
-    /// One cell fetched in full ("Load full value").
-    pub const fn full_cell() -> Self {
+    /// One cell fetched in full ("Load full value"). `budget` is what the
+    /// open results can still take (see the app's all-tabs budget): a
+    /// value that does not fit is not stored.
+    pub const fn full_cell(budget: usize) -> Self {
+        let cell = if budget < MAX_FULL_CELL_BYTES {
+            budget
+        } else {
+            MAX_FULL_CELL_BYTES
+        };
         FetchLimits {
             max_rows: 1,
-            max_cell_bytes: MAX_FULL_CELL_BYTES,
+            max_cell_bytes: cell,
             max_result_bytes: usize::MAX,
+            read_lobs: true,
         }
     }
 
@@ -86,6 +114,7 @@ impl FetchLimits {
             max_rows,
             max_cell_bytes: usize::MAX,
             max_result_bytes: usize::MAX,
+            read_lobs: true,
         }
     }
 }
@@ -148,10 +177,28 @@ impl RowCollector {
         false
     }
 
-    pub fn push(&mut self, row: Vec<Value>) {
-        self.bytes +=
+    /// Bytes the result may still take before [`FetchLimits::max_result_bytes`].
+    pub fn remaining_bytes(&self) -> usize {
+        self.limits.max_result_bytes.saturating_sub(self.bytes)
+    }
+
+    /// Keep `row` if it fits in what is left of the result's byte budget.
+    /// A row that does not fit is dropped whole (the result is marked
+    /// `truncated` + `byte_limited`) and `false` is returned: the caller
+    /// stops fetching. `is_full` alone cannot promise this, because it
+    /// checks before the row's size is known.
+    #[must_use]
+    pub fn push(&mut self, row: Vec<Value>) -> bool {
+        let size =
             std::mem::size_of::<Vec<Value>>() + row.iter().map(Value::heap_bytes).sum::<usize>();
+        if size > self.remaining_bytes() {
+            self.truncated = true;
+            self.byte_limited = true;
+            return false;
+        }
+        self.bytes += size;
         self.rows.push(row);
+        true
     }
 
     /// Text cell under the per-cell limit.
@@ -189,7 +236,9 @@ impl RowCollector {
                 break;
             }
             let row = row.into_iter().map(|v| clip_owned(v, limits)).collect();
-            collector.push(row);
+            if !collector.push(row) {
+                break;
+            }
         }
         let mut result = collector.finish(columns);
         result.elapsed = elapsed;
@@ -249,6 +298,7 @@ mod tests {
             max_rows: 1000,
             max_cell_bytes: 1024,
             max_result_bytes: 10 * 1024,
+            read_lobs: false,
         };
         let rows = (0..100).map(|_| vec![Value::Text("y".repeat(4096))]);
         let result = RowCollector::collect_all(limits, col(), rows, Duration::ZERO);
@@ -258,6 +308,47 @@ mod tests {
         assert!(result.truncated && result.byte_limited);
         assert_eq!(result.clipped_cells(), result.row_count());
         assert!(result.heap_bytes() < 12 * 1024);
+    }
+
+    #[test]
+    fn a_row_that_does_not_fit_is_not_stored() {
+        let limits = FetchLimits {
+            max_rows: 100,
+            max_cell_bytes: usize::MAX,
+            max_result_bytes: 1024,
+            read_lobs: false,
+        };
+        // The first row alone is bigger than the whole budget.
+        let rows = vec![vec![Value::Text("z".repeat(4096))]];
+        let result = RowCollector::collect_all(limits, col(), rows, Duration::ZERO);
+        assert_eq!(result.row_count(), 0);
+        assert!(result.truncated && result.byte_limited);
+        assert!(result.heap_bytes() <= 1024);
+    }
+
+    #[test]
+    fn rows_stop_at_the_exact_budget_never_over() {
+        let limits = FetchLimits {
+            max_rows: 100,
+            max_cell_bytes: usize::MAX,
+            max_result_bytes: 5000,
+            read_lobs: false,
+        };
+        let rows = (0..50).map(|_| vec![Value::Text("q".repeat(1000))]);
+        let result = RowCollector::collect_all(limits, col(), rows, Duration::ZERO);
+        assert!(result.row_count() >= 1 && result.row_count() < 50);
+        assert!(result.heap_bytes() <= 5000, "{}", result.heap_bytes());
+        assert!(result.byte_limited);
+    }
+
+    #[test]
+    fn full_cell_limit_follows_the_budget_but_never_exceeds_the_cap() {
+        assert_eq!(FetchLimits::full_cell(1000).max_cell_bytes, 1000);
+        assert_eq!(FetchLimits::full_cell(0).max_cell_bytes, 0);
+        assert_eq!(
+            FetchLimits::full_cell(usize::MAX).max_cell_bytes,
+            MAX_FULL_CELL_BYTES
+        );
     }
 
     #[test]

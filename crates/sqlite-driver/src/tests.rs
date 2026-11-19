@@ -298,8 +298,11 @@ fn result_byte_limit_stops_early() {
     let result = client
         .query("SELECT body FROM doc ORDER BY id", limits)
         .unwrap();
-    assert_eq!(result.row_count(), 1);
+    // Even the first 64 KiB preview does not fit in 1 KiB: the row is
+    // not stored at all, instead of going over the budget.
+    assert_eq!(result.row_count(), 0);
     assert!(result.truncated && result.byte_limited);
+    assert!(result.heap_bytes() <= 1024);
 }
 
 #[test]
@@ -307,9 +310,29 @@ fn full_value_loads_on_demand_by_rowid() {
     let db = TempDb::new("fullcell");
     big_cells(&db);
     let mut client = db.client();
-    let full = client.fetch_cell("main", "doc", "body", "1").unwrap();
+    let full = client
+        .fetch_cell("main", "doc", "body", "1", usize::MAX)
+        .unwrap();
     assert_eq!(full, Value::Text("x".repeat(200_000)));
-    assert!(client.fetch_cell("main", "doc", "body", "99").is_err());
+    assert!(client
+        .fetch_cell("main", "doc", "body", "99", usize::MAX)
+        .is_err());
+}
+
+#[test]
+fn full_value_larger_than_the_budget_is_refused() {
+    let db = TempDb::new("fullbudget");
+    big_cells(&db);
+    let mut client = db.client();
+    let err = client
+        .fetch_cell("main", "doc", "body", "1", 100_000)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("larger than"), "{err}");
+    // Exactly enough room still loads (value + enum overhead).
+    assert!(client
+        .fetch_cell("main", "doc", "body", "1", 300_000)
+        .is_ok());
 }
 
 /// Advisory SQLite lama diperbaiki di 3.54.0; pastikan build memakai versi itu.

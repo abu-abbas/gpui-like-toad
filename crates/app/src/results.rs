@@ -334,15 +334,39 @@ impl ResultsDelegate {
         self.pending = pending;
     }
 
-    /// Show `value` in the cell of the row with `rowid` (an edit that has
-    /// not been refetched). Returns the value it replaced.
-    pub fn set_cell(&mut self, rowid: &str, column: &str, value: Value) -> Option<Value> {
+    /// Memory held by cells changed in the grid ("Load full value" results
+    /// and edits). The shared result does not include them, so the all-tabs
+    /// budget adds this on top.
+    pub fn override_bytes(&self) -> usize {
+        self.overrides.values().map(Value::heap_bytes).sum()
+    }
+
+    /// (result row, result column) of the cell of the row with `rowid`.
+    fn find_cell(&self, rowid: &str, column: &str) -> Option<(usize, usize)> {
         let rowid_col = self.rowid_col?;
         let col = self.result.columns.iter().position(|c| c.name == column)?;
         let row = (0..self.result.rows.len()).find(|&r| {
             self.source_cell(r, rowid_col)
                 .is_some_and(|v| v.display() == rowid)
         })?;
+        Some((row, col))
+    }
+
+    /// Length of the full value behind a clipped cell (a lower bound of the
+    /// bytes it takes: characters can be several bytes), `None` when the
+    /// cell is not clipped or not in the grid.
+    pub fn clipped_len(&self, rowid: &str, column: &str) -> Option<u64> {
+        let (row, col) = self.find_cell(rowid, column)?;
+        match self.source_cell(row, col)? {
+            Value::Clipped(c) => Some(c.full_len),
+            _ => None,
+        }
+    }
+
+    /// Show `value` in the cell of the row with `rowid` (an edit that has
+    /// not been refetched). Returns the value it replaced.
+    pub fn set_cell(&mut self, rowid: &str, column: &str, value: Value) -> Option<Value> {
+        let (row, col) = self.find_cell(rowid, column)?;
         let old = self.source_cell(row, col)?.clone();
         self.overrides.insert((row, col), value);
         Some(old)
@@ -1145,6 +1169,40 @@ mod tests {
         // Sorting did not touch the shared rows.
         assert!(matches!(&shared.rows[0][0], Value::Text(t) if t.starts_with("00000")));
         assert!(grid.cell_text(0, 0).starts_with("00511"));
+    }
+
+    #[test]
+    fn loaded_full_values_count_as_override_bytes_and_clipped_len_is_known() {
+        let clipped = Value::text_limited(&"a".repeat(10_000), 100);
+        let result = QueryResult {
+            columns: vec![
+                ColumnInfo {
+                    name: ROWID_COLUMN.into(),
+                    data_type: "ROWID".into(),
+                },
+                ColumnInfo {
+                    name: "BODY".into(),
+                    data_type: "CLOB".into(),
+                },
+            ],
+            rows: vec![vec![Value::Text("AAA1".into()), clipped]],
+            ..Default::default()
+        };
+        let mut grid = ResultsDelegate::empty();
+        grid.set_result(result);
+        assert_eq!(grid.override_bytes(), 0);
+        assert_eq!(grid.clipped_len("AAA1", "BODY"), Some(10_000));
+        assert_eq!(grid.clipped_len("NOPE", "BODY"), None);
+
+        let full = Value::Text("a".repeat(10_000));
+        let size = full.heap_bytes();
+        grid.set_cell("AAA1", "BODY", full);
+        assert_eq!(grid.override_bytes(), size);
+        // No longer clipped once loaded.
+        assert_eq!(grid.clipped_len("AAA1", "BODY"), None);
+        // A new result drops the loaded values (and their bytes).
+        grid.set_result(QueryResult::default());
+        assert_eq!(grid.override_bytes(), 0);
     }
 
     fn int(n: i128) -> Value {

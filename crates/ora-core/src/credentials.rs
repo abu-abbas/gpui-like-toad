@@ -80,6 +80,20 @@ impl PasswordAction {
             PasswordAction::Delete => store.delete(profile_id),
         }
     }
+
+    /// Write the credential first and run `commit` (which makes the profile
+    /// point at its new target) only when that succeeded. A keychain
+    /// failure therefore never leaves a profile aimed at a target whose
+    /// password is missing or still the one for the old target.
+    pub fn apply_then<T>(
+        &self,
+        store: &dyn CredentialStore,
+        profile_id: &str,
+        commit: impl FnOnce() -> T,
+    ) -> Result<T, CredentialError> {
+        self.apply(store, profile_id)?;
+        Ok(commit())
+    }
 }
 
 /// The password to connect with for a saved profile, if it has one. A
@@ -224,6 +238,44 @@ mod tests {
             .apply(&store, "p1")
             .unwrap();
         assert_eq!(store.get("p1").unwrap().unwrap().expose_secret(), "new");
+    }
+
+    /// A store whose writes always fail.
+    struct FailingStore;
+    impl CredentialStore for FailingStore {
+        fn get(&self, _: &str) -> Result<Option<SecretString>, CredentialError> {
+            Ok(None)
+        }
+        fn set(&self, _: &str, _: &SecretString) -> Result<(), CredentialError> {
+            Err(CredentialError("locked".into()))
+        }
+        fn delete(&self, _: &str) -> Result<(), CredentialError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn apply_then_commits_only_after_credential_is_stored() {
+        let store = MemoryCredentialStore::default();
+        let mut committed_with_secret_present = false;
+        let r = PasswordAction::decide(true, pw("new")).apply_then(&store, "p1", || {
+            committed_with_secret_present = store.get("p1").unwrap().is_some();
+        });
+        assert!(r.is_ok());
+        assert!(
+            committed_with_secret_present,
+            "secret must exist before commit"
+        );
+    }
+
+    #[test]
+    fn apply_then_skips_commit_when_keychain_fails() {
+        let mut committed = false;
+        let r = PasswordAction::decide(true, pw("new")).apply_then(&FailingStore, "p1", || {
+            committed = true;
+        });
+        assert!(r.is_err());
+        assert!(!committed, "profile must not move to the new target");
     }
 
     #[test]

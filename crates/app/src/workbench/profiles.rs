@@ -155,14 +155,14 @@ impl Workbench {
     /// both), so a typed password does not stay in the hidden dialog.
     pub(super) fn scrub_password_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.connection_form.scrub_password = false;
-        if !self.password_field_blank(cx) {
-            Self::set_input(
-                &self.connection_form.password_input.clone(),
-                String::new(),
-                window,
-                cx,
-            );
-        }
+        // Always reset, even when the field is already blank: a password
+        // typed and then deleted by hand would otherwise stay in undo.
+        Self::set_input(
+            &self.connection_form.password_input.clone(),
+            String::new(),
+            window,
+            cx,
+        );
     }
 
     /// Run a keychain write/delete off the UI thread; report failures in
@@ -553,14 +553,38 @@ impl Workbench {
         let touch_keychain = self.connection_form.save_password
             || existing.as_ref().is_some_and(|p| p.save_password);
         let profile_id = profile.id.clone();
-        match self.connection_form.editing_profile {
-            Some(ix) if ix < self.profiles.len() => self.profiles[ix] = profile,
-            _ => {
-                self.profiles.push(profile);
-                self.connection_form.editing_profile = Some(self.profiles.len() - 1);
+        let editing = self.connection_form.editing_profile;
+        let commit = |this: &mut Self, profile: SavedProfile| {
+            match editing {
+                Some(ix) if ix < this.profiles.len() => this.profiles[ix] = profile,
+                _ => {
+                    this.profiles.push(profile);
+                    this.connection_form.editing_profile = Some(this.profiles.len() - 1);
+                }
             }
+            this.persist_profiles();
+        };
+        if touch_keychain && matches!(action, PasswordAction::Store(_)) {
+            // New password: it goes into the keychain before the profile
+            // starts pointing at the (possibly new) target. If the
+            // keychain refuses, the profile stays as it was.
+            return match action.apply_then(crate::keychain::store(), &profile_id, || ()) {
+                Ok(()) => {
+                    commit(self, profile);
+                    true
+                }
+                Err(err) => {
+                    let text = format!(
+                        "Failed to save the password to the keychain, connection not changed: {err}"
+                    );
+                    self.push_message(text.clone());
+                    self.connection_form.form_notice = Some((true, text));
+                    cx.notify();
+                    false
+                }
+            };
         }
-        self.persist_profiles();
+        commit(self, profile);
         if touch_keychain && !matches!(action, PasswordAction::Keep) {
             self.apply_keychain(profile_id, action, cx);
         }

@@ -1,6 +1,7 @@
 //! Responses to Run and Explain in SQL tabs.
 
 use super::*;
+use crate::workbench::results::result_room;
 
 impl Workbench {
     pub(super) fn on_script_done(
@@ -100,6 +101,17 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         let size = value.heap_bytes();
+        // The value was read against the room left when it was asked for;
+        // other results may have grown while it loaded.
+        let room = result_room(self.open_result_bytes(cx));
+        if size > room {
+            self.conn.status = format!(
+                "Cannot show the full value of {column}: it needs {} but only {} are left in the open results.",
+                ora_core::fetch::human_bytes(size),
+                ora_core::fetch::human_bytes(room)
+            );
+            return;
+        }
         let shown = self.target_tab_mut().table_state.update(cx, |state, cx| {
             let shown = state
                 .delegate_mut()
@@ -108,6 +120,7 @@ impl Workbench {
             state.refresh(cx);
             shown
         });
+        self.enforce_result_budget(cx);
         self.conn.status = if shown {
             format!("Loaded the full value of {column} ({size} bytes).")
         } else {
