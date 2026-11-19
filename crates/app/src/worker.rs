@@ -52,7 +52,7 @@ pub enum Password {
 /// Message for a profile marked "Save password" whose keychain entry is
 /// gone (removed by hand, or saved on another machine).
 pub const NO_SAVED_PASSWORD: &str =
-    "Password tersimpan tidak ditemukan di keychain. Isi password lalu Connect.";
+    "The saved password is missing from the keychain. Enter the password and click Connect.";
 
 impl Password {
     fn resolve(self) -> Result<SecretString, String> {
@@ -285,7 +285,9 @@ impl DbHandle {
     fn dispatch(&self, job: Job, confirmed: bool) -> Receiver<Response> {
         let (tx, rx) = mpsc::channel();
         if self.tx.send((job, confirmed, tx.clone())).is_err() {
-            let _ = tx.send(Response::Failed("DB worker tidak berjalan".to_string()));
+            let _ = tx.send(Response::Failed(
+                "The database worker is not running".to_string(),
+            ));
         }
         rx
     }
@@ -676,7 +678,7 @@ fn export_table(
         ExportFormat::Xlsx => to_xlsx(&result).map_err(DbError::new)?,
     };
     std::fs::write(path, bytes)
-        .map_err(|e| DbError::new(format!("gagal menulis {}: {e}", path.display())))?;
+        .map_err(|e| DbError::new(format!("Failed to write {}: {e}", path.display())))?;
     Ok((result.row_count(), result.truncated))
 }
 
@@ -687,7 +689,7 @@ fn import_csv(
     path: &std::path::Path,
 ) -> Result<u64, DbError> {
     let text = std::fs::read_to_string(path)
-        .map_err(|e| DbError::new(format!("gagal membaca {}: {e}", path.display())))?;
+        .map_err(|e| DbError::new(format!("Failed to read {}: {e}", path.display())))?;
     let csv = parse_csv(&text).map_err(DbError::new)?;
     let table_columns = client.describe_table(owner, name)?;
     let columns = map_columns(&csv.headers, &table_columns).map_err(DbError::new)?;

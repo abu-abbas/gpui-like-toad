@@ -148,11 +148,9 @@ pub trait DbClient: Send {
             crate::edit::update_cell_sql(self.dialect(), owner, table, column, rowid, value);
         match self.execute_binds(&query.sql, &query.binds)? {
             1 => Ok(()),
-            0 => Err(DbError::new(
-                "baris tidak ditemukan lagi (sudah dihapus atau ROWID berubah)",
-            )),
+            0 => Err(DbError::new("Row no longer exists or its ROWID changed")),
             n => Err(DbError::new(format!(
-                "UPDATE mengubah {n} baris, seharusnya 1; lakukan Rollback"
+                "Expected UPDATE to affect one row, but it affected {n}. Roll back the transaction."
             ))),
         }
     }
@@ -209,7 +207,7 @@ pub trait DbClient: Send {
         for (ix, row) in rows.iter().enumerate() {
             let sql = crate::import::insert_statement(owner, table, columns, row);
             self.execute(&sql)
-                .map_err(|e| DbError::new(format!("baris data {}: {e}", ix + 1)))?;
+                .map_err(|e| DbError::new(format!("Data row {}: {e}", ix + 1)))?;
             inserted += 1;
         }
         Ok(inserted)

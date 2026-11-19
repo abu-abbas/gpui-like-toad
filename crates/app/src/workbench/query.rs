@@ -56,7 +56,7 @@ impl Workbench {
                 Ok(Ok(None)) => return,
                 _ => {
                     let _ = view.update(cx, |this, cx| {
-                        this.push_message("Gagal membuka dialog simpan SQL.".into());
+                        this.push_message("Failed to open the SQL save dialog.".into());
                         cx.notify();
                     });
                     return;
@@ -68,8 +68,8 @@ impl Workbench {
                 .await;
             let _ = view.update(cx, |this, cx| {
                 this.push_message(match written {
-                    Ok(()) => format!("SQL tersimpan: {display}"),
-                    Err(err) => format!("Gagal menyimpan SQL: {err}"),
+                    Ok(()) => format!("SQL saved: {display}"),
+                    Err(err) => format!("Failed to save SQL: {err}"),
                 });
                 cx.notify();
             });
@@ -84,7 +84,7 @@ impl Workbench {
     pub(super) fn record_run(&mut self, sql: &str) {
         store::record_history(&mut self.history, sql, store::now_unix_secs());
         if let Err(err) = store::save_history(&self.history) {
-            self.push_message(format!("Gagal menyimpan history: {err}"));
+            self.push_message(format!("Failed to save query history: {err}"));
         }
     }
 
@@ -93,7 +93,7 @@ impl Workbench {
             return;
         }
         if self.conn.session.is_none() {
-            self.push_message("Belum terhubung: Connect atau Demo dulu.".to_string());
+            self.push_message("Connect to a database or open Demo first.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;
             cx.notify();
             return;
@@ -132,12 +132,12 @@ impl Workbench {
 
     fn run_sql(&mut self, sql: String, cx: &mut Context<Self>) {
         if clean_statement(&sql).is_empty() {
-            self.push_message("Editor kosong.".to_string());
+            self.push_message("The editor is empty.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;
             cx.notify();
             return;
         }
-        self.conn.status = "Menjalankan...".to_string();
+        self.conn.status = "Running query…".to_string();
         self.conn.pending_sql = Some(sql.clone());
         self.active_tab_mut().statement_results.clear();
         let job = if let Some(statements) = ora_core::sql::select_script(&sql) {
@@ -158,19 +158,19 @@ impl Workbench {
             return;
         }
         if self.conn.session.is_none() {
-            self.push_message("Belum terhubung: Connect atau Demo dulu.".to_string());
+            self.push_message("Connect to a database or open Demo first.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;
             cx.notify();
             return;
         }
         let sql = self.editor_text(cx);
         if clean_statement(&sql).is_empty() {
-            self.push_message("Editor kosong.".to_string());
+            self.push_message("The editor is empty.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;
             cx.notify();
             return;
         }
-        self.conn.status = "Menjelaskan plan...".to_string();
+        self.conn.status = "Generating explain plan…".to_string();
         self.spawn_db(Job::Explain { sql }, PendingOp::Explain, cx);
     }
 
@@ -202,9 +202,9 @@ impl Workbench {
         self.conn.pending_op = None;
         self.conn.pending_sql = None;
         self.conn.busy = false;
-        self.conn.status = "Dihentikan (respons dibuang).".to_string();
+        self.conn.status = "Stopped waiting for the database.".to_string();
         self.push_message(
-            "Stop: operasi database yang sedang berjalan tidak dapat dibatalkan; responsnya akan diabaikan saat tiba.".to_string(),
+            "Stopped waiting for the database. The operation is still running and its response will be ignored.".to_string(),
         );
         cx.notify();
     }

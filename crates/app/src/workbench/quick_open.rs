@@ -22,12 +22,12 @@ impl Workbench {
             return;
         }
         if self.conn.session.is_none() || self.connection_form.show_connection_form {
-            self.conn.status = "Quick Open butuh koneksi yang aktif.".to_string();
+            self.conn.status = "Quick Open requires an active connection.".to_string();
             cx.notify();
             return;
         }
         let input =
-            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Cari tabel atau view..."));
+            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Search tables and views…"));
         let sub = cx.subscribe_in(
             &input,
             window,
@@ -112,7 +112,7 @@ impl Workbench {
                     .px(px(SPACE_3))
                     .py(px(SPACE_2))
                     .child(empty_state_text(
-                        "Tidak ada tabel atau view yang cocok.".to_string(),
+                        "No matching tables or views.".to_string(),
                         theme,
                     )),
             );
@@ -184,7 +184,7 @@ impl Workbench {
                     .border_t_1()
                     .border_color(theme.border)
                     .child(caption_text(
-                        "Enter buka data · ↑↓ pilih · Esc tutup".to_string(),
+                        "Enter to open · ↑↓ to select · Esc to close".to_string(),
                         theme,
                     )),
             );

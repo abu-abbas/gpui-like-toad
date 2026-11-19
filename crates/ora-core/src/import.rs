@@ -24,11 +24,11 @@ pub fn parse_csv(text: &str) -> Result<CsvData, String> {
     let records = split_records(text, ',')?;
     let mut records = records.into_iter();
     let Some((_, headers)) = records.next() else {
-        return Err("file CSV kosong".to_string());
+        return Err("The CSV file is empty".to_string());
     };
     let headers: Vec<String> = headers.into_iter().map(|h| h.trim().to_string()).collect();
     if headers.iter().all(|h| h.is_empty()) {
-        return Err("baris header CSV kosong".to_string());
+        return Err("The CSV header is empty".to_string());
     }
     let mut rows = Vec::new();
     for (line, fields) in records {
@@ -38,7 +38,7 @@ pub fn parse_csv(text: &str) -> Result<CsvData, String> {
         }
         if fields.len() != headers.len() {
             return Err(format!(
-                "baris {line}: {} kolom, header punya {}",
+                "Line {line}: found {} columns, but the header has {}",
                 fields.len(),
                 headers.len()
             ));
@@ -94,7 +94,7 @@ fn split_records(text: &str, delimiter: char) -> Result<Vec<(usize, Vec<String>)
         }
     }
     if in_quotes {
-        return Err(format!("baris {record_line}: tanda kutip tidak ditutup"));
+        return Err(format!("Line {record_line}: unclosed quote"));
     }
     if !field.is_empty() || !fields.is_empty() || text.ends_with('"') {
         fields.push(field);
@@ -122,7 +122,7 @@ pub fn map_columns(headers: &[String], columns: &[ColumnDef]) -> Result<Vec<Stri
         Ok(mapped)
     } else {
         Err(format!(
-            "kolom CSV tidak ada di tabel: {}",
+            "CSV columns missing from the table: {}",
             unknown.join(", ")
         ))
     }
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn rejects_ragged_rows_and_open_quotes() {
-        assert!(parse_csv("A,B\n1\n").unwrap_err().contains("baris 2"));
+        assert!(parse_csv("A,B\n1\n").unwrap_err().contains("Line 2"));
         assert!(parse_csv("A\n\"open\n").is_err());
         assert!(parse_csv("").is_err());
     }

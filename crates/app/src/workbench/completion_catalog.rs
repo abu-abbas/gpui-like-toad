@@ -70,7 +70,7 @@ impl Workbench {
                 // not retry a schema the session cannot read.
                 self.catalog.borrow_mut().set_owner(&owner, Vec::new());
                 self.push_message(format!(
-                    "Autocomplete: gagal memuat metadata {owner}: {message}"
+                    "Autocomplete failed to load metadata for {owner}: {message}"
                 ));
                 cx.notify();
             }

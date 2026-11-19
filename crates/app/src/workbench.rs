@@ -116,7 +116,7 @@ const DATA_HEADER_HEIGHT: f32 = 28.;
 
 /// A tab whose connection was disconnected while another one stays open.
 const ORPHAN_TAB: &str =
-    "Koneksi tab ini sudah ditutup. Pilih koneksi lewat tombol koneksi di kanan atas.";
+    "This tab's connection is closed. Use the connection selector to choose a connection.";
 
 const MAX_MESSAGES_SHOWN: usize = 30;
 
@@ -257,7 +257,7 @@ impl ConnState {
             selected_object: None,
             objects: Vec::new(),
             uncommitted: false,
-            status: "Belum terhubung.".to_string(),
+            status: "Not connected.".to_string(),
             catalog: Catalog::new(),
             catalog_loading: HashSet::new(),
             catalog_epoch: 0,
@@ -559,8 +559,7 @@ impl Workbench {
             return;
         }
         if self.has_staged_edits() {
-            self.conn.status =
-                "Ada perubahan sel yang belum dikirim: klik Apply (atau Discard) dulu.".to_string();
+            self.conn.status = "Apply or discard pending cell changes first.".to_string();
             cx.notify();
             return;
         }
@@ -667,11 +666,12 @@ impl Render for Workbench {
                                 .into_any_element(),
                             ),
                         };
-                        let main = if connected {
-                            self.render_main(&theme, cx).into_any_element()
-                        } else {
-                            self.render_disconnected(&theme, cx).into_any_element()
-                        };
+                        let main =
+                            if connected || !self.show_empty_workspace || self.whats_new_active() {
+                                self.render_main(&theme, cx).into_any_element()
+                            } else {
+                                self.render_disconnected(&theme, cx).into_any_element()
+                            };
                         if let Some(secondary) = secondary {
                             // Use the same resizable column for all three sidebar pages.
                             h_resizable(if self.sidebar_compact {

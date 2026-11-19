@@ -25,7 +25,7 @@ impl Workbench {
     /// response of a superseded operation.
     pub(super) fn spawn_db(&mut self, job: Job, op: PendingOp, cx: &mut Context<Self>) {
         if self.conn.db.is_none() {
-            self.push_message("Belum terhubung.".to_string());
+            self.push_message("Not connected.".to_string());
             return;
         }
         // Work that lands in the active tab must run on that tab's own
@@ -54,7 +54,7 @@ impl Workbench {
                 let text = if self.active_tab_orphaned() {
                     ORPHAN_TAB
                 } else {
-                    "Tab ini milik koneksi lain."
+                    "This tab belongs to another connection."
                 };
                 self.push_message(text.to_string());
                 self.conn.status = text.to_string();
@@ -285,7 +285,7 @@ impl Workbench {
         let resp = match resp {
             Ok(resp) => resp,
             Err(_) => {
-                self.push_message("DB worker berhenti.".to_string());
+                self.push_message("The database worker stopped.".to_string());
                 self.conn.status = "Worker error".to_string();
                 cx.notify();
                 return;
@@ -316,7 +316,7 @@ impl Workbench {
                 self.conn.connect_error = Some(message.clone());
             }
             self.push_message(message.clone());
-            self.conn.status = "Error (lihat Messages).".to_string();
+            self.conn.status = "Error (see Messages).".to_string();
             self.target_tab_mut().results_tab = ResultsTab::Messages;
             cx.notify();
             return;
@@ -329,7 +329,7 @@ impl Workbench {
                 self.conn.current_schema = None;
                 self.conn.connect_error = None;
                 self.connection_form.show_connection_form = false;
-                self.conn.status = format!("Connected sebagai {}.", info.user);
+                self.conn.status = format!("Connected as {}.", info.user);
                 self.push_message(format!(
                     "Connected: {} @ {} ({})",
                     info.user, info.database, info.version
@@ -340,18 +340,18 @@ impl Workbench {
             (Some(PendingOp::TestConnect), Response::Tested(outcome)) => match outcome {
                 Ok(info) => {
                     let text = format!(
-                        "Test koneksi berhasil: {} @ {} ({})",
+                        "Connection test succeeded: {} @ {} ({})",
                         info.user, info.database, info.version
                     );
                     self.push_message(text.clone());
                     self.connection_form.form_notice = Some((false, text));
-                    self.conn.status = "Test koneksi berhasil.".to_string();
+                    self.conn.status = "Connection test succeeded.".to_string();
                 }
                 Err(message) => {
-                    self.push_message(format!("Test koneksi gagal: {message}"));
+                    self.push_message(format!("Connection test failed: {message}"));
                     self.connection_form.form_notice =
-                        Some((true, format!("Test koneksi gagal: {message}")));
-                    self.conn.status = "Test koneksi gagal.".to_string();
+                        Some((true, format!("Connection test failed: {message}")));
+                    self.conn.status = "Connection test failed.".to_string();
                 }
             },
             (Some(PendingOp::Run), Response::ScriptDone(results)) => {
@@ -372,7 +372,7 @@ impl Workbench {
                     .as_ref()
                     .map(|info| format!("{}  ·  {}", self.conn.label(), info.database))
                     .unwrap_or_default();
-                self.conn.status = format!("{} query selesai.", results.len());
+                self.conn.status = format!("Queries completed: {}.", results.len());
                 self.tabs[ix].statement_results = results;
                 self.show_statement_result(ix, 0, cx);
             }
@@ -394,11 +394,11 @@ impl Workbench {
                 self.target_tab_mut().results_tab = ResultsTab::Results;
                 let is_data = self.target_tab_mut().data.is_some();
                 self.conn.status = if truncated && is_data {
-                    format!("{rows} baris dalam {elapsed}ms (masih ada baris berikutnya)")
+                    format!("{rows} rows in {elapsed} ms (more rows available)")
                 } else if truncated {
-                    format!("{rows} baris dalam {elapsed}ms (dibatasi {DEFAULT_MAX_ROWS} baris)")
+                    format!("{rows} rows in {elapsed} ms (limited to {DEFAULT_MAX_ROWS} rows)")
                 } else {
-                    format!("{rows} baris dalam {elapsed}ms")
+                    format!("{rows} rows in {elapsed} ms")
                 };
             }
             (Some(PendingOp::Run), Response::Executed(affected)) => {
@@ -406,8 +406,8 @@ impl Workbench {
                     self.record_run(&sql);
                 }
                 self.target_tab_mut().statement_results.clear();
-                self.push_message(format!("{affected} baris terpengaruh."));
-                self.conn.status = format!("{affected} baris terpengaruh (belum commit).");
+                self.push_message(format!("Affected rows: {affected}."));
+                self.conn.status = format!("Affected rows: {affected} (uncommitted).");
                 self.target_tab_mut().results_tab = ResultsTab::Messages;
             }
             (Some(PendingOp::Explain), Response::PlanTree(nodes, lines)) => {
@@ -416,14 +416,14 @@ impl Workbench {
                 tab.plan_nodes = Some(nodes);
                 tab.plan_lines = lines;
                 tab.results_tab = ResultsTab::Plan;
-                self.conn.status = "Explain plan selesai.".to_string();
+                self.conn.status = "Explain plan ready.".to_string();
             }
             (Some(PendingOp::Explain), Response::Plan(lines)) => {
                 let tab = self.target_tab_mut();
                 tab.plan_nodes = None;
                 tab.plan_lines = lines;
                 tab.results_tab = ResultsTab::Plan;
-                self.conn.status = "Explain plan selesai.".to_string();
+                self.conn.status = "Explain plan ready.".to_string();
             }
             (Some(PendingOp::ListSchemas), Response::Schemas(schemas)) => {
                 let user = self.conn.session.as_ref().map(|s| s.user.clone());
@@ -446,7 +446,7 @@ impl Workbench {
                 self.conn.objects = objects;
                 self.conn.selected_object = None;
                 let schema = self.conn.current_schema.clone().unwrap_or_default();
-                self.conn.status = format!("{schema}: {count} objek dimuat.");
+                self.conn.status = format!("{schema}: loaded objects: {count}.");
                 // Autocomplete metadata follows the explorer: (re)load the
                 // schema just listed, and the session user's own schema,
                 // which unqualified names resolve against.
@@ -476,19 +476,19 @@ impl Workbench {
                 },
             ) => {
                 let cap = if truncated {
-                    format!(" (dibatasi {} baris)", ora_core::EXPORT_MAX_ROWS)
+                    format!(" (limited to {} rows)", ora_core::EXPORT_MAX_ROWS)
                 } else {
                     String::new()
                 };
                 self.push_message(format!(
-                    "Export {owner}.{name}: {rows} baris ke {}{cap}",
+                    "Exported {rows} rows from {owner}.{name} to {}{cap}",
                     path.display()
                 ));
-                self.conn.status = format!("Export {name} selesai: {rows} baris.");
+                self.conn.status = format!("Exported {rows} rows from {name}.");
             }
             (Some(PendingOp::RefreshMaterializedView { owner, name }), Response::Executed(_)) => {
-                self.push_message(format!("Materialized view {owner}.{name} di-refresh."));
-                self.conn.status = format!("{name} selesai di-refresh.");
+                self.push_message(format!("Refreshed materialized view {owner}.{name}."));
+                self.conn.status = format!("Refreshed {name}.");
                 self.target_tab_mut().results_tab = ResultsTab::Messages;
                 // Show the new rows when that view is open in a data tab.
                 let open_here = self.target_tab_mut().data.as_ref().is_some_and(|d| {
@@ -500,14 +500,14 @@ impl Workbench {
             }
             (Some(PendingOp::ImportCsv { owner, name }), Response::Imported(rows)) => {
                 self.push_message(format!(
-                    "Import {owner}.{name}: {rows} baris dimasukkan (belum commit)."
+                    "Imported {rows} rows into {owner}.{name} (uncommitted)."
                 ));
-                self.conn.status = format!("{rows} baris diimpor ke {name} (belum commit).");
+                self.conn.status = format!("Imported {rows} rows into {name} (uncommitted).");
                 self.target_tab_mut().results_tab = ResultsTab::Messages;
             }
             (Some(PendingOp::DataStructure), Response::Described(defs)) => {
                 let result = schema::describe_to_result(&defs);
-                self.conn.status = format!("{} kolom.", result.row_count());
+                self.conn.status = format!("Columns: {}.", result.row_count());
                 if let Some(state) = self
                     .target_tab_mut()
                     .data
@@ -536,7 +536,7 @@ impl Workbench {
                 }
             }
             (Some(PendingOp::DataDdl), Response::Ddl(ddl)) => {
-                self.conn.status = "DDL dimuat.".to_string();
+                self.conn.status = "DDL loaded.".to_string();
                 if let Some(editor) = self.target_tab_mut().data.as_ref().map(|d| d.ddl.clone()) {
                     editor.update(cx, |state, cx| state.set_value(ddl, window, cx));
                 }
@@ -547,14 +547,14 @@ impl Workbench {
             }
             (Some(PendingOp::Commit), Response::Committed) => {
                 self.conn.uncommitted = false;
-                self.push_message("Commit berhasil.".to_string());
-                self.conn.status = "Commit berhasil.".to_string();
+                self.push_message("Commit succeeded.".to_string());
+                self.conn.status = "Commit succeeded.".to_string();
                 self.clear_edit_marks(cx);
             }
             (Some(PendingOp::Rollback), Response::RolledBack) => {
                 self.conn.uncommitted = false;
-                self.push_message("Rollback berhasil.".to_string());
-                self.conn.status = "Rollback berhasil.".to_string();
+                self.push_message("Rollback succeeded.".to_string());
+                self.conn.status = "Rollback succeeded.".to_string();
                 self.clear_edit_marks(cx);
                 // The grid still shows the rolled-back values.
                 if !background

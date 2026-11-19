@@ -406,13 +406,13 @@ impl Workbench {
                 .and_then(|ix| self.profiles.get(ix))
                 .is_some_and(|p| p.save_password);
             let hint = if !form.kind.capabilities().password {
-                "File dibuka langsung, tanpa username atau password."
+                "SQLite opens the file directly without a username or password."
             } else if self.connection_form.save_password && has_saved {
-                "Password tersimpan di keychain OS. Kosongkan untuk tetap pakai yang lama."
+                "The password is saved in your system keychain. Leave this field blank to keep it."
             } else if self.connection_form.save_password {
-                "Password disimpan di keychain OS, bukan di file profil."
+                "The password will be stored in your system keychain."
             } else {
-                "Password tidak disimpan; diisi setiap connect."
+                "Enter the password each time you connect."
             };
             body = body.child(caption_text(hint.to_string(), theme));
         }

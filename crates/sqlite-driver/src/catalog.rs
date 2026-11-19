@@ -76,7 +76,7 @@ pub(crate) fn object_ddl(conn: &Connection, schema: &str, name: &str) -> Result<
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_err)?;
     if parts.is_empty() {
-        return Err(DbError::new(format!("SQLite: {name} tidak ditemukan")));
+        return Err(DbError::new(format!("SQLite: {name} was not found")));
     }
     Ok(parts
         .iter()

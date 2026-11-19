@@ -32,12 +32,12 @@ pub(super) struct ConnectionForm {
 
 impl ConnectionForm {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Workbench>) -> Self {
-        let name_input =
-            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Nama koneksi (opsional)"));
+        let name_input = cx
+            .new(|cx| InputState::new(&mut *window, cx).placeholder("Connection name (optional)"));
         let folder_input =
             cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Folder (optional)"));
         let user_input =
-            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Username, mis. HR"));
+            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Username, e.g. HR"));
         let host_input =
             cx.new(|cx| InputState::new(&mut *window, cx).placeholder("dbhost.example.com"));
         let port_input = cx.new(|cx| {
@@ -46,8 +46,8 @@ impl ConnectionForm {
                 .default_value("1521")
         });
         let service_input = cx.new(|cx| InputState::new(&mut *window, cx).placeholder("orclpdb"));
-        let tns_input = cx
-            .new(|cx| InputState::new(&mut *window, cx).placeholder("ORCL atau (DESCRIPTION=...)"));
+        let tns_input =
+            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("ORCL or (DESCRIPTION=...)"));
         let file_input =
             cx.new(|cx| InputState::new(&mut *window, cx).placeholder("/path/to/database.sqlite"));
         let password_input = cx.new(|cx| InputState::new(&mut *window, cx).masked(true));
@@ -131,7 +131,7 @@ impl Workbench {
                         }
                         this.connection_form.save_password = false;
                     }
-                    let text = format!("Gagal menyimpan password ke keychain: {err}");
+                    let text = format!("Failed to save the password to the keychain: {err}");
                     this.push_message(text.clone());
                     if this.connection_form.show_connection_form {
                         this.connection_form.form_notice = Some((true, text));
@@ -154,7 +154,7 @@ impl Workbench {
 
     fn persist_profiles(&mut self) {
         if let Err(err) = store::save_profiles(&self.profiles) {
-            self.push_message(format!("Gagal menyimpan koneksi: {err}"));
+            self.push_message(format!("Failed to save connection: {err}"));
         }
     }
 
@@ -411,9 +411,9 @@ impl Workbench {
             // A stale connect error would hide the "saved" notice.
             self.conn.connect_error = None;
             let text = if self.connection_form.save_password {
-                "Profil koneksi tersimpan, password di keychain."
+                "Connection profile and keychain password saved."
             } else {
-                "Profil koneksi tersimpan."
+                "Connection profile saved."
             };
             self.push_message(text.to_string());
             self.connection_form.form_notice = Some((false, text.to_string()));
@@ -494,17 +494,17 @@ impl Workbench {
             }
         }
         self.persist_profiles();
-        self.push_message(format!("Profil '{}' dihapus.", removed.name));
+        self.push_message(format!("Deleted connection profile '{}'.", removed.name));
         cx.notify();
     }
 }
 
-pub(super) const FORM_INCOMPLETE: &str = "Isi username dan host (atau TNS) dulu.";
+pub(super) const FORM_INCOMPLETE: &str = "Enter a username and a host or TNS entry.";
 
 impl Workbench {
     pub(super) fn export_connections(&self, cx: &mut Context<Self>) {
         let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let prompt = cx.prompt_for_new_path(&dir, Some("ora-connections.json"));
+        let prompt = cx.prompt_for_new_path(&dir, Some("kilat-connections.json"));
         let settings = store::export_connection_profiles(&self.profiles);
         cx.spawn(async move |view, cx| {
             let Ok(Ok(Some(path))) = prompt.await else {
@@ -532,7 +532,7 @@ impl Workbench {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Import connections (Ora JSON or Toad logins)".into()),
+            prompt: Some("Import connections (Kilat JSON or Toad logins)".into()),
         });
         cx.spawn(async move |view, cx| {
             let Ok(Ok(Some(paths))) = prompt.await else { return; };

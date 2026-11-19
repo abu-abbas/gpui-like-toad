@@ -388,7 +388,7 @@ impl DbClient for DemoClient {
         let row: usize = rowid
             .strip_prefix(&prefix)
             .and_then(|n| n.parse().ok())
-            .ok_or_else(|| DbError::new("baris tidak ditemukan lagi"))?;
+            .ok_or_else(|| DbError::new("Row no longer exists"))?;
         self.staged.push(DemoEdit {
             table: table.to_string(),
             row,

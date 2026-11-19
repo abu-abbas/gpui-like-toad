@@ -116,9 +116,9 @@ impl Workbench {
                 .justify_center()
                 .child(empty_state_text(
                     if self.conn.busy {
-                        "Memuat data...".to_string()
+                        "Loading data…".to_string()
                     } else {
-                        "Tidak ada data. Lihat Info di bawah untuk error.".to_string()
+                        "No data. See the Info panel for errors.".to_string()
                     },
                     theme,
                 ))
@@ -216,7 +216,7 @@ impl Workbench {
         let mut summary = tab.title.clone();
         if let Some(result) = &tab.last_result {
             summary.push_str(&format!(
-                " · {} kolom · {} baris",
+                " · {} columns · {} rows",
                 result
                     .columns
                     .iter()
@@ -225,9 +225,9 @@ impl Workbench {
                 result.row_count()
             ));
             if result.truncated && tab.data.is_some() {
-                summary.push_str(" (masih ada baris berikutnya)");
+                summary.push_str(" (more rows available)");
             } else if result.truncated {
-                summary.push_str(&format!(" (dibatasi {DEFAULT_MAX_ROWS})"));
+                summary.push_str(&format!(" (limited to {DEFAULT_MAX_ROWS} rows)"));
             }
         }
         if let Some(ms) = tab.elapsed_ms {
@@ -284,7 +284,7 @@ impl Workbench {
                                 IconName::ChevronDown
                             })
                             .tooltip(if collapsed {
-                                "Buka panel Info"
+                                "Open Info panel"
                             } else {
                                 "Minimize panel Info"
                             })
@@ -1134,7 +1134,7 @@ impl Workbench {
 
     fn export_csv(&mut self, cx: &mut Context<Self>) {
         let Some(result) = self.active_tab().last_result.clone() else {
-            self.push_message("Belum ada hasil query untuk diekspor.".to_string());
+            self.push_message("There are no query results to export.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;
             cx.notify();
             return;
@@ -1147,14 +1147,14 @@ impl Workbench {
         match std::fs::write(&path, csv) {
             Ok(()) => {
                 self.push_message(format!(
-                    "CSV tersimpan: {} ({} baris)",
+                    "CSV saved: {} ({} rows)",
                     path.display(),
                     result.row_count()
                 ));
                 self.conn.status = format!("Exported {filename}");
             }
             Err(err) => {
-                self.push_message(format!("Gagal menulis CSV: {err}"));
+                self.push_message(format!("Failed to write CSV: {err}"));
             }
         }
         self.active_tab_mut().results_tab = ResultsTab::Messages;
@@ -1163,7 +1163,7 @@ impl Workbench {
 
     fn export_xlsx(&mut self, cx: &mut Context<Self>) {
         let Some(result) = self.active_tab().last_result.clone() else {
-            self.push_message("Belum ada hasil query untuk diekspor.".to_string());
+            self.push_message("There are no query results to export.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;
             cx.notify();
             return;
@@ -1177,19 +1177,19 @@ impl Workbench {
                 match std::fs::write(&path, bytes) {
                     Ok(()) => {
                         self.push_message(format!(
-                            "XLSX tersimpan: {} ({} baris)",
+                            "XLSX saved: {} ({} rows)",
                             path.display(),
                             result.row_count()
                         ));
                         self.conn.status = format!("Exported {filename}");
                     }
                     Err(err) => {
-                        self.push_message(format!("Gagal menulis XLSX: {err}"));
+                        self.push_message(format!("Failed to write XLSX: {err}"));
                     }
                 }
             }
             Err(err) => {
-                self.push_message(format!("Gagal membuat XLSX: {err}"));
+                self.push_message(format!("Failed to create XLSX: {err}"));
             }
         }
         self.active_tab_mut().results_tab = ResultsTab::Messages;

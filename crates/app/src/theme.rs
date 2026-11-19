@@ -2,7 +2,7 @@
 //! palettes, density tokens, and the Light/Dark/System preference.
 //!
 //! The light palette and violet scale follow the v0.1 design-system spec.
-//! Ora Dark uses layered charcoal surfaces and the same semantic accents.
+//! Kilat Dark uses layered charcoal surfaces and the same semantic accents.
 //! Density numbers (§3) are the single
 //! source of truth for component heights, spacing, radius, and font sizes
 //! used by the workbench layout.
@@ -12,7 +12,7 @@
 //! [`Theme::update`] overrides the colors (the order the component docs
 //! require, so the Base projection and open windows stay in step).
 //!
-//! Besides that palette ("Ora", the default) the user can pick one of the
+//! Besides that palette ("Kilat", the default) the user can pick one of the
 //! color themes gpui-kit ships in its `themes/` folder, separately for light
 //! and dark mode. Those files are bundled under `assets/themes/` and loaded
 //! into gpui-kit's [`ThemeRegistry`] at startup; picking one sets
@@ -140,7 +140,7 @@ fn hex(value: u32) -> Hsla {
 // ---------------------------------------------------------------------------
 
 /// Display name of the app's own palette in the theme pickers.
-pub const ORA_THEME_LABEL: &str = "Ora (default)";
+pub const DEFAULT_THEME_LABEL: &str = "Kilat (default)";
 
 /// gpui-kit's `themes/` folder, embedded so the release binary needs no
 /// files next to it. Each file is a theme set with one or more themes.
@@ -180,7 +180,7 @@ pub fn register_bundled_themes(cx: &mut App) -> Vec<String> {
 }
 
 /// Names of the bundled themes for one mode, sorted, for the pickers. The
-/// registry's own default light/dark entries are left out: "Ora" stands in
+/// registry's own default light/dark entries are left out: "Kilat" stands in
 /// for them.
 pub fn theme_names_for(dark: bool, cx: &App) -> Vec<String> {
     let registry = ThemeRegistry::global(cx);
@@ -199,7 +199,7 @@ pub fn theme_names_for(dark: bool, cx: &App) -> Vec<String> {
 }
 
 /// The registry entry for a saved name, if it still exists and matches the
-/// mode it was picked for. A stale or mismatched name falls back to Ora.
+/// mode it was picked for. A stale or mismatched name falls back to Kilat.
 fn lookup(name: Option<&str>, dark: bool, cx: &App) -> Option<Rc<ThemeConfig>> {
     let config = ThemeRegistry::global(cx).themes().get(name?).cloned()?;
     (config.mode.is_dark() == dark).then_some(config)
@@ -296,7 +296,7 @@ pub fn ui_size(theme: &Theme, base: f32) -> gpui_kit::Pixels {
 }
 
 /// Apply one palette. `change` first (registered theme + mode), then a
-/// second `update` with the Ora colors (when no gpui-kit theme is picked
+/// second `update` with the Kilat colors (when no gpui-kit theme is picked
 /// for this mode), fonts, and radius — the order the component theme docs
 /// require.
 pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {

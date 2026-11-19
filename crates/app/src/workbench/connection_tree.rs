@@ -261,14 +261,14 @@ impl Workbench {
         };
         let name = dialog.path.rsplit('/').next().unwrap_or(&dialog.path);
         let text = if dialog.connections == 0 && dialog.subfolders == 0 {
-            "Folder ini kosong.".to_owned()
+            "This folder is empty.".to_owned()
         } else {
             format!(
-                "Folder ini berisi {} koneksi dan {} sub-folder. Pindahkan isinya satu level ke atas, atau hapus semuanya.{}",
+                "This folder contains {} connection(s) and {} subfolder(s). Move its contents up one level or delete everything.{}",
                 dialog.connections,
                 dialog.subfolders,
                 if dialog.open > 0 {
-                    format!(" {} koneksi sedang terbuka, disconnect dulu kalau mau dihapus.", dialog.open)
+                    format!(" Disconnect the {} open connection(s) before deleting them.", dialog.open)
                 } else {
                     String::new()
                 }
@@ -304,7 +304,7 @@ impl Workbench {
                             .line_height(crate::theme::ui_size(theme, LEADING_HEADING_MD))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
-                            .child(format!("Hapus folder {name}?")),
+                            .child(format!("Delete folder {name}?")),
                     )
                     .child(
                         div()
@@ -324,7 +324,7 @@ impl Workbench {
                     .child(
                         Button::new("folder-delete-cancel")
                             .flex_1()
-                            .label("Batal")
+                            .label("Cancel")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.folder_delete = None;
                                 cx.notify();
@@ -334,7 +334,7 @@ impl Workbench {
                         row.child(
                             Button::new("folder-delete-all")
                                 .flex_1()
-                                .label("Hapus semua")
+                                .label("Delete All")
                                 .danger()
                                 .disabled(dialog.open > 0)
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -345,7 +345,7 @@ impl Workbench {
                     .child(
                         Button::new("folder-delete-move")
                             .flex_1()
-                            .label(if empty { "Hapus" } else { "Pindahkan isi" })
+                            .label(if empty { "Delete" } else { "Move Contents Up" })
                             .primary()
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.confirm_delete_folder(false, cx)),
@@ -1017,7 +1017,7 @@ fn folder_rename_row(
                 .xsmall()
                 .ghost()
                 .icon(IconName::Check)
-                .tooltip("Simpan")
+                .tooltip("Save")
                 .on_click(cx.listener(|this, _, _, cx| this.rename_folder(cx))),
         )
         .child(
@@ -1025,7 +1025,7 @@ fn folder_rename_row(
                 .xsmall()
                 .ghost()
                 .icon(IconName::X)
-                .tooltip("Batal")
+                .tooltip("Cancel")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.folder_rename = None;
                     cx.notify();

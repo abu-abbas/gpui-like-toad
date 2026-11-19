@@ -290,7 +290,7 @@ impl Workbench {
         let pill_label = if self.conn.session.is_some() {
             self.conn.label()
         } else {
-            "Not connected".to_string()
+            "Connection".to_string()
         };
         // (id, name, user@db, active, uncommitted)
         let mut entries: Vec<(u64, String, String, bool, bool)> = Vec::new();
@@ -349,11 +349,15 @@ impl Workbench {
         pill.dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, move |menu, _, _| {
             let mut menu = menu.min_w(px(260.));
             if !entries.is_empty() {
-                menu = menu.label("Koneksi terbuka");
+                menu = menu.label("Open connections");
             }
             for (id, name, detail, active, uncommitted) in entries.clone() {
                 let switch_view = view.clone();
-                let mark = if uncommitted { " • belum commit" } else { "" };
+                let mark = if uncommitted {
+                    " • uncommitted changes"
+                } else {
+                    ""
+                };
                 menu = menu.item(
                     PopupMenuItem::new(format!("{name}  ({detail}){mark}"))
                         .checked(active)
@@ -369,14 +373,14 @@ impl Workbench {
             let panel_view = view.clone();
             let disconnect_view = view.clone();
             menu.item(
-                PopupMenuItem::new("Koneksi baru…")
+                PopupMenuItem::new("New connection…")
                     .icon(Icon::new(IconName::Plus))
                     .on_click(move |_, window, cx: &mut App| {
                         new_view.update(cx, |this, cx| this.open_new_connection(window, cx));
                     }),
             )
             .item(
-                PopupMenuItem::new("Buka koneksi tersimpan…")
+                PopupMenuItem::new("Open saved connection…")
                     .icon(Icon::new(IconName::Database))
                     .on_click(move |_, _, cx: &mut App| {
                         panel_view.update(cx, |this, cx| {
@@ -387,7 +391,7 @@ impl Workbench {
                     }),
             )
             .item(
-                PopupMenuItem::new("Disconnect koneksi ini")
+                PopupMenuItem::new("Disconnect this connection")
                     .icon(Icon::new(IconName::LogOut))
                     .disabled(!connected || busy)
                     .on_click(move |_, window, cx: &mut App| {
@@ -450,7 +454,7 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Dialog answer "Simpan…": save each script tab to a file the user
+    /// Dialog answer "Save…": save each script tab to a file the user
     /// picks, then disconnect. Cancelling a file dialog stops there and
     /// keeps the connection.
     fn save_scripts_then_disconnect(&mut self, cx: &mut Context<Self>) {
@@ -482,10 +486,11 @@ impl Workbench {
                 let ok = written.is_ok();
                 let _ = view.update(cx, |this, cx| {
                     match written {
-                        Ok(()) => this
-                            .push_message(format!("Script {title} tersimpan: {}", path.display())),
+                        Ok(()) => {
+                            this.push_message(format!("Saved SQL for {title}: {}", path.display()))
+                        }
                         Err(err) => this.push_message(format!(
-                            "Gagal menyimpan {title}: {err}. Disconnect dibatalkan."
+                            "Failed to save {title}: {err}. Disconnect canceled."
                         )),
                     }
                     cx.notify();
@@ -499,7 +504,7 @@ impl Workbench {
         .detach();
     }
 
-    /// Dialog answer "Jangan simpan": disconnect and drop the scripts.
+    /// Dialog answer "Don't Save": disconnect and drop the scripts.
     fn discard_scripts_then_disconnect(&mut self, cx: &mut Context<Self>) {
         if let Some(prompt) = self.disconnect_prompt.take() {
             self.finish_disconnect(prompt.id, cx);
@@ -520,8 +525,7 @@ impl Workbench {
             .map(|(_, title)| title.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        let text =
-            format!("Tab {names} masih berisi script dan akan ditutup. Simpan dulu ke file?");
+        let text = format!("Save the SQL in these tabs before closing them? {names}");
         // AlertDialog layout: title and message, then a footer band with
         // the actions side by side.
         let card = div()
@@ -572,7 +576,7 @@ impl Workbench {
                     .child(
                         Button::new("disconnect-cancel")
                             .flex_1()
-                            .label("Batal")
+                            .label("Cancel")
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.close_disconnect_prompt(cx)),
                             ),
@@ -580,7 +584,7 @@ impl Workbench {
                     .child(
                         Button::new("disconnect-discard")
                             .flex_1()
-                            .label("Jangan simpan")
+                            .label("Don't Save")
                             .danger()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.discard_scripts_then_disconnect(cx)
@@ -589,7 +593,7 @@ impl Workbench {
                     .child(
                         Button::new("disconnect-save")
                             .flex_1()
-                            .label("Simpan…")
+                            .label("Save…")
                             .primary()
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.save_scripts_then_disconnect(cx)),
@@ -806,7 +810,7 @@ impl Workbench {
             demo,
             profile_ix,
         });
-        self.conn.status = "Menghubungkan...".to_string();
+        self.conn.status = "Connecting…".to_string();
         self.spawn_db(
             Job::Connect {
                 profile,
@@ -835,7 +839,7 @@ impl Workbench {
             self.conn.db = Some(DbHandle::spawn());
         }
         let name = Self::input_text(&self.connection_form.name_input, cx);
-        self.conn.status = "Mengetes koneksi...".to_string();
+        self.conn.status = "Testing connection…".to_string();
         self.spawn_db(
             Job::TestConnect {
                 profile: ConnectionProfile {
@@ -869,7 +873,7 @@ impl Workbench {
         self.conn.schemas.clear();
         self.conn.current_schema = None;
         self.conn.selected_object = None;
-        self.conn.status = "Belum terhubung.".to_string();
+        self.conn.status = "Not connected.".to_string();
         self.after_disconnect(cx);
         cx.notify();
     }

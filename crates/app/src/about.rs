@@ -95,7 +95,7 @@ pub(crate) fn content(theme: &gpui_kit::component::Theme, cx: &App) -> impl Into
                 .text_size(crate::theme::ui_size(theme, 13.))
                 .text_color(theme.muted_foreground)
                 .child(concat!("Version ", env!("CARGO_PKG_VERSION")))
-                .child("Oracle database client built with GPUI and Rust"),
+                .child("Lightweight database client built with GPUI and Rust"),
         )
 }
 

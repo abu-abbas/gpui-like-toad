@@ -215,7 +215,7 @@ impl Workbench {
     /// Mark rows (by ROWID) for deletion; they go to the database on
     /// Apply, like the footer's delete button.
     pub(super) fn stage_row_deletes(&mut self, rowids: Vec<String>, cx: &mut Context<Self>) {
-        if self.conn.busy || self.blocked_by_read_only("row tidak bisa dihapus", cx) {
+        if self.conn.busy || self.blocked_by_read_only("cannot delete rows", cx) {
             return;
         }
         if let Some(data) = self.data_mut() {
@@ -240,7 +240,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let input = cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Nilai"));
+        let input = cx.new(|cx| InputState::new(&mut *window, cx).placeholder("Value"));
         // Enter in a value box applies all checked filters.
         let enter = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -286,7 +286,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         if self.conn.busy {
-            self.conn.status = "Masih ada operasi berjalan.".to_string();
+            self.conn.status = "An operation is already running.".to_string();
             cx.notify();
             return;
         }
@@ -341,8 +341,7 @@ impl Workbench {
             .and_then(|t| t.data.as_ref())
             .is_some_and(|d| d.has_staged());
         if staged {
-            self.conn.status =
-                "Ada perubahan sel yang belum dikirim: klik Apply atau Discard dulu.".to_string();
+            self.conn.status = "Apply or discard pending cell changes first.".to_string();
             cx.notify();
         }
         staged
@@ -356,7 +355,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         if self.conn.busy {
-            self.conn.status = "Masih ada operasi berjalan.".to_string();
+            self.conn.status = "An operation is already running.".to_string();
             cx.notify();
             return;
         }
@@ -394,7 +393,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         if self.conn.busy {
-            self.conn.status = "Masih ada operasi berjalan.".to_string();
+            self.conn.status = "An operation is already running.".to_string();
             cx.notify();
             return;
         }
@@ -464,7 +463,7 @@ impl Workbench {
             return;
         }
         if view != DataView::Data && busy {
-            self.conn.status = "Masih ada operasi berjalan.".to_string();
+            self.conn.status = "An operation is already running.".to_string();
             cx.notify();
             return;
         }
@@ -499,15 +498,15 @@ impl Workbench {
         match view {
             DataView::Data => self.reload_data(cx),
             DataView::Structure => {
-                self.conn.status = format!("Memuat struktur {owner}.{name}...");
+                self.conn.status = format!("Loading structure for {owner}.{name}…");
                 self.spawn_db(Job::Describe { owner, name }, PendingOp::DataStructure, cx);
             }
             DataView::Index => {
-                self.conn.status = format!("Memuat index {owner}.{name}...");
+                self.conn.status = format!("Loading indexes for {owner}.{name}…");
                 self.spawn_db(Job::Indexes { owner, name }, PendingOp::DataIndexes, cx);
             }
             DataView::Ddl => {
-                self.conn.status = format!("Memuat DDL {owner}.{name}...");
+                self.conn.status = format!("Loading DDL for {owner}.{name}…");
                 self.spawn_db(Job::Ddl { owner, name, kind }, PendingOp::DataDdl, cx);
             }
         }
@@ -526,8 +525,7 @@ impl Workbench {
             .and_then(|t| t.data.as_ref())
             .is_some_and(|d| d.has_staged());
         if staged {
-            self.conn.status =
-                "Ada perubahan sel yang belum dikirim: klik Apply atau Discard dulu.".to_string();
+            self.conn.status = "Apply or discard pending cell changes first.".to_string();
             cx.notify();
             return;
         }
@@ -552,7 +550,7 @@ impl Workbench {
             log.push_str(&format!("   [{}]", binds.join(", ")));
         }
         self.push_message(log);
-        self.conn.status = format!("Memuat {owner}.{name}...");
+        self.conn.status = format!("Loading {owner}.{name}…");
         // Not recorded in query history: the statement has bind
         // placeholders, so re-running it from History would fail.
         self.conn.pending_sql = None;
@@ -744,7 +742,7 @@ impl Workbench {
             .gap(px(SPACE_2));
         if fields.is_empty() {
             list = list.child(empty_state_text(
-                "Pilih sebuah baris untuk melihat semua kolomnya.".to_string(),
+                "Select a row to view all its columns.".to_string(),
                 theme,
             ));
         }
@@ -798,7 +796,7 @@ impl Workbench {
                     .border_color(theme.border)
                     .child(caption_text(
                         match selected {
-                            Some(row) => format!("Details · baris {}", row + 1),
+                            Some(row) => format!("Details · row {}", row + 1),
                             None => "Details".to_string(),
                         },
                         theme,
@@ -850,12 +848,12 @@ impl Workbench {
         let join_button = Button::new("filter-join")
             .small()
             .child(select_trigger(format!("Gabung: {}", join.keyword()), theme))
-            .tooltip("Cara menggabungkan filter yang dicentang")
+            .tooltip("Choose how to combine checked filters")
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.min_w(px(260.));
                 for (option, label) in [
-                    (FilterJoin::And, "AND: semua filter harus cocok"),
-                    (FilterJoin::Or, "OR: salah satu filter cocok"),
+                    (FilterJoin::And, "AND: all filters must match"),
+                    (FilterJoin::Or, "OR: any filter can match"),
                 ] {
                     let view = view.clone();
                     menu = menu.item(PopupMenuItem::new(label).checked(option == join).on_click(
@@ -886,7 +884,7 @@ impl Workbench {
                         .label("SQL")
                         .icon(IconName::FileCode)
                         .selected(data.show_sql)
-                        .tooltip("Lihat query yang dihasilkan filter")
+                        .tooltip("View the SQL generated by the filters")
                         .on_click(cx.listener(|this, _, _, cx| {
                             if let Some(data) = this.data_mut() {
                                 data.show_sql = !data.show_sql;
@@ -897,9 +895,10 @@ impl Workbench {
                 .child(
                     caption_text(
                         if applied_count == 0 {
-                            "Tanpa filter. Enter di kolom nilai = Apply All.".to_string()
+                            "No filters. Press Enter in a value field to apply all filters."
+                                .to_string()
                         } else {
-                            format!("{applied_count} filter aktif")
+                            format!("Active filters: {applied_count}")
                         },
                         theme,
                     )
@@ -980,7 +979,7 @@ impl Workbench {
                                         cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
                                             runnable.clone(),
                                         ));
-                                        this.conn.status = "SQL disalin ke clipboard.".into();
+                                        this.conn.status = "SQL copied to the clipboard.".into();
                                         cx.notify();
                                     })),
                             )
@@ -1028,7 +1027,7 @@ impl Workbench {
             .small()
             .child(select_trigger(
                 if row.column.is_empty() {
-                    "(kolom)".to_string()
+                    "(column)".to_string()
                 } else {
                     row.column.clone()
                 },
@@ -1100,7 +1099,7 @@ impl Workbench {
                     .flex()
                     .items_center()
                     .px(px(SPACE_2))
-                    .child(caption_text("(tidak perlu nilai)".to_string(), theme))
+                    .child(caption_text("(no value required)".to_string(), theme))
             });
 
         div()
@@ -1119,7 +1118,7 @@ impl Workbench {
                     .label(if is_applied { "Applied" } else { "Apply" })
                     .w(px(72.))
                     .disabled(self.conn.busy)
-                    .tooltip("Terapkan filter baris ini saja")
+                    .tooltip("Apply only this filter")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.apply_filters(Some(id), window, cx)
                     })),
@@ -1128,7 +1127,7 @@ impl Workbench {
                 Button::new(("filter-remove", id))
                     .small()
                     .icon(IconName::Minus)
-                    .tooltip("Hapus baris filter")
+                    .tooltip("Remove filter")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.remove_filter_row(id, window, cx)
                     })),
@@ -1137,7 +1136,7 @@ impl Workbench {
                 Button::new(("filter-add", id))
                     .small()
                     .icon(IconName::Plus)
-                    .tooltip("Tambah baris filter")
+                    .tooltip("Add filter")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.add_filter_row(Some(id), None, window, cx)
                     })),
@@ -1159,9 +1158,9 @@ impl Workbench {
             Some(result) => {
                 let rows = result.row_count();
                 let mut text = if rows == 0 {
-                    "0 baris".to_string()
+                    "0 rows".to_string()
                 } else {
-                    format!("baris {}-{}", page.offset + 1, page.offset + rows)
+                    format!("Rows {}–{}", page.offset + 1, page.offset + rows)
                 };
                 if result.truncated {
                     text.push('+');
@@ -1217,7 +1216,7 @@ impl Workbench {
                         Button::new("page-prev")
                             .small()
                             .icon(IconName::ChevronLeft)
-                            .tooltip("Halaman sebelumnya")
+                            .tooltip("Previous page")
                             .disabled(busy || page.offset == 0)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.go_page(Some(page.prev().offset), window, cx)
@@ -1242,7 +1241,7 @@ impl Workbench {
                             .small()
                             .label("Go")
                             .tooltip(format!(
-                                "Ambil {step} baris mulai dari offset (maks {MAX_PAGE_LIMIT})"
+                                "Fetch {step} rows starting at the offset (maximum {MAX_PAGE_LIMIT})"
                             ))
                             .disabled(busy)
                             .on_click(
@@ -1253,7 +1252,7 @@ impl Workbench {
                         Button::new("page-next")
                             .small()
                             .icon(IconName::ChevronRight)
-                            .tooltip("Halaman berikutnya")
+                            .tooltip("Next page")
                             .disabled(busy || !more)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.go_page(Some(page.next().offset), window, cx)
@@ -1264,7 +1263,7 @@ impl Workbench {
                             .small()
                             .icon(IconName::PanelRight)
                             .selected(data.show_details)
-                            .tooltip("Tampilkan semua kolom baris terpilih")
+                            .tooltip("Show all columns for the selected row")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if let Some(data) = this.data_mut() {
                                     data.show_details = !data.show_details;
@@ -1302,7 +1301,7 @@ impl Workbench {
             "Columns".to_string()
         } else {
             format!(
-                "Columns ({} dari {})",
+                "Columns ({} of {})",
                 columns.len() - hidden_count,
                 columns.len()
             )
@@ -1310,7 +1309,7 @@ impl Workbench {
         Button::new("columns-picker")
             .small()
             .child(select_trigger(label, theme))
-            .tooltip("Pilih kolom yang ditampilkan")
+            .tooltip("Choose which columns to show")
             .disabled(columns.is_empty())
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.scrollable(true).max_h(px(360.)).min_w(px(220.));
@@ -1340,11 +1339,11 @@ impl Workbench {
                 }
                 menu = menu.separator();
                 let all = view.clone();
-                menu.item(PopupMenuItem::new("Tampilkan semua").on_click(
-                    move |_, _, cx: &mut App| {
+                menu.item(
+                    PopupMenuItem::new("Show All").on_click(move |_, _, cx: &mut App| {
                         all.update(cx, |this, cx| this.update_hidden(cx, |set| set.clear()));
-                    },
-                ))
+                    }),
+                )
             })
     }
 }

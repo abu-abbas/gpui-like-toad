@@ -18,8 +18,17 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let view = cx.entity();
-        let schemas = self.conn.schemas.clone();
-        let current = self.conn.current_schema.clone();
+        let has_connection = self.conn.session.is_some();
+        let schemas = if has_connection {
+            self.conn.schemas.clone()
+        } else {
+            Vec::new()
+        };
+        let current = if has_connection {
+            self.conn.current_schema.clone()
+        } else {
+            None
+        };
         let label = current.clone().unwrap_or_else(|| "(schema)".to_string());
         let button = if id == "schema-select" {
             control(id, theme).w_full().child(
@@ -38,7 +47,7 @@ impl Workbench {
                 .child(select_trigger(label, theme))
         };
         button
-            .disabled(self.conn.schemas.is_empty())
+            .disabled(schemas.is_empty())
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.scrollable(true).max_h(px(360.)).min_w(px(220.));
                 for schema in &schemas {
@@ -116,9 +125,9 @@ impl Workbench {
             .collect();
         let list = if visible.is_empty() {
             let message = if self.conn.busy && self.conn.objects.is_empty() {
-                "Memuat objek..."
+                "Loading objects…"
             } else {
-                "Tidak ada objek di kategori ini."
+                "No objects in this category."
             };
             div()
                 .flex_1()
@@ -339,10 +348,10 @@ impl Workbench {
             return;
         }
         if self.conn.session.is_none() {
-            self.push_message("Belum terhubung.".to_string());
+            self.push_message("Not connected.".to_string());
             return;
         }
-        self.conn.status = "Memuat daftar schema...".to_string();
+        self.conn.status = "Loading schemas…".to_string();
         self.spawn_db(Job::ListSchemas, PendingOp::ListSchemas, cx);
     }
 
@@ -350,7 +359,7 @@ impl Workbench {
         let Some(owner) = self.conn.current_schema.clone() else {
             return;
         };
-        self.conn.status = format!("Memuat objek {owner}...");
+        self.conn.status = format!("Loading objects in {owner}…");
         self.spawn_db(Job::ListObjects { owner }, PendingOp::ListObjects, cx);
     }
 
@@ -418,7 +427,7 @@ impl Workbench {
             return;
         }
         if self.conn.busy {
-            self.conn.status = "Masih ada operasi berjalan.".to_string();
+            self.conn.status = "An operation is already running.".to_string();
             cx.notify();
             return;
         }
@@ -484,7 +493,7 @@ impl Workbench {
         if self.conn.busy || self.conn.session.is_none() {
             return;
         }
-        self.conn.status = format!("Mengambil DDL {}.{}...", object.owner, object.name);
+        self.conn.status = format!("Loading DDL for {}.{}…", object.owner, object.name);
         self.spawn_db(
             Job::Ddl {
                 owner: object.owner.clone(),
@@ -560,7 +569,7 @@ impl Workbench {
         if self.conn.busy || self.conn.session.is_none() {
             return;
         }
-        if self.blocked_by_read_only("materialized view tidak bisa di-refresh", cx) {
+        if self.blocked_by_read_only("cannot refresh materialized views", cx) {
             return;
         }
         self.conn.status = format!("Refresh {}.{}...", object.owner, object.name);
@@ -581,7 +590,7 @@ impl Workbench {
         if self.conn.busy || self.conn.session.is_none() {
             return;
         }
-        if self.blocked_by_read_only("import tidak bisa dijalankan", cx) {
+        if self.blocked_by_read_only("cannot import data", cx) {
             return;
         }
         let conn_id = self.conn.id;
@@ -599,7 +608,7 @@ impl Workbench {
                     Ok(Ok(None)) => None,
                     _ => {
                         this.push_message(
-                            "Dialog pilih file tidak tersedia di sistem ini.".to_string(),
+                            "The file picker is unavailable on this system.".to_string(),
                         );
                         cx.notify();
                         None
@@ -609,7 +618,7 @@ impl Workbench {
                     return;
                 };
                 this.with_conn(conn_id, cx, |this, _, cx| {
-                    this.conn.status = format!("Import ke {}.{}...", object.owner, object.name);
+                    this.conn.status = format!("Importing into {}.{}…", object.owner, object.name);
                     this.spawn_db(
                         Job::ImportCsv {
                             owner: object.owner.clone(),

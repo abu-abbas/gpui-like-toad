@@ -147,7 +147,7 @@ impl Workbench {
                                     }),
                             )
                             .item(
-                                PopupMenuItem::new("Export Ora connections…")
+                                PopupMenuItem::new("Export Kilat connections…")
                                     .disabled(!has_profiles)
                                     .icon(Icon::new(IconName::Download))
                                     .on_click(move |_, _, cx| {
@@ -344,8 +344,16 @@ impl Workbench {
                             .overflow_hidden()
                             .py(px(SPACE_1))
                             .px(px(SPACE_2))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.load_sql_into_active_tab(sql.clone(), window, cx);
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                if event.click_count() == 2 {
+                                    this.new_tab_with_sql(sql.clone(), window, cx);
+                                    this.active_tab()
+                                        .editor
+                                        .read(cx)
+                                        .focus_handle(cx)
+                                        .focus(window, cx);
+                                }
                             }))
                             .child(
                                 div()
@@ -391,7 +399,7 @@ impl Workbench {
 impl Workbench {
     fn persist_history(&mut self) {
         if let Err(err) = store::save_history(&self.history) {
-            self.push_message(format!("Gagal menyimpan history: {err}"));
+            self.push_message(format!("Failed to save query history: {err}"));
         }
     }
 

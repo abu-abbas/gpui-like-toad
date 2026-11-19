@@ -236,7 +236,7 @@ fn open_main_window(cx: &mut App) {
         if let Some(panic) = crash_log::take_previous() {
             view.update(cx, |this, _| {
                 this.push_message(format!(
-                    "Sesi sebelumnya crash: {panic}. Detail lengkap ada di {}",
+                    "The previous session crashed: {panic}. Full details are in {}",
                     crash_log::log_path().display()
                 ))
             });
