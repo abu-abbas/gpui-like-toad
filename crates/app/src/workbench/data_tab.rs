@@ -212,6 +212,22 @@ impl DataTab {
 }
 
 impl Workbench {
+    /// Mark rows (by ROWID) for deletion; they go to the database on
+    /// Apply, like the footer's delete button.
+    pub(super) fn stage_row_deletes(&mut self, rowids: Vec<String>, cx: &mut Context<Self>) {
+        if self.conn.busy || self.blocked_by_read_only("row tidak bisa dihapus", cx) {
+            return;
+        }
+        if let Some(data) = self.data_mut() {
+            for id in rowids {
+                if !data.deletes.contains(&id) {
+                    data.deletes.push(id);
+                }
+            }
+            cx.notify();
+        }
+    }
+
     pub(super) fn data_mut(&mut self) -> Option<&mut DataTab> {
         self.tabs.get_mut(self.active_tab)?.data.as_mut()
     }
@@ -583,6 +599,7 @@ impl Workbench {
         }
         let busy = self.conn.busy;
         let editable = data.kind == ObjectKind::Table
+            && !self.conn.access().read_only
             && self.active_tab().conn == Some(self.conn.id)
             && self.conn.session.is_some()
             && !data.columns.is_empty();
@@ -647,13 +664,8 @@ impl Workbench {
                             cx.notify();
                             return;
                         }
-                        for id in &selected {
-                            if !data.deletes.contains(id) {
-                                data.deletes.push(id.clone());
-                            }
-                        }
-                        cx.notify();
                     }
+                    this.stage_row_deletes(selected.clone(), cx);
                 })),
             )
             .child(
@@ -917,12 +929,17 @@ impl Workbench {
                 ),
         );
         if data.show_sql {
-            let preview = select_sql(&data.owner, &data.name, &data.draft(cx), data.page).preview();
+            let query = select_sql(&data.owner, &data.name, &data.draft(cx), data.page);
+            let preview = query.preview();
+            let runnable = query.inlined();
+            let open_sql = runnable.clone();
             bar = bar.child(
                 div()
+                    .relative()
                     .flex()
                     .flex_col()
                     .p(px(SPACE_2))
+                    .pr(px(64.))
                     .rounded(px(RADIUS_SM))
                     .bg(theme.secondary)
                     // No ligatures: `>=` must not render as one glyph.
@@ -937,7 +954,42 @@ impl Workbench {
                                 theme.foreground
                             })
                             .child(line.to_string())
-                    })),
+                    }))
+                    .child(
+                        // The preview is plain text, so copy it from here:
+                        // with the bind values filled in, ready to run.
+                        div()
+                            .absolute()
+                            .top(px(4.))
+                            .right(px(4.))
+                            .flex()
+                            .gap(px(2.))
+                            .child(
+                                Button::new("filter-sql-copy")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Copy)
+                                    .tooltip("Copy SQL")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                            runnable.clone(),
+                                        ));
+                                        this.conn.status = "SQL disalin ke clipboard.".into();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("filter-sql-open")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::SquareTerminal)
+                                    .tooltip("Open in SQL editor")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.new_tab_with_sql(open_sql.clone(), window, cx);
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
             );
         }
         bar.into_any_element()

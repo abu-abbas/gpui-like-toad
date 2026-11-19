@@ -26,8 +26,8 @@ use gpui_kit::component::input::{
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::{
-    h_resizable, resizable_panel, v_resizable, ActiveTheme as _, Disableable as _, Icon,
-    Selectable as _, Sizable as _,
+    h_resizable, resizable::ResizableState, resizable_panel, v_resizable, ActiveTheme as _,
+    Disableable as _, Icon, Selectable as _, Sizable as _,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -158,6 +158,10 @@ enum PendingOp {
         name: String,
     },
     ImportCsv {
+        owner: String,
+        name: String,
+    },
+    RefreshMaterializedView {
         owner: String,
         name: String,
     },
@@ -365,6 +369,12 @@ pub struct Workbench {
     connection_form: ConnectionForm,
     rail: RailPanel,
     sidebar_compact: bool,
+    /// Width of the expanded Connections sidebar, dragged by its edge.
+    sidebar_width: f32,
+    /// Width of the explorer column next to the sidebar.
+    explorer_width: f32,
+    /// Scroll position of the connections tree, for its scrollbars.
+    connections_scroll: ScrollHandle,
     folder_draft: Option<(String, Entity<InputState>)>,
     folder_rename: Option<(String, Entity<InputState>)>,
     folder_delete: Option<connection_tree::FolderDelete>,
@@ -458,6 +468,13 @@ impl Workbench {
             connection_form,
             rail: RailPanel::Connections,
             sidebar_compact: false,
+            sidebar_width: layout.sidebar_width.map_or(CONNECTIONS_WIDTH, |w| {
+                sidebar::clamp_sidebar_width(w as f32)
+            }),
+            explorer_width: layout
+                .explorer_width
+                .map_or(EXPLORER_WIDTH, |w| sidebar::clamp_explorer_width(w as f32)),
+            connections_scroll: ScrollHandle::new(),
             folder_draft: None,
             folder_rename: None,
             folder_delete: None,
@@ -601,6 +618,8 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _action: &QuickOpenTable, window, cx| {
                 this.toggle_quick_open(window, cx)
             }))
+            // The sidebar edge drag ends wherever the mouse is let go.
+            .on_drop(cx.listener(|this, _: &sidebar::SidebarResize, _, _| this.save_panel_layout()))
             .relative()
             .child(self.render_title_bar(&theme, cx))
             .children(self.render_update_banner(&theme, cx))
@@ -639,10 +658,26 @@ impl Render for Workbench {
                             } else {
                                 "expanded-workbench-explorer"
                             })
+                            .on_resize(cx.listener(
+                                |this, state: &Entity<ResizableState>, _, cx| {
+                                    if let Some(width) = state.read(cx).sizes().first() {
+                                        let width =
+                                            sidebar::clamp_explorer_width(f32::from(*width));
+                                        if (width - this.explorer_width).abs() >= 1. {
+                                            this.explorer_width = width;
+                                            this.save_panel_layout();
+                                        }
+                                    }
+                                },
+                            ))
                             .child(
                                 resizable_panel()
-                                    .size(px(EXPLORER_WIDTH))
-                                    .size_range(px(190.)..px(560.))
+                                    .size(px(self.explorer_width))
+                                    .size_range(
+                                        px(sidebar::EXPLORER_MIN_WIDTH)
+                                            ..px(sidebar::EXPLORER_MAX_WIDTH),
+                                    )
+                                    .fixed()
                                     .child(secondary),
                             )
                             .child(resizable_panel().child(main))

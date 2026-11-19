@@ -565,8 +565,9 @@ impl<'a> Collector<'a> {
                 ObjectKind::Table => SuggestionKind::Table,
                 ObjectKind::View | ObjectKind::MaterializedView => SuggestionKind::View,
                 ObjectKind::Synonym => SuggestionKind::Object,
-                // Indexes and triggers are never referenced in a query.
-                ObjectKind::Index | ObjectKind::Trigger => continue,
+                // Indexes, triggers and database links are never named like
+                // a table in a query.
+                ObjectKind::Index | ObjectKind::Trigger | ObjectKind::DbLink => continue,
                 _ if tables_only => continue,
                 _ => SuggestionKind::Object,
             };

@@ -11,10 +11,12 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -68,6 +70,9 @@ pub struct ResultsDelegate {
     /// Set on editable data tabs: the context menu's "Paste" into the
     /// picked cells.
     on_cell_paste: Option<PasteHandler>,
+    /// Set on editable data tabs: the context menu's "Delete row(s)",
+    /// called with the ROWIDs to stage for deletion.
+    on_delete_rows: Option<DeleteRowsHandler>,
     /// Result column holding each row's ROWID (never shown), if fetched.
     rowid_col: Option<usize>,
     /// Edited cells by (ROWID, column name), tinted until commit.
@@ -90,6 +95,7 @@ pub struct CellEditRequest {
 pub type EditHandler = Rc<dyn Fn(CellEditRequest, &mut Window, &mut App)>;
 
 pub type PasteHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+pub type DeleteRowsHandler = Rc<dyn Fn(Vec<String>, &mut Window, &mut App)>;
 
 /// Where an edited cell stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,6 +212,7 @@ impl ResultsDelegate {
             right_col: None,
             on_quick_filter: None,
             on_edit: None,
+            on_delete_rows: None,
             on_cell_paste: None,
             rowid_col: None,
             table_name: None,
@@ -242,6 +249,25 @@ impl ResultsDelegate {
     pub fn with_cell_paste(mut self, handler: PasteHandler) -> Self {
         self.on_cell_paste = Some(handler);
         self
+    }
+
+    /// Offer "Delete row" (the selected rows, or the clicked one) in the
+    /// cell context menu.
+    pub fn with_delete_rows(mut self, handler: DeleteRowsHandler) -> Self {
+        self.on_delete_rows = Some(handler);
+        self
+    }
+
+    /// ROWIDs a right click on result row `abs_row` deletes: the whole
+    /// selection when that row is part of it, otherwise just that row.
+    fn delete_targets(&self, abs_row: usize) -> Vec<String> {
+        if self.selected_rows.contains(&abs_row) {
+            return self.selected_rowids();
+        }
+        self.rowid_col
+            .and_then(|c| self.result.get(abs_row, c))
+            .map(|v| vec![v.display()])
+            .unwrap_or_default()
     }
 
     /// Replace the set of tinted (edited) cells.
@@ -813,6 +839,20 @@ impl TableDelegate for ResultsDelegate {
                 menu = menu.item(
                     PopupMenuItem::new(label).on_click(move |_, window, cx| paste(window, cx)),
                 );
+            }
+            if let Some(delete) = self.on_delete_rows.clone() {
+                let rowids = self.delete_targets(abs_row);
+                if !rowids.is_empty() {
+                    let label = match rowids.len() {
+                        1 => "Delete row".to_string(),
+                        n => format!("Delete {n} rows"),
+                    };
+                    menu = menu.separator().item(
+                        PopupMenuItem::new(label)
+                            .icon(Icon::new(IconName::Trash))
+                            .on_click(move |_, window, cx| delete(rowids.clone(), window, cx)),
+                    );
+                }
             }
             if self.on_quick_filter.is_some() {
                 menu = menu.separator();

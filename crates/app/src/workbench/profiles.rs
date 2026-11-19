@@ -501,18 +501,19 @@ impl Workbench {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Import Ora connections".into()),
+            prompt: Some("Import connections (Ora JSON or Toad logins)".into()),
         });
         cx.spawn(async move |view, cx| {
             let Ok(Ok(Some(paths))) = prompt.await else { return; };
             let Some(path) = paths.into_iter().next() else { return; };
             let loaded = cx.background_executor().spawn(async move {
                 use std::io::Read as _;
-                let mut text = String::new();
+                let mut bytes = Vec::new();
                 const MAX_FILE_SIZE: u64 = 4 * 1024 * 1024;
-                std::fs::File::open(path).and_then(|file| file.take(MAX_FILE_SIZE + 1).read_to_string(&mut text))
+                std::fs::File::open(path).and_then(|file| file.take(MAX_FILE_SIZE + 1).read_to_end(&mut bytes))
                     .map_err(|err| err.to_string())?;
-                if text.len() as u64 > MAX_FILE_SIZE { return Err("Connections file exceeds 4 MiB.".into()); }
+                if bytes.len() as u64 > MAX_FILE_SIZE { return Err("Connections file exceeds 4 MiB.".into()); }
+                let text = store::decode_text_file(&bytes)?;
                 store::import_connection_profiles(&text)
             }).await;
             let _ = view.update(cx, |this, cx| {

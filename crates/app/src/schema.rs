@@ -16,10 +16,12 @@ pub enum ObjectCategory {
     Programs,
     Triggers,
     Synonyms,
+    Types,
+    DbLinks,
 }
 
 impl ObjectCategory {
-    pub const ALL: [ObjectCategory; 8] = [
+    pub const ALL: [ObjectCategory; 10] = [
         ObjectCategory::Tables,
         ObjectCategory::Views,
         ObjectCategory::MaterializedViews,
@@ -28,6 +30,8 @@ impl ObjectCategory {
         ObjectCategory::Programs,
         ObjectCategory::Triggers,
         ObjectCategory::Synonyms,
+        ObjectCategory::Types,
+        ObjectCategory::DbLinks,
     ];
 
     pub fn label(self) -> &'static str {
@@ -40,6 +44,8 @@ impl ObjectCategory {
             ObjectCategory::Programs => "Procs",
             ObjectCategory::Triggers => "Triggers",
             ObjectCategory::Synonyms => "Synonyms",
+            ObjectCategory::Types => "Types",
+            ObjectCategory::DbLinks => "DB Links",
         }
     }
 
@@ -56,6 +62,8 @@ impl ObjectCategory {
             ),
             ObjectCategory::Triggers => *kind == ObjectKind::Trigger,
             ObjectCategory::Synonyms => *kind == ObjectKind::Synonym,
+            ObjectCategory::Types => *kind == ObjectKind::Type,
+            ObjectCategory::DbLinks => *kind == ObjectKind::DbLink,
         }
     }
 }
@@ -244,7 +252,7 @@ mod tests {
         assert!(ObjectCategory::MaterializedViews.contains(&ObjectKind::MaterializedView));
         assert!(!ObjectCategory::Views.contains(&ObjectKind::MaterializedView));
         assert!(!ObjectCategory::Tables.contains(&ObjectKind::MaterializedView));
-        assert_eq!(ObjectCategory::ALL.len(), 8);
+        assert_eq!(ObjectCategory::ALL.len(), 10);
     }
 
     #[test]

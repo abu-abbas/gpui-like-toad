@@ -14,10 +14,12 @@ fn result_tab_label(
 
 impl Workbench {
     /// Remember which panels are minimized for the next launch.
-    fn save_panel_layout(&self) {
+    pub(super) fn save_panel_layout(&self) {
         let layout = ora_core::store::PanelLayout {
             info_collapsed: self.info_collapsed,
             plan_collapsed: self.plan_collapsed,
+            sidebar_width: Some(self.sidebar_width.round() as u32),
+            explorer_width: Some(self.explorer_width.round() as u32),
         };
         if let Err(err) = ora_core::store::save_panel_layout(layout) {
             eprintln!("could not save panel layout: {err}");

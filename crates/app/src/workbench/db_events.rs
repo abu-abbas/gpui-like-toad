@@ -486,6 +486,18 @@ impl Workbench {
                 ));
                 self.conn.status = format!("Export {name} selesai: {rows} baris.");
             }
+            (Some(PendingOp::RefreshMaterializedView { owner, name }), Response::Executed(_)) => {
+                self.push_message(format!("Materialized view {owner}.{name} di-refresh."));
+                self.conn.status = format!("{name} selesai di-refresh.");
+                self.target_tab_mut().results_tab = ResultsTab::Messages;
+                // Show the new rows when that view is open in a data tab.
+                let open_here = self.target_tab_mut().data.as_ref().is_some_and(|d| {
+                    d.owner.eq_ignore_ascii_case(&owner) && d.name.eq_ignore_ascii_case(&name)
+                });
+                if open_here {
+                    self.reload_data(cx);
+                }
+            }
             (Some(PendingOp::ImportCsv { owner, name }), Response::Imported(rows)) => {
                 self.push_message(format!(
                     "Import {owner}.{name}: {rows} baris dimasukkan (belum commit)."
