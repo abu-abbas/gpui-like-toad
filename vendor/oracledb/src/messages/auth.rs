@@ -210,9 +210,10 @@ impl AuthMessage {
 
     /// Patched (gpui-like-toad): O5LOGON for accounts that only have a 10G
     /// verifier. Same flow as 11G, with AES-128 keys: the session keys are
-    /// encrypted with the 8 byte 10G hash padded with zeros to 16 bytes, and
-    /// the combo key is MD5 of the XOR of the two session key halves from
-    /// byte 16 on.
+    /// encrypted with the 8 byte 10G hash padded with zeros to 16 bytes. The
+    /// combo key comes from PBKDF2 when the server sends its parameters
+    /// (12c and later), otherwise from MD5 of the XOR of the two session keys
+    /// from byte 16 on.
     fn generate_verifier_10g(&mut self, client: &mut Client) {
         let user = client.config().user().unwrap_or_default().to_string();
         let mut password_hash =
@@ -238,12 +239,37 @@ impl AuthMessage {
         encrypt_cbc(&password_hash, &session_key_part_b, &mut session_key);
         self.add_pair_binary("AUTH_SESSKEY", &session_key, 1);
 
-        let buf: Vec<u8> = session_key_part_a[16..]
-            .iter()
-            .zip(&session_key_part_b[16..])
-            .map(|(a, b)| a ^ b)
-            .collect();
-        let combo_key = md5::Md5::digest(&buf[..16]).to_vec();
+        // Newer servers (12c+) send PBKDF2 parameters and expect the combo
+        // key derived from them, even for 10G verifiers; only old servers
+        // use the MD5 of the XOR-ed key halves.
+        let pbkdf2 = self
+            .session_data
+            .get("AUTH_PBKDF2_CSK_SALT")
+            .zip(self.session_data.get("AUTH_PBKDF2_SDER_COUNT"));
+        let combo_key = if let Some((salt, count)) = pbkdf2 {
+            let key_len = session_key_len / 2;
+            let mut raw_temp_key = session_key_part_b[..key_len].to_vec();
+            raw_temp_key.extend_from_slice(&session_key_part_a[..key_len]);
+            let temp_key_str = base16ct::upper::encode_string(&raw_temp_key);
+            let iterations: u32 = count.parse().unwrap();
+            let salt = base16ct::upper::decode_vec(salt).unwrap();
+            let mut combo_key = vec![0u8; 32];
+            get_derived_key(
+                temp_key_str.as_bytes(),
+                &salt,
+                iterations,
+                &mut combo_key,
+            );
+            combo_key.truncate(16);
+            combo_key
+        } else {
+            let buf: Vec<u8> = session_key_part_a[16..]
+                .iter()
+                .zip(&session_key_part_b[16..])
+                .map(|(a, b)| a ^ b)
+                .collect();
+            md5::Md5::digest(&buf[..16]).to_vec()
+        };
 
         self.encrypt_passwords(client, &combo_key);
         self.combo_key = Some(combo_key);
