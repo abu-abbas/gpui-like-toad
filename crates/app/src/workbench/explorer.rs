@@ -470,6 +470,11 @@ impl Workbench {
                 delegate = delegate.with_cell_paste(Rc::new(move |_, cx| {
                     let _ = paste_view.update(cx, |this, cx| this.paste_into_cells(cx));
                 }));
+                let duplicate_view = delete_view.clone();
+                delegate = delegate.with_duplicate_rows(Rc::new(move |rows, window, cx| {
+                    let _ = duplicate_view
+                        .update(cx, |this, cx| this.duplicate_grid_rows(rows, window, cx));
+                }));
                 delegate = delegate.with_delete_rows(Rc::new(move |rowids, _, cx| {
                     let _ = delete_view.update(cx, |this, cx| this.stage_row_deletes(rowids, cx));
                 }));

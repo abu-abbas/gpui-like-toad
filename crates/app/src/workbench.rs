@@ -150,6 +150,9 @@ enum PendingOp {
     DataDdl,
     /// Send a data tab's staged cell edits as UPDATEs.
     ApplyEdits,
+    /// Duplicate rows of a data tab once its identity/sequence columns are
+    /// known (fetched by DESCRIBE).
+    DuplicateRows(Vec<Vec<(String, String)>>),
     Ddl {
         owner: String,
         name: String,

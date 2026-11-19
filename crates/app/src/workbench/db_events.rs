@@ -38,6 +38,7 @@ impl Workbench {
                 | PendingOp::DataIndexes
                 | PendingOp::DataDdl
                 | PendingOp::ApplyEdits
+                | PendingOp::DuplicateRows(_)
         );
         let tab_conn = self.tabs.get(self.active_tab).and_then(|t| t.conn);
         if tab_op && !self.show_empty_workspace {
@@ -504,6 +505,9 @@ impl Workbench {
                 ));
                 self.conn.status = format!("Imported {rows} rows into {name} (uncommitted).");
                 self.target_tab_mut().results_tab = ResultsTab::Messages;
+            }
+            (Some(PendingOp::DuplicateRows(rows)), Response::Described(defs)) => {
+                self.stage_duplicates(rows, &defs, window, cx);
             }
             (Some(PendingOp::DataStructure), Response::Described(defs)) => {
                 let result = schema::describe_to_result(&defs);
