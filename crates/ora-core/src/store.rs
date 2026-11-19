@@ -730,12 +730,13 @@ pub fn import_connection_profiles(text: &str) -> Result<Vec<SavedProfile>, Strin
 pub fn decode_text_file(bytes: &[u8]) -> Result<String, String> {
     let utf16 = |rest: &[u8], le: bool| {
         let units: Vec<u16> = rest
-            .chunks_exact(2)
-            .map(|c| {
+            .chunks(2)
+            .filter_map(|c| <[u8; 2]>::try_from(c).ok())
+            .map(|pair| {
                 if le {
-                    u16::from_le_bytes([c[0], c[1]])
+                    u16::from_le_bytes(pair)
                 } else {
-                    u16::from_be_bytes([c[0], c[1]])
+                    u16::from_be_bytes(pair)
                 }
             })
             .collect();
