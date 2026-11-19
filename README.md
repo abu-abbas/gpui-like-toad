@@ -1,8 +1,8 @@
-# Ora The Explorer
+# Kilat
 
-Semacam Toad for Oracle (namanya plesetan dari *Dora The Explorer*), tapi ditulis ulang di Rust dengan [gpui-kit](https://gpui-kit.com) — ringan, satu binary, tanpa install Oracle Client.
+Klien database desktop ringan yang ditulis di Rust dengan [gpui-kit](https://gpui-kit.com) dan dikemas sebagai satu biner. Dukungan Oracle memakai driver thin dan bisa langsung dipakai tanpa memasang Oracle Client.
 
-Nama tampilan app adalah **Ora The Explorer** (judul window, menu macOS, nama `.app`, file rilis). Nama crate/biner, folder config (`gpui-like-toad`), bundle identifier macOS, dan service keychain sengaja tetap `gpui-like-toad` supaya koneksi dan password yang sudah tersimpan tidak hilang.
+Nama tampilan app adalah **Kilat** (judul window, menu macOS, nama `.app`, file rilis). Nama crate/biner, folder config (`gpui-like-toad`), bundle identifier macOS, dan service keychain sengaja tetap `gpui-like-toad` supaya koneksi dan password yang sudah tersimpan tidak hilang.
 
 > Status: MVP. Home ala Navicat, explorer ala Toad (dropdown schema, double klik buka data, klik kanan View Script / Export / Import), SQL editor, result grid, export, dan explain plan sudah ada.
 
@@ -133,12 +133,12 @@ Workflow lalu membangun biner rilis Linux + Windows + macOS (ARM), lalu menerbit
 
 Biner belum ditandatangani; code signing menyusul.
 
-Pasang di Linux (biar muncul di menu aplikasi dengan icon-nya): unduh `Ora-The-Explorer-<versi>-linux-x86_64.tar.gz`, lalu
+Pasang di Linux (biar muncul di menu aplikasi dengan icon-nya): unduh `Kilat-<versi>-linux-x86_64.tar.gz`, lalu
 
 ```sh
-mkdir ora && tar -xzf Ora-The-Explorer-*-linux-x86_64.tar.gz -C ora
-sh ora/install.sh            # ke ~/.local/bin + ~/.local/share, tanpa sudo
-sh ora/install.sh --uninstall
+mkdir kilat && tar -xzf Kilat-*-linux-x86_64.tar.gz -C kilat
+sh kilat/install.sh            # ke ~/.local/bin + ~/.local/share, tanpa sudo
+sh kilat/install.sh --uninstall
 ```
 
 Di Windows icon sudah tertanam di `.exe` (lihat `crates/app/build.rs`), di macOS ada di bundel `.app`.

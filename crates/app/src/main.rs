@@ -13,7 +13,7 @@
 /// saved passwords keep working.
 macro_rules! app_name {
     () => {
-        "Ora The Explorer"
+        "Kilat"
     };
 }
 
@@ -69,7 +69,7 @@ fn main() {
         // icons in default-icons.txt, so every other Lucide icon used by
         // this app (Database, Clock, Table, House, ChartColumn, ...) silently
         // rendered blank. AllAssets embeds the full catalog.
-        .with_assets(about::OraAssets);
+        .with_assets(about::KilatAssets);
     // macOS keeps the process alive after its last window is closed (red
     // button), with the icon still in the Dock. Without this handler a Dock
     // click did nothing and the only way back was Dock > Quit and relaunch.

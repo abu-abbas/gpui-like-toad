@@ -8,11 +8,11 @@ use gpui_kit::{
     WindowOptions,
 };
 
-const APP_ICON: &str = "ora-app-icon.png";
+const APP_ICON: &str = "kilat-app-icon.png";
 
-pub(crate) struct OraAssets;
+pub(crate) struct KilatAssets;
 
-impl AssetSource for OraAssets {
+impl AssetSource for KilatAssets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
         if path == APP_ICON {
             return Ok(Some(Cow::Borrowed(include_bytes!(

@@ -16,8 +16,8 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/icon/AppIcon.ico")
-            .set("ProductName", "Ora The Explorer")
-            .set("FileDescription", "Ora The Explorer")
+            .set("ProductName", "Kilat")
+            .set("FileDescription", "Kilat")
             .set("LegalCopyright", "Copyright (c) 2026 abu-abbas");
         // Fail loudly: a release without the icon is the bug this fixes.
         res.compile().expect("embed Windows icon/version resources");

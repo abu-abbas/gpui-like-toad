@@ -1,14 +1,14 @@
 //! Launch splash: a small borderless card in the middle of the screen
-//! (icon and name only) that plays the gear sound, then gives way to the
-//! main window. It is its own window so it stays small instead of filling
+//! that flashes the Kilat icon and plays a short thunder sound before the
+//! main window opens. It is its own window so it stays small instead of filling
 //! the 1280x800 main window.
 
 use crate::about::app_icon;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    div, px, size, App, Bounds, Context, FontWeight, IntoElement, Render, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
+    div, px, rgb, size, Animation, AnimationExt, App, Bounds, Context, FontWeight, IntoElement,
+    Render, Window, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
 };
 use rodio::{Decoder, OutputStream, Sink};
 use std::{io::Cursor, time::Duration};
@@ -32,7 +32,33 @@ impl Render for Splash {
             .border_1()
             .border_color(theme.border)
             .rounded(px(12.))
-            .child(app_icon(48.))
+            .child(div().relative().size(px(48.)).child(app_icon(48.)).when(
+                !cx.reduce_motion(),
+                |icon| {
+                    let flash_color = rgb(0xe4d5ff);
+                    icon.child(
+                        div()
+                            .absolute()
+                            .top(px(3.))
+                            .left(px(2.))
+                            .w(px(42.))
+                            .h(px(41.))
+                            .rounded(px(11.))
+                            .with_animation(
+                                "kilat-launch-flash",
+                                Animation::new(Duration::from_millis(290)),
+                                move |layer, progress| {
+                                    let strength = if progress < 0.14 {
+                                        progress / 0.14
+                                    } else {
+                                        ((1. - progress) / 0.86).powi(2)
+                                    };
+                                    layer.bg(flash_color.opacity(strength * 0.62))
+                                },
+                            ),
+                    )
+                },
+            ))
             .child(
                 div()
                     .text_size(px(14.))
@@ -74,7 +100,7 @@ pub(crate) fn show_then(cx: &mut App, open_main: fn(&mut App)) {
         return;
     };
     cx.background_executor()
-        .spawn(async { play_gear_sound() })
+        .spawn(async { play_lightning_sound() })
         .detach();
     cx.spawn(async move |cx| {
         cx.background_executor().timer(SPLASH_TIME).await;
@@ -87,15 +113,15 @@ pub(crate) fn show_then(cx: &mut App, open_main: fn(&mut App)) {
     .detach();
 }
 
-fn play_gear_sound() {
+fn play_lightning_sound() {
     let Ok((_stream, output)) = OutputStream::try_default() else {
         return;
     };
     let Ok(sink) = Sink::try_new(&output) else {
         return;
     };
-    let gear = include_bytes!("../assets/audio/gear-start.wav");
-    if let Ok(sound) = Decoder::new(Cursor::new(gear.as_slice())) {
+    let lightning = include_bytes!("../assets/audio/lightning-start.wav");
+    if let Ok(sound) = Decoder::new(Cursor::new(lightning.as_slice())) {
         sink.append(sound);
         sink.sleep_until_end();
     }
