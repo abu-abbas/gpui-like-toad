@@ -122,16 +122,20 @@ pub trait DbClient: Send {
     }
 
     /// One cell of the row with `rowid`, fetched with the "Load full
-    /// value" limit instead of the grid's per-cell limit.
+    /// value" limit instead of the grid's per-cell limit. `budget` is the
+    /// most bytes the value may take (the room left in the app's open
+    /// results); a bigger value is an error, never stored.
     fn fetch_cell(
         &mut self,
         owner: &str,
         table: &str,
         column: &str,
         rowid: &str,
+        budget: usize,
     ) -> Result<Value, DbError> {
         let query = crate::edit::select_cell_sql(self.dialect(), owner, table, column, rowid);
-        let result = self.query_binds(&query.sql, &query.binds, FetchLimits::full_cell())?;
+        let limits = FetchLimits::full_cell(budget);
+        let result = self.query_binds(&query.sql, &query.binds, limits)?;
         match result
             .rows
             .into_iter()
@@ -139,9 +143,14 @@ pub trait DbClient: Send {
             .and_then(|r| r.into_iter().next())
         {
             Some(Value::Clipped(c)) => Err(DbError::new(format!(
-                "The value is {}, larger than the {} MiB that can be loaded into the grid.",
+                "The value is {}, larger than the {} that can be loaded into the grid.",
                 c.describe_len(),
-                crate::fetch::MAX_FULL_CELL_BYTES / (1024 * 1024)
+                crate::fetch::human_bytes(limits.max_cell_bytes)
+            ))),
+            Some(value) if value.heap_bytes() > budget => Err(DbError::new(format!(
+                "The value needs {}, more than the {} left in the open results.",
+                crate::fetch::human_bytes(value.heap_bytes()),
+                crate::fetch::human_bytes(budget)
             ))),
             Some(value) => Ok(value),
             None => Err(DbError::new("Row no longer exists or its ROWID changed")),

@@ -58,14 +58,14 @@ fn cell_value(
     rows: &mut LobBudget<'_>,
 ) -> Result<Value, DbError> {
     use oracledb as odb;
-    if rows.locators
-        && (db_type == odb::DB_TYPE_CLOB
-            || db_type == odb::DB_TYPE_NCLOB
-            || db_type == odb::DB_TYPE_BLOB)
+    if db_type == odb::DB_TYPE_CLOB || db_type == odb::DB_TYPE_NCLOB || db_type == odb::DB_TYPE_BLOB
     {
+        // Always a locator: the server never sends a whole LOB inline, so
+        // reads below are the only place LOB bytes enter memory and they
+        // stop at the limits.
         let lob: Option<odb::Lob> = row.take(ix).map_err(db_err)?;
         return match lob {
-            Some(mut lob) => lob_preview(&mut lob, db_type != odb::DB_TYPE_BLOB, rows),
+            Some(mut lob) => lob_value(&mut lob, db_type != odb::DB_TYPE_BLOB, rows),
             None => Ok(Value::Null),
         };
     }
@@ -89,8 +89,6 @@ fn cell_value(
         || db_type == odb::DB_TYPE_VARCHAR
         || db_type == odb::DB_TYPE_NCHAR
         || db_type == odb::DB_TYPE_NVARCHAR
-        || db_type == odb::DB_TYPE_CLOB
-        || db_type == odb::DB_TYPE_NCLOB
         || db_type == odb::DB_TYPE_LONG
         || db_type == odb::DB_TYPE_ROWID
         || db_type == odb::DB_TYPE_UROWID
@@ -99,10 +97,7 @@ fn cell_value(
         let max = rows.collector.limits().max_cell_bytes;
         let v: Option<String> = row.take(ix).map_err(db_err)?;
         Ok(v.map_or(Value::Null, |t| Value::owned_text_limited(t, max)))
-    } else if db_type == odb::DB_TYPE_BLOB
-        || db_type == odb::DB_TYPE_RAW
-        || db_type == odb::DB_TYPE_LONG_RAW
-    {
+    } else if db_type == odb::DB_TYPE_RAW || db_type == odb::DB_TYPE_LONG_RAW {
         let max = rows.collector.limits().max_cell_bytes;
         let v: Option<Vec<u8>> = row.take(ix).map_err(db_err)?;
         Ok(v.map_or(Value::Null, |b| Value::owned_bytes_limited(b, max)))
@@ -161,20 +156,19 @@ const MAX_PREVIEW_READS: usize = 3;
 /// State shared by the cells of one fetch.
 struct LobBudget<'a> {
     collector: &'a RowCollector,
-    /// LOB columns arrive as locators (grid fetches); otherwise the server
-    /// sends whole values inline (exports, "Load full value").
-    locators: bool,
     previews_left: usize,
 }
 
-/// A CLOB/BLOB cell from its locator: the length is known without a round
-/// trip; a CLOB's start is read while the preview budget lasts.
-fn lob_preview(
+/// A CLOB/BLOB cell from its locator. The length is known without a
+/// round trip. Grid fetches read only the start of a CLOB while the
+/// preview budget lasts; exports and "Load full value"
+/// ([`FetchLimits::read_lobs`]) read the whole value, but never more than
+/// the per-cell limit and what the result's byte budget still has room for.
+fn lob_value(
     lob: &mut oracledb::Lob,
     is_char: bool,
     budget: &mut LobBudget<'_>,
 ) -> Result<Value, DbError> {
-    use std::io::Read as _;
     let size = lob.get_size().map_err(db_err)?;
     let unit = if is_char {
         ora_core::LenUnit::Chars
@@ -189,6 +183,7 @@ fn lob_preview(
     if size == 0 {
         return Ok(empty);
     }
+    let limits = budget.collector.limits();
     let clipped = |preview: Value| {
         Value::Clipped(Box::new(ora_core::ClippedValue {
             preview,
@@ -196,35 +191,73 @@ fn lob_preview(
             unit,
         }))
     };
-    if !is_char || budget.previews_left == 0 {
+    let (max, max_reads) = if limits.read_lobs {
+        // Not more than the rest of the result can hold.
+        let room = limits
+            .max_cell_bytes
+            .min(budget.collector.remaining_bytes());
+        (room, usize::MAX)
+    } else if is_char && budget.previews_left > 0 {
+        budget.previews_left -= 1;
+        (limits.max_cell_bytes, MAX_PREVIEW_READS)
+    } else {
+        // A BLOB's hex start tells nobody anything, and later CLOBs show
+        // only their length.
         return Ok(clipped(empty));
+    };
+    let out = read_lob_bytes(lob, size, is_char, max, max_reads)?;
+    if is_char {
+        let text = String::from_utf8_lossy(&out).into_owned();
+        if text.encode_utf16().count() >= size {
+            Ok(Value::Text(text))
+        } else {
+            Ok(clipped(Value::Text(text)))
+        }
+    } else if out.len() >= size {
+        Ok(Value::Bytes(out))
+    } else {
+        Ok(clipped(Value::Bytes(out)))
     }
-    budget.previews_left -= 1;
-    let max = budget.collector.limits().max_cell_bytes;
+}
+
+/// Read at most `max` bytes of a LOB in at most `max_reads` round trips.
+/// A character LOB read needs room for 3 UTF-8 bytes per unit.
+fn read_lob_bytes(
+    lob: &mut oracledb::Lob,
+    size: usize,
+    is_char: bool,
+    max: usize,
+    max_reads: usize,
+) -> Result<Vec<u8>, DbError> {
+    use std::io::Read as _;
+    // Enough for the whole value, never more than `max`.
+    let whole = if is_char {
+        size.saturating_mul(3)
+    } else {
+        size
+    };
     let mut out: Vec<u8> = Vec::new();
-    for _ in 0..MAX_PREVIEW_READS {
-        // A character LOB read needs room for 3 UTF-8 bytes per unit.
+    for _ in 0..max_reads {
         let room = max.saturating_sub(out.len());
-        if room < 4 {
+        if room < if is_char { 4 } else { 1 } || out.len() >= whole {
             break;
         }
-        let mut buf = vec![0u8; room.min(size.saturating_mul(3)).max(4)];
+        let mut buf = vec![0u8; room.min(whole - out.len()).clamp(4, READ_CHUNK)];
         match lob.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => out.extend_from_slice(&buf[..n]),
             // A later chunk that fails to decode (e.g. a split surrogate
-            // pair) just ends the preview.
+            // pair) just ends the read.
             Err(_) if !out.is_empty() => break,
             Err(err) => return Err(DbError::new(err.to_string())),
         }
     }
-    let text = String::from_utf8_lossy(&out).into_owned();
-    if text.encode_utf16().count() >= size {
-        Ok(Value::Text(text))
-    } else {
-        Ok(clipped(Value::Text(text)))
-    }
+    out.truncate(max);
+    Ok(out)
 }
+
+/// Bytes asked of the server per LOB read.
+const READ_CHUNK: usize = 1024 * 1024;
 
 fn fetch_rows(
     conn: &oracledb::Connection,
@@ -238,15 +271,12 @@ fn fetch_rows(
         .iter()
         .map(|b| b as &dyn oracledb::ToDbValue)
         .collect();
-    // Grid fetches take LOBs as locators, so a table of documents never
-    // sends whole documents; bigger per-cell limits (export, one full
-    // cell) want the values themselves and keep the inline fetch.
-    let locators = limits.max_cell_bytes <= ora_core::fetch::MAX_CELL_BYTES;
-    let mut builder = conn.statement(sql).map_err(db_err)?;
-    if locators {
-        builder = builder.fetch_lobs();
-    }
-    let cursor = builder
+    // LOBs always come as locators (never inline), so a table of
+    // documents never sends whole documents to the client.
+    let cursor = conn
+        .statement(sql)
+        .map_err(db_err)?
+        .fetch_lobs()
         .build()
         .map_err(db_err)?
         .query(&params)
@@ -273,7 +303,6 @@ fn fetch_rows(
         }
         let mut budget = LobBudget {
             collector: &collector,
-            locators,
             previews_left,
         };
         let mut values = Vec::with_capacity(db_types.len());
@@ -281,7 +310,9 @@ fn fetch_rows(
             values.push(cell_value(&mut row, ix, db_type, &mut budget)?);
         }
         previews_left = budget.previews_left;
-        collector.push(values);
+        if !collector.push(values) {
+            break;
+        }
     }
     Ok(collector.finish(columns))
 }

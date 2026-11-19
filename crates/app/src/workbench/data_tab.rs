@@ -10,6 +10,7 @@ use ora_core::{
 };
 
 use super::cell_edit::CellEdit;
+use super::results::result_room;
 use crate::theme::{FONT_GRID, LEADING_GRID};
 
 /// Rows shown at once in the Structure / Index grids (no paging there).
@@ -234,14 +235,36 @@ impl Workbench {
         if self.conn.busy {
             return;
         }
-        let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
             return;
         };
+        let Some(data) = tab.data.as_ref() else {
+            return;
+        };
+        // The value counts toward the all-tabs result budget: refuse it
+        // before any read when it cannot fit, and cap the read at what is
+        // left otherwise.
+        let room = result_room(self.open_result_bytes(cx));
+        let wanted = tab
+            .table_state
+            .read(cx)
+            .delegate()
+            .clipped_len(&rowid, &column);
+        if wanted.is_some_and(|len| len > room as u64) {
+            self.conn.status = format!(
+                "Cannot load {column}: it needs at least {} but only {} are left in the open results. Close or re-run other result tabs first.",
+                ora_core::fetch::human_bytes(wanted.unwrap_or(0) as usize),
+                ora_core::fetch::human_bytes(room)
+            );
+            cx.notify();
+            return;
+        }
         let job = Job::LoadCell {
             owner: data.owner.clone(),
             name: data.name.clone(),
             column,
             rowid,
+            budget: room,
         };
         self.spawn_db(job, PendingOp::LoadCell, cx);
     }

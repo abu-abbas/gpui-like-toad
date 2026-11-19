@@ -1259,7 +1259,7 @@ pub(super) fn limit_note(result: &QueryResult) -> String {
 
 /// The distinct results a tab holds (its statements and the shown one),
 /// with their sizes. Shared `Arc`s are counted once.
-fn tab_result_bytes(tab: &QueryTab, seen: &mut HashSet<usize>) -> usize {
+fn tab_result_bytes(tab: &QueryTab, seen: &mut HashSet<usize>, cx: &App) -> usize {
     let statements = tab
         .statement_results
         .iter()
@@ -1268,7 +1268,27 @@ fn tab_result_bytes(tab: &QueryTab, seen: &mut HashSet<usize>) -> usize {
         .chain(tab.last_result.iter())
         .filter(|result| seen.insert(Arc::as_ptr(result) as usize))
         .map(|result| result.heap_bytes())
-        .sum()
+        .sum::<usize>()
+        // Full values loaded into the grid live outside the shared result.
+        + tab.table_state.read(cx).delegate().override_bytes()
+}
+
+/// Bytes still free under [`MAX_OPEN_RESULT_BYTES`] when open results hold
+/// `used`.
+pub(super) fn result_room(used: usize) -> usize {
+    MAX_OPEN_RESULT_BYTES.saturating_sub(used)
+}
+
+impl Workbench {
+    /// Bytes all open results hold: the distinct results of every tab plus
+    /// the full values loaded into their grids.
+    pub(super) fn open_result_bytes(&self, cx: &App) -> usize {
+        let mut seen = HashSet::new();
+        self.tabs
+            .iter()
+            .map(|tab| tab_result_bytes(tab, &mut seen, cx))
+            .sum()
+    }
 }
 
 /// Which tabs to release, biggest first, so that `sizes` (bytes per tab;
@@ -1300,7 +1320,7 @@ impl Workbench {
             .iter()
             .enumerate()
             .map(|(ix, tab)| {
-                let bytes = tab_result_bytes(tab, &mut seen);
+                let bytes = tab_result_bytes(tab, &mut seen, cx);
                 let pinned = Some(ix) == keep || tab.data.as_ref().is_some_and(|d| d.has_staged());
                 if pinned {
                     kept += bytes;
@@ -1341,5 +1361,12 @@ mod budget_tests {
         assert_eq!(tabs_to_release(&sizes, 100, 120), vec![2, 0]);
         // Pinned results alone over budget: release everything else.
         assert_eq!(tabs_to_release(&sizes, 1000, 120), vec![2, 0, 3]);
+    }
+
+    #[test]
+    fn room_is_what_the_open_results_leave_and_never_negative() {
+        assert_eq!(result_room(0), MAX_OPEN_RESULT_BYTES);
+        assert_eq!(result_room(MAX_OPEN_RESULT_BYTES - 10), 10);
+        assert_eq!(result_room(MAX_OPEN_RESULT_BYTES + 5), 0);
     }
 }

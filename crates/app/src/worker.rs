@@ -162,6 +162,9 @@ pub enum Job {
         name: String,
         column: String,
         rowid: String,
+        /// Most bytes the value may take: what the open results can still
+        /// hold. A bigger value is refused, not loaded.
+        budget: usize,
     },
     /// Indexes of one table, for the data tab's Index view.
     Indexes {
@@ -669,8 +672,9 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             name,
             column,
             rowid,
+            budget,
         } => match client.as_mut() {
-            Some(client) => match client.fetch_cell(&owner, &name, &column, &rowid) {
+            Some(client) => match client.fetch_cell(&owner, &name, &column, &rowid, budget) {
                 Ok(value) => Response::CellLoaded {
                     rowid,
                     column,
