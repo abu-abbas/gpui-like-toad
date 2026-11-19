@@ -240,6 +240,7 @@ impl Workbench {
         self.conn.connection_lost = true;
         self.conn.db = None;
         self.conn.busy = false;
+        self.conn.abandoned = false;
         self.conn.pending_op = None;
         self.conn.pending_tab = None;
         self.conn.pending_sql = None;
@@ -270,6 +271,32 @@ impl Workbench {
         cx.notify();
     }
 
+    /// The worker finally answered an operation the user stopped waiting
+    /// for: free the connection, ignore the data, but remember a write may
+    /// have happened.
+    fn on_abandoned_response(&mut self, resp: Result<Response, RecvError>, cx: &mut Context<Self>) {
+        if let Ok(Response::ConnectionLost(error)) = resp {
+            self.connection_was_lost(error, cx);
+            return;
+        }
+        let pending = self.conn.pending_op.take();
+        self.conn.pending_tab = None;
+        self.conn.busy = false;
+        if matches!(
+            (&pending, &resp),
+            (Some(PendingOp::Run), Ok(Response::Executed(_)))
+                | (Some(PendingOp::ImportCsv { .. }), Ok(Response::Imported(_)))
+        ) {
+            self.conn.uncommitted = true;
+        }
+        self.conn.status = "The stopped operation finished; its result was ignored.".to_string();
+        self.push_message(
+            "The operation you stopped has finished on the server. Its result was ignored."
+                .to_string(),
+        );
+        cx.notify();
+    }
+
     fn on_db_response(
         &mut self,
         generation: u64,
@@ -284,6 +311,9 @@ impl Workbench {
             return;
         }
         self.conn.cancel_script = None;
+        if std::mem::take(&mut self.conn.abandoned) {
+            return self.on_abandoned_response(resp, cx);
+        }
         if let Ok(Response::ConnectionLost(error)) = resp {
             self.connection_was_lost(error, cx);
             return;

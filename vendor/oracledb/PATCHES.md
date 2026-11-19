@@ -23,3 +23,11 @@ examples, tests and dev-dependencies were dropped.
 
 When moving to a newer upstream revision, re-apply these patches (search for
 "Patched (gpui-like-toad)") or drop them if upstream gains 10G support.
+
+2. **Authentication metadata validation** (`src/messages/auth.rs`,
+   `validate_server_params`). Upstream `unwrap()`s the server's
+   `AUTH_SESSKEY`, `AUTH_VFR_DATA`, `AUTH_PBKDF2_*` values, so a garbled or
+   hostile response panicked or ran an unbounded PBKDF2. They are now checked
+   (present, hex, AES block multiple, iteration counts 1..=10,000,000) when
+   the verifier response is parsed, and a bad value is a normal connect
+   error. Unit tests only; not run against a real server.

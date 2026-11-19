@@ -157,7 +157,69 @@ pub struct AuthMessage {
     verifier_type: u32,
 }
 
+/// Largest PBKDF2 iteration count accepted from a server. Real servers send
+/// a few thousand; a hostile or corrupt one must not make the client burn
+/// minutes of CPU.
+const MAX_PBKDF2_COUNT: u32 = 10_000_000;
+
 impl AuthMessage {
+    /// Patched (gpui-like-toad): check the authentication metadata the server
+    /// sent (session key, salts, iteration counts) before any key derivation
+    /// uses it. Upstream unwraps these values, so a garbled or hostile
+    /// response panicked the connect thread or ran an unbounded PBKDF2.
+    fn validate_server_params(&self) -> Result<(), Error> {
+        let bad = |what: &str| {
+            Error::out_of_range(format!(
+                "invalid authentication data from server: {what}"
+            ))
+        };
+        let hex = |key: &str| -> Result<Vec<u8>, Error> {
+            let value = self
+                .session_data
+                .get(key)
+                .ok_or_else(|| bad(&format!("{key} missing")))?;
+            base16ct::upper::decode_vec(value)
+                .map_err(|_| bad(&format!("{key} is not hex")))
+        };
+        let count = |key: &str| -> Result<u32, Error> {
+            let value = self
+                .session_data
+                .get(key)
+                .ok_or_else(|| bad(&format!("{key} missing")))?;
+            match value.parse::<u32>() {
+                Ok(n) if (1..=MAX_PBKDF2_COUNT).contains(&n) => Ok(n),
+                _ => Err(bad(&format!("{key} out of range"))),
+            }
+        };
+        let session_key = hex("AUTH_SESSKEY")?;
+        if session_key.is_empty()
+            || session_key.len() % 16 != 0
+            || session_key.len() > 256
+        {
+            return Err(bad("AUTH_SESSKEY has an unexpected length"));
+        }
+        let is_12c = self.verifier_type == constants::VERIFIER_TYPE_12C;
+        if self.verifier_type != constants::VERIFIER_TYPE_10G {
+            hex("AUTH_VFR_DATA")?;
+        }
+        if is_12c {
+            count("AUTH_PBKDF2_VGEN_COUNT")?;
+        }
+        let has_pbkdf2 =
+            self.session_data.contains_key("AUTH_PBKDF2_CSK_SALT")
+                || self.session_data.contains_key("AUTH_PBKDF2_SDER_COUNT");
+        let needs_pbkdf2 = is_12c
+            || (self.verifier_type != constants::VERIFIER_TYPE_10G
+                && session_key.len() != 48);
+        if has_pbkdf2 || needs_pbkdf2 {
+            count("AUTH_PBKDF2_SDER_COUNT")?;
+            if hex("AUTH_PBKDF2_CSK_SALT")?.is_empty() {
+                return Err(bad("AUTH_PBKDF2_CSK_SALT is empty"));
+            }
+        }
+        Ok(())
+    }
+
     /// Adds a key/value pair to the list of key/value pairs being sent to the
     /// database during authentication.
     fn add_pair(&mut self, key: &str, value: &str, flags: u32) {
@@ -611,6 +673,7 @@ impl Message for AuthMessage {
         resp: &mut Response,
     ) -> Result<(), Error> {
         let num_params = resp.read_ub2()?;
+        let mut saw_verifier = false;
         for _ in 0..num_params {
             let key = resp.read_utf8_with_double_length()?.to_string();
             let value = resp.read_utf8_with_double_length()?.to_string();
@@ -628,8 +691,12 @@ impl Message for AuthMessage {
                     )));
                 }
                 self.verifier_type = flags;
+                saw_verifier = true;
             }
             self.session_data.insert(key, value);
+        }
+        if saw_verifier {
+            self.validate_server_params()?;
         }
         Ok(())
     }
@@ -729,5 +796,75 @@ mod tests_10g {
             hex(password_hash_10g("SYS", b"CHANGE_ON_INSTALL")),
             "D4C5016086B2DC6A"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests_server_params {
+    use super::*;
+
+    fn msg(verifier: u32, pairs: &[(&str, &str)]) -> AuthMessage {
+        let mut m = AuthMessage::new();
+        m.verifier_type = verifier;
+        for (k, v) in pairs {
+            m.session_data.insert(k.to_string(), v.to_string());
+        }
+        m
+    }
+
+    const KEY64: &str =
+        "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF";
+
+    #[test]
+    fn accepts_well_formed_12c() {
+        let m = msg(
+            constants::VERIFIER_TYPE_12C,
+            &[
+                ("AUTH_SESSKEY", KEY64),
+                ("AUTH_VFR_DATA", "AABBCC"),
+                ("AUTH_PBKDF2_VGEN_COUNT", "4096"),
+                ("AUTH_PBKDF2_SDER_COUNT", "3"),
+                ("AUTH_PBKDF2_CSK_SALT", "AABBCCDD"),
+            ],
+        );
+        assert!(m.validate_server_params().is_ok());
+    }
+
+    #[test]
+    fn rejects_missing_or_garbled_values() {
+        let good = [
+            ("AUTH_SESSKEY", KEY64),
+            ("AUTH_VFR_DATA", "AABBCC"),
+            ("AUTH_PBKDF2_VGEN_COUNT", "4096"),
+            ("AUTH_PBKDF2_SDER_COUNT", "3"),
+            ("AUTH_PBKDF2_CSK_SALT", "AABBCCDD"),
+        ];
+        let with = |key: &str, value: Option<&str>| {
+            let pairs: Vec<(&str, &str)> = good
+                .iter()
+                .filter(|(k, _)| *k != key)
+                .copied()
+                .chain(value.map(|v| (key, v)))
+                .collect();
+            msg(constants::VERIFIER_TYPE_12C, &pairs).validate_server_params()
+        };
+        assert!(with("AUTH_SESSKEY", None).is_err());
+        assert!(with("AUTH_SESSKEY", Some("ZZ")).is_err());
+        assert!(with("AUTH_SESSKEY", Some("0011")).is_err());
+        assert!(with("AUTH_VFR_DATA", Some("xyz")).is_err());
+        assert!(with("AUTH_PBKDF2_VGEN_COUNT", Some("abc")).is_err());
+        assert!(with("AUTH_PBKDF2_VGEN_COUNT", Some("0")).is_err());
+        assert!(with("AUTH_PBKDF2_VGEN_COUNT", Some("4000000000")).is_err());
+        assert!(with("AUTH_PBKDF2_SDER_COUNT", None).is_err());
+        assert!(with("AUTH_PBKDF2_CSK_SALT", Some("")).is_err());
+    }
+
+    #[test]
+    fn ten_g_without_pbkdf2_is_fine() {
+        let m = msg(
+            constants::VERIFIER_TYPE_10G,
+            &[("AUTH_SESSKEY", "00112233445566778899AABBCCDDEEFF")],
+        );
+        assert!(m.validate_server_params().is_ok());
     }
 }

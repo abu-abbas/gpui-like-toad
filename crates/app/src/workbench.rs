@@ -214,6 +214,11 @@ struct ConnState {
     pending_op: Option<PendingOp>,
     pending_sql: Option<String>,
     op_generation: u64,
+    /// Stop was pressed while the worker is still running the operation.
+    /// `busy` stays set until the worker answers, so the user cannot send a
+    /// second (possibly write) operation on top of one that may still
+    /// complete; the response itself is ignored.
+    abandoned: bool,
     connect_error: Option<String>,
     connection_lost: bool,
     last_connection: Option<LastConnection>,
@@ -253,6 +258,7 @@ impl ConnState {
             pending_op: None,
             pending_sql: None,
             op_generation: 0,
+            abandoned: false,
             connect_error: None,
             connection_lost: false,
             last_connection: None,
