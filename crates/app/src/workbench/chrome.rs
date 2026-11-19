@@ -588,7 +588,18 @@ impl Workbench {
                 .min_w(px(0.))
                 .flex()
                 .flex_row()
+                .items_center()
                 .justify_end()
+                .gap(px(SPACE_2))
+                // A spinning loader while a database job runs, so a long
+                // query or refresh is visible at a glance.
+                .when(self.conn.busy, |row| {
+                    row.child(
+                        gpui_kit::component::spinner::Spinner::new()
+                            .xsmall()
+                            .color(theme.primary),
+                    )
+                })
                 .child(
                     caption_text(
                         if self.conn.busy {
