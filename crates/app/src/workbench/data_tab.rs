@@ -917,12 +917,17 @@ impl Workbench {
                 ),
         );
         if data.show_sql {
-            let preview = select_sql(&data.owner, &data.name, &data.draft(cx), data.page).preview();
+            let query = select_sql(&data.owner, &data.name, &data.draft(cx), data.page);
+            let preview = query.preview();
+            let runnable = query.inlined();
+            let open_sql = runnable.clone();
             bar = bar.child(
                 div()
+                    .relative()
                     .flex()
                     .flex_col()
                     .p(px(SPACE_2))
+                    .pr(px(64.))
                     .rounded(px(RADIUS_SM))
                     .bg(theme.secondary)
                     // No ligatures: `>=` must not render as one glyph.
@@ -937,7 +942,42 @@ impl Workbench {
                                 theme.foreground
                             })
                             .child(line.to_string())
-                    })),
+                    }))
+                    .child(
+                        // The preview is plain text, so copy it from here:
+                        // with the bind values filled in, ready to run.
+                        div()
+                            .absolute()
+                            .top(px(4.))
+                            .right(px(4.))
+                            .flex()
+                            .gap(px(2.))
+                            .child(
+                                Button::new("filter-sql-copy")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Copy)
+                                    .tooltip("Copy SQL")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                            runnable.clone(),
+                                        ));
+                                        this.conn.status = "SQL disalin ke clipboard.".into();
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("filter-sql-open")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::SquareTerminal)
+                                    .tooltip("Open in SQL editor")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.new_tab_with_sql(open_sql.clone(), window, cx);
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
             );
         }
         bar.into_any_element()

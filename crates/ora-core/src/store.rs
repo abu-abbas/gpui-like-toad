@@ -812,19 +812,32 @@ pub fn save_theme_preference_in(dir: &Path, pref: ThemePreference) -> std::io::R
 pub struct PanelLayout {
     pub info_collapsed: bool,
     pub plan_collapsed: bool,
+    /// Width in pixels of the Connections sidebar, `None` = default.
+    pub sidebar_width: Option<u32>,
+    /// Width in pixels of the explorer column, `None` = default.
+    pub explorer_width: Option<u32>,
 }
 
 const INFO_COLLAPSED_KEY: &str = "info_panel_collapsed";
 const PLAN_COLLAPSED_KEY: &str = "plan_panel_collapsed";
+const SIDEBAR_WIDTH_KEY: &str = "sidebar_width";
+const EXPLORER_WIDTH_KEY: &str = "explorer_width";
 
 pub fn load_panel_layout_in(dir: &Path) -> PanelLayout {
     let Some(v) = read_json_file(&dir.join("settings.json")) else {
         return PanelLayout::default();
     };
     let flag = |key: &str| v.get(key).and_then(Json::as_bool).unwrap_or(false);
+    let width = |key: &str| {
+        v.get(key)
+            .and_then(Json::as_u64)
+            .and_then(|w| u32::try_from(w).ok())
+    };
     PanelLayout {
         info_collapsed: flag(INFO_COLLAPSED_KEY),
         plan_collapsed: flag(PLAN_COLLAPSED_KEY),
+        sidebar_width: width(SIDEBAR_WIDTH_KEY),
+        explorer_width: width(EXPLORER_WIDTH_KEY),
     }
 }
 
@@ -835,6 +848,15 @@ pub fn save_panel_layout_in(dir: &Path, layout: PanelLayout) -> std::io::Result<
     };
     pairs.insert(INFO_COLLAPSED_KEY.into(), Json::Bool(layout.info_collapsed));
     pairs.insert(PLAN_COLLAPSED_KEY.into(), Json::Bool(layout.plan_collapsed));
+    for (key, width) in [
+        (SIDEBAR_WIDTH_KEY, layout.sidebar_width),
+        (EXPLORER_WIDTH_KEY, layout.explorer_width),
+    ] {
+        match width {
+            Some(w) => pairs.insert(key.into(), Json::Num(f64::from(w))),
+            None => pairs.remove(key),
+        };
+    }
     write_json_file(
         dir,
         "settings.json",
@@ -1352,6 +1374,8 @@ mod tests {
         let layout = PanelLayout {
             info_collapsed: true,
             plan_collapsed: false,
+            sidebar_width: Some(300),
+            explorer_width: None,
         };
         save_panel_layout_in(&dir, layout).unwrap();
         assert_eq!(load_panel_layout_in(&dir), layout);

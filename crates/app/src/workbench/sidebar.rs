@@ -2,6 +2,31 @@ use super::*;
 
 use gpui_kit::component::{button::ButtonCustomVariant, FocusableExt as _};
 
+/// Drag range of the expanded Connections sidebar.
+pub(super) const SIDEBAR_MIN_WIDTH: f32 = 180.;
+pub(super) const SIDEBAR_MAX_WIDTH: f32 = 480.;
+/// Drag range of the explorer column next to it.
+pub(super) const EXPLORER_MIN_WIDTH: f32 = 190.;
+pub(super) const EXPLORER_MAX_WIDTH: f32 = 560.;
+
+pub(super) fn clamp_sidebar_width(width: f32) -> f32 {
+    width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
+}
+
+pub(super) fn clamp_explorer_width(width: f32) -> f32 {
+    width.clamp(EXPLORER_MIN_WIDTH, EXPLORER_MAX_WIDTH)
+}
+
+/// Payload while the sidebar's right edge is dragged.
+#[derive(Clone)]
+pub(super) struct SidebarResize;
+
+impl Render for SidebarResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui_kit::Empty
+    }
+}
+
 pub(super) fn tree_button(button: Button, keyboard: bool, cx: &App) -> Button {
     button
         .custom(ButtonCustomVariant::new(cx))
@@ -26,7 +51,7 @@ impl Workbench {
             .w(px(if compact {
                 RAIL_WIDTH
             } else {
-                CONNECTIONS_WIDTH
+                self.sidebar_width
             }))
             .bg(theme.sidebar.blend(theme.foreground.opacity(0.06)))
             .py(px(SPACE_2))
@@ -150,6 +175,46 @@ impl Workbench {
                 nav = nav.child(self.render_profile_list(keyboard, theme, cx));
             }
         }
+        nav = nav.when(!compact, |nav| {
+            let edge = theme.primary.opacity(0.55);
+            nav.relative()
+                .on_drag_move(cx.listener(
+                    |this, event: &gpui_kit::DragMoveEvent<SidebarResize>, _, cx| {
+                        let width = clamp_sidebar_width(f32::from(
+                            event.event.position.x - event.bounds.left(),
+                        ));
+                        if (width - this.sidebar_width).abs() >= 0.5 {
+                            this.sidebar_width = width;
+                            cx.notify();
+                        }
+                    },
+                ))
+                .child(
+                    // A 6px grab strip on the right edge; a line shows on hover.
+                    div()
+                        .id("sidebar-resize-handle")
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right(px(-3.))
+                        .w(px(6.))
+                        .cursor_col_resize()
+                        .hover(move |style| style.bg(edge))
+                        .on_drag(SidebarResize, |drag, _, _, cx| {
+                            cx.stop_propagation();
+                            let drag = drag.clone();
+                            cx.new(|_| drag)
+                        })
+                        .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                            // Double click puts the default width back.
+                            if event.click_count() == 2 {
+                                this.sidebar_width = CONNECTIONS_WIDTH;
+                                this.save_panel_layout();
+                                cx.notify();
+                            }
+                        })),
+                )
+        });
         nav.child(div().flex_1().min_h(px(0.))).child(
             tree_button(Button::new("sidebar-settings"), keyboard, cx)
                 .small()

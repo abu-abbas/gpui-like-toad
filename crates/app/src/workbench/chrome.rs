@@ -389,12 +389,38 @@ impl Workbench {
                         "table-export",
                         IconName::Download,
                         theme.muted_foreground,
-                        "Export table to CSV",
+                        "Export table (CSV / XLSX)",
                     )
                     .disabled(unavailable)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.export_table(object.clone(), ExportFormat::Csv, cx)
-                    })),
+                    .dropdown_menu({
+                        let view = cx.entity();
+                        move |menu, _, _| {
+                            let csv_view = view.clone();
+                            let xlsx_view = view.clone();
+                            let csv_object = object.clone();
+                            let xlsx_object = object.clone();
+                            menu.item(PopupMenuItem::new("Export CSV").on_click(
+                                move |_, _, cx: &mut App| {
+                                    csv_view.update(cx, |this, cx| {
+                                        this.export_table(csv_object.clone(), ExportFormat::Csv, cx)
+                                    });
+                                },
+                            ))
+                            .item(
+                                PopupMenuItem::new("Export XLSX").on_click(
+                                    move |_, _, cx: &mut App| {
+                                        xlsx_view.update(cx, |this, cx| {
+                                            this.export_table(
+                                                xlsx_object.clone(),
+                                                ExportFormat::Xlsx,
+                                                cx,
+                                            )
+                                        });
+                                    },
+                                ),
+                            )
+                        }
+                    }),
                 )
                 .child(
                     action(

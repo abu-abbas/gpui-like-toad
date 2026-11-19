@@ -1,5 +1,7 @@
 use super::*;
 
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
+
 #[derive(Clone)]
 struct ProfileDrag {
     id: String,
@@ -434,34 +436,83 @@ impl Workbench {
     }
 
     /// The connections tree inside a scroll area in both directions: deep
-    /// nesting can outgrow the column, then a horizontal scrollbar appears.
+    /// nesting or long names can outgrow the column, then a horizontal
+    /// scrollbar stays visible under the tree (macOS hides idle scrollbars,
+    /// so the default fade-out mode looked like there was none at all).
     pub(super) fn render_profile_list(
         &self,
         keyboard: bool,
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let depth = self
-            .all_folder_paths()
-            .iter()
-            .map(|f| f.split('/').count())
-            .max()
-            .unwrap_or(0);
-        let min_width = EXPLORER_WIDTH + 28. * depth as f32;
+        let handle = &self.connections_scroll;
         div()
-            .id("connections-scroll")
+            .relative()
             .flex()
             .flex_col()
             .min_h(px(0.))
-            .overflow_scroll()
             .child(
                 div()
+                    .id("connections-scroll")
+                    .track_scroll(handle)
                     .flex()
                     .flex_col()
-                    .flex_none()
-                    .min_w(px(min_width))
-                    .child(self.render_profile_tree(keyboard, theme, cx)),
+                    .min_h(px(0.))
+                    .overflow_scroll()
+                    // Room for the horizontal scrollbar under the last row.
+                    .pb(px(10.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_none()
+                            .min_w(px(self.profile_tree_min_width()))
+                            .child(self.render_profile_tree(keyboard, theme, cx)),
+                    ),
             )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(
+                        Scrollbar::horizontal(handle)
+                            .id("connections-scrollbar-x")
+                            .mode(ScrollbarMode::Always)
+                            .viewport_from_layout(),
+                    )
+                    .child(
+                        Scrollbar::vertical(handle)
+                            .id("connections-scrollbar-y")
+                            .viewport_from_layout(),
+                    ),
+            )
+    }
+
+    /// Rough width the widest tree row needs: indentation per folder level
+    /// plus its label. Rows truncate inside the column, so without this the
+    /// content would never be wider than the column and nothing would scroll.
+    fn profile_tree_min_width(&self) -> f32 {
+        const LEVEL: f32 = 20.;
+        const CHAR: f32 = 7.4;
+        let row = |depth: usize, chars: usize, extra: f32| {
+            22. + LEVEL * depth as f32 + 20. + CHAR * chars as f32 + extra
+        };
+        let depth_of = |folder: &str| folder.split('/').filter(|p| !p.is_empty()).count();
+        let profiles = self.profiles.iter().map(|p| {
+            // Room for the environment tag (DEV, PROD...) when it shows.
+            let tag = if p.access.environment == ConnectionEnvironment::None {
+                16.
+            } else {
+                52.
+            };
+            row(depth_of(&p.folder), p.name.chars().count(), tag)
+        });
+        let folders = self.all_folder_paths().into_iter().map(|f| {
+            let depth = depth_of(&f);
+            let label = f.rsplit('/').next().unwrap_or("").chars().count();
+            row(depth.saturating_sub(1), label, 8.)
+        });
+        profiles.chain(folders).fold(0., f32::max)
     }
 
     fn render_profile_tree(
@@ -549,42 +600,6 @@ impl Workbench {
                                     .icon(IconName::X)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.folder_draft = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
-            );
-        }
-        if let Some((path, field)) = &self.folder_rename {
-            tree = tree.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(caption_text(format!("Rename {path}"), theme))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .child(Input::new(field).small()),
-                            )
-                            .child(
-                                Button::new("folder-rename-save")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::Check)
-                                    .on_click(cx.listener(|this, _, _, cx| this.rename_folder(cx))),
-                            )
-                            .child(
-                                Button::new("folder-rename-cancel")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::X)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.folder_rename = None;
                                         cx.notify();
                                     })),
                             ),
@@ -721,8 +736,11 @@ impl Workbench {
                                 menu
                             })
                     })
-                    .child(
-                        sidebar::tree_button(
+                    .child(match &self.folder_rename {
+                        Some((path, field)) if *path == folder => {
+                            folder_rename_row(field, color, cx).into_any_element()
+                        }
+                        _ => sidebar::tree_button(
                             Button::new(format!("connection-folder-{folder}")),
                             keyboard,
                             cx,
@@ -745,8 +763,9 @@ impl Workbench {
                             None,
                             color,
                             theme,
-                        )),
-                    ),
+                        ))
+                        .into_any_element(),
+                    }),
             );
             folded_path = collapsed.then_some(parts);
             if !collapsed {
@@ -968,4 +987,45 @@ fn tree_label(
                 .child(text),
         )
         .children(count.map(|count| caption_text(count.to_string(), theme)))
+}
+
+/// The folder row while it is being renamed: the same folder icon with an
+/// input in place of the label, so the edit happens where the folder is.
+fn folder_rename_row(
+    field: &Entity<InputState>,
+    color: Hsla,
+    cx: &mut Context<Workbench>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .h(px(28.))
+        .pl(px(8.))
+        .child(icon(IconName::FolderOpen, 14., color))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(80.))
+                .child(Input::new(field).xsmall()),
+        )
+        .child(
+            Button::new("folder-rename-save")
+                .xsmall()
+                .ghost()
+                .icon(IconName::Check)
+                .tooltip("Simpan")
+                .on_click(cx.listener(|this, _, _, cx| this.rename_folder(cx))),
+        )
+        .child(
+            Button::new("folder-rename-cancel")
+                .xsmall()
+                .ghost()
+                .icon(IconName::X)
+                .tooltip("Batal")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.folder_rename = None;
+                    cx.notify();
+                })),
+        )
 }

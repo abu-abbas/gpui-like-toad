@@ -319,6 +319,50 @@ impl BoundQuery {
         }
         out
     }
+
+    /// The SQL with each `:n` bind replaced by its value as a quoted
+    /// literal, so it runs as is when pasted into an editor. Text inside
+    /// quotes (string literals, quoted identifiers) is left untouched.
+    pub fn inlined(&self) -> String {
+        let mut out = String::with_capacity(self.sql.len());
+        let mut chars = self.sql.chars().peekable();
+        let mut quote: Option<char> = None;
+        while let Some(c) = chars.next() {
+            match quote {
+                Some(q) => {
+                    out.push(c);
+                    if c == q {
+                        quote = None;
+                    }
+                }
+                None if c == '\'' || c == '"' => {
+                    quote = Some(c);
+                    out.push(c);
+                }
+                None if c == ':' && chars.peek().is_some_and(char::is_ascii_digit) => {
+                    let mut digits = String::new();
+                    while let Some(d) = chars.peek().copied().filter(char::is_ascii_digit) {
+                        digits.push(d);
+                        chars.next();
+                    }
+                    let value = digits
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|n| n.checked_sub(1))
+                        .and_then(|ix| self.binds.get(ix));
+                    match value {
+                        Some(v) => out.push_str(&format!("'{}'", v.replace('\'', "''"))),
+                        None => {
+                            out.push(':');
+                            out.push_str(&digits);
+                        }
+                    }
+                }
+                None => out.push(c),
+            }
+        }
+        out
+    }
 }
 
 /// Most rows one data-tab fetch may ask for; the grid renders them all, so
@@ -422,6 +466,19 @@ pub fn select_sql(owner: &str, table: &str, filter: &TableFilter, page: TablePag
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn inlined_replaces_binds_outside_quotes() {
+        let q = BoundQuery {
+            sql: "SELECT ':1' AS \":2\" FROM t WHERE a LIKE :1 ESCAPE '\\' AND b = :2 AND c = :10"
+                .into(),
+            binds: vec!["%it's%".into(), "x".into()],
+        };
+        assert_eq!(
+            q.inlined(),
+            "SELECT ':1' AS \":2\" FROM t WHERE a LIKE '%it''s%' ESCAPE '\\' AND b = 'x' AND c = :10"
+        );
+    }
     use super::*;
 
     fn cond(column: &str, op: FilterOp, value: &str) -> FilterCondition {
