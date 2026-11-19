@@ -165,8 +165,7 @@ jobs:
           app="bundle/Kilat.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp "target/release/gpui-like-toad" "$app/Contents/MacOS/gpui-like-toad"
-          iconutil -c icns -o "$app/Contents/Resources/AppIcon.icns" \
-            crates/app/assets/icon/AppIcon.iconset
+          sh crates/app/assets/icon/compile-macos-icon.sh "$app/Contents/Resources"
           # Nama tampilan "Kilat"; CFBundleIdentifier dan nama
           # executable sengaja tetap gpui-like-toad supaya izin Keychain dan
           # preferensi macOS dari build lama tidak hilang.
@@ -187,6 +186,8 @@ jobs:
             <string>$VERSION</string>
             <key>CFBundleExecutable</key>
             <string>gpui-like-toad</string>
+            <key>CFBundleIconName</key>
+            <string>Kilat</string>
             <key>CFBundleIconFile</key>
             <string>AppIcon</string>
             <key>CFBundlePackageType</key>

@@ -25,6 +25,8 @@ impl Workbench {
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.update_appearance(window, cx, |prefs| prefs.app_icon = icon);
+                        #[cfg(target_os = "macos")]
+                        crate::macos_dock::apply_icon(icon);
                         cx.refresh_windows();
                     })),
             );
@@ -81,7 +83,16 @@ impl Workbench {
             .child(setting_group(
                 theme,
                 [
-                    setting_row("App Icon", "", icons, theme),
+                    setting_row(
+                        "App Icon",
+                        if cfg!(target_os = "macos") {
+                            "Changes the Dock icon while Kilat is running"
+                        } else {
+                            ""
+                        },
+                        icons,
+                        theme,
+                    ),
                     setting_row("Mode", "System follows your OS appearance", mode, theme),
                     setting_row(
                         if dark { "Dark theme" } else { "Light theme" },
