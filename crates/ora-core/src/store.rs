@@ -685,6 +685,9 @@ pub fn export_connection_profiles(profiles: &[SavedProfile]) -> String {
 /// transferred profile never points to another machine's keychain and
 /// must explicitly be opted into SYSDBA after import.
 pub fn import_connection_profiles(text: &str) -> Result<Vec<SavedProfile>, String> {
+    if looks_like_toad_logins(text) {
+        return import_toad_logins(text);
+    }
     let value = parse_json(text)?;
     let items = match &value {
         Json::Arr(items) => items.as_slice(),
@@ -720,6 +723,105 @@ pub fn import_connection_profiles(text: &str) -> Result<Vec<SavedProfile>, Strin
             Ok(profile)
         })
         .collect()
+}
+
+/// Decode a text file that may be UTF-8 or UTF-16 (Toad on Windows writes
+/// UTF-16 with a BOM), dropping a leading BOM.
+pub fn decode_text_file(bytes: &[u8]) -> Result<String, String> {
+    let utf16 = |rest: &[u8], le: bool| {
+        let units: Vec<u16> = rest
+            .chunks_exact(2)
+            .map(|c| {
+                if le {
+                    u16::from_le_bytes([c[0], c[1]])
+                } else {
+                    u16::from_be_bytes([c[0], c[1]])
+                }
+            })
+            .collect();
+        String::from_utf16(&units).map_err(|e| e.to_string())
+    };
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, true),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, false),
+        [0xEF, 0xBB, 0xBF, rest @ ..] => {
+            String::from_utf8(rest.to_vec()).map_err(|e| e.to_string())
+        }
+        _ => String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string()),
+    }
+}
+
+/// True for Toad for Oracle's login list (`toadForOracleLogin_*.txt`,
+/// INI sections named `[LOGIN1]`, `[LOGIN2]`...).
+pub fn looks_like_toad_logins(text: &str) -> bool {
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .is_some_and(|l| l.len() > 6 && l[..6].eq_ignore_ascii_case("[LOGIN"))
+}
+
+/// Read the logins of a Toad for Oracle export. Toad does not write the
+/// password (or writes it encrypted), so imported profiles ask for it on
+/// connect. Everything is grouped in a "Toad" folder; SYSDBA is not carried
+/// over, like for Ora's own files.
+pub fn import_toad_logins(text: &str) -> Result<Vec<SavedProfile>, String> {
+    let mut sections: Vec<BTreeMap<String, String>> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') && line.ends_with(']') {
+            sections.push(BTreeMap::new());
+        } else if let (Some(section), Some((key, value))) =
+            (sections.last_mut(), line.split_once('='))
+        {
+            section.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+    }
+    let profiles: Vec<SavedProfile> = sections
+        .iter()
+        .filter_map(|fields| {
+            let get = |key: &str| fields.get(key).map(String::as_str).unwrap_or("");
+            let username = get("user");
+            if username.is_empty() {
+                return None;
+            }
+            let (host, port) = (get("host"), get("port"));
+            let (service, sid) = (get("servicename"), get("sid"));
+            let connect_string = if host.is_empty() {
+                // Older entries only have the raw `Server` text: a TNS
+                // alias or an Easy Connect string.
+                get("server").to_string()
+            } else if service.is_empty() && !sid.is_empty() {
+                let port = if port.is_empty() { "1521" } else { port };
+                format!(
+                    "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST={host})(PORT={port}))(CONNECT_DATA=(SID={sid})))"
+                )
+            } else {
+                crate::model::compose_easy_connect(host, port, service)
+            };
+            if connect_string.is_empty() {
+                return None;
+            }
+            let name = match get("alias") {
+                "" => format!("{username}@{connect_string}"),
+                alias => alias.to_string(),
+            };
+            Some(SavedProfile {
+                id: new_profile_id(),
+                name,
+                username: username.to_string(),
+                connect_string,
+                folder: "Toad".to_string(),
+                access: ConnectionAccess {
+                    read_only: get("sessionreadonly") == "1",
+                    ..ConnectionAccess::default()
+                },
+                save_password: false,
+            })
+        })
+        .collect();
+    if profiles.is_empty() {
+        return Err("No Toad logins found in this file.".into());
+    }
+    Ok(profiles)
 }
 
 // ---------------------------------------------------------------------------
@@ -1110,6 +1212,34 @@ pub fn save_update_prefs(prefs: &UpdatePrefs) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn toad_logins_become_profiles() {
+        let text = "\u{feff}[LOGIN1]\r\nUser=WEBKE\r\nServer=x\r\nSavePassword=0\r\nSessionReadOnly=1\r\nAlias=\r\nHost=dbm.example\r\nServiceName=PDL\r\nSID=\r\nPort=1521\r\nConnectAs=SYSDBA\r\n\r\n[LOGIN2]\r\nUser=SIM\r\nServer=OLDTNS\r\nAlias=Simpeg\r\nHost=\r\nSID=\r\n\r\n[LOGIN3]\r\nUser=\r\nHost=h\r\n\r\n[LOGIN4]\r\nUser=U4\r\nHost=h4\r\nSID=ORCL\r\n";
+        let text = text.trim_start_matches('\u{feff}');
+        assert!(looks_like_toad_logins(text));
+        let profiles = import_connection_profiles(text).unwrap();
+        assert_eq!(profiles.len(), 3);
+        assert_eq!(profiles[0].name, "WEBKE@dbm.example:1521/PDL");
+        assert_eq!(profiles[0].connect_string, "dbm.example:1521/PDL");
+        assert!(profiles[0].access.read_only);
+        assert!(!profiles[0].access.sysdba);
+        assert_eq!(profiles[0].folder, "Toad");
+        assert_eq!(profiles[1].name, "Simpeg");
+        assert_eq!(profiles[1].connect_string, "OLDTNS");
+        assert!(profiles[2].connect_string.contains("(SID=ORCL)"));
+        assert_ne!(profiles[0].id, profiles[1].id);
+    }
+
+    #[test]
+    fn decode_text_file_handles_utf16_and_bom() {
+        let utf16: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain("[LOGIN1]".encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        assert_eq!(decode_text_file(&utf16).unwrap(), "[LOGIN1]");
+        assert_eq!(decode_text_file(b"\xEF\xBB\xBFabc").unwrap(), "abc");
+    }
     #[test]
     fn folder_paths_rebase() {
         use super::{folder_in, folder_rebase};

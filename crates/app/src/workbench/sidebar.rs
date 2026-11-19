@@ -139,7 +139,7 @@ impl Workbench {
                             let import_view = import_view.clone();
                             let export_view = export_view.clone();
                             menu.item(
-                                PopupMenuItem::new("Import Ora connections…")
+                                PopupMenuItem::new("Import connections…")
                                     .icon(Icon::new(IconName::Upload))
                                     .on_click(move |_, _, cx| {
                                         import_view
