@@ -309,7 +309,7 @@ impl Workbench {
                                 div()
                                     .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
                                     .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
-                                    .text_color(if is_error_message(m) {
+                                    .text_color(if crate::error_log::is_error_message(m) {
                                         theme.danger
                                     } else {
                                         theme.foreground
@@ -996,18 +996,6 @@ impl Workbench {
         }
         panel
     }
-}
-
-/// Messages are plain strings; ORA-/SQLite driver errors and Indonesian failure
-/// texts ("gagal") are shown in the danger color in the Info strip.
-fn is_error_message(message: &str) -> bool {
-    let lower = message.to_lowercase();
-    message.contains("ORA-")
-        || message.contains("DPY-")
-        || message.starts_with("SQLite:")
-        || lower.contains("error")
-        || lower.contains("gagal")
-        || lower.starts_with("demo:")
 }
 
 /// One slot in the numbered pagination row: a clickable page or an

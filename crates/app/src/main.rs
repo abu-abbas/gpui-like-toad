@@ -20,6 +20,7 @@ macro_rules! app_name {
 mod about;
 mod completion;
 mod crash_log;
+mod error_log;
 mod keychain;
 mod plan;
 mod results;

@@ -539,6 +539,9 @@ impl Workbench {
         } else {
             message
         };
+        if crate::error_log::is_error_message(&message) {
+            crate::error_log::append(&message);
+        }
         self.messages.push(message);
         if self.messages.len() > MAX_MESSAGES {
             let excess = self.messages.len() - MAX_MESSAGES;
