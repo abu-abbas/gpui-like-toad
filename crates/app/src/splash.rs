@@ -32,33 +32,36 @@ impl Render for Splash {
             .border_1()
             .border_color(theme.border)
             .rounded(px(12.))
-            .child(div().relative().size(px(48.)).child(app_icon(48.)).when(
-                !cx.reduce_motion(),
-                |icon| {
-                    let flash_color = rgb(0xe4d5ff);
-                    icon.child(
-                        div()
-                            .absolute()
-                            .top(px(3.))
-                            .left(px(2.))
-                            .w(px(42.))
-                            .h(px(41.))
-                            .rounded(px(11.))
-                            .with_animation(
-                                "kilat-launch-flash",
-                                Animation::new(Duration::from_millis(290)),
-                                move |layer, progress| {
-                                    let strength = if progress < 0.14 {
-                                        progress / 0.14
-                                    } else {
-                                        ((1. - progress) / 0.86).powi(2)
-                                    };
-                                    layer.bg(flash_color.opacity(strength * 0.62))
-                                },
-                            ),
-                    )
-                },
-            ))
+            .child(
+                div()
+                    .relative()
+                    .size(px(48.))
+                    .child(app_icon(48., crate::theme::appearance(cx).app_icon))
+                    .when(!cx.reduce_motion(), |icon| {
+                        let flash_color = rgb(0xe4d5ff);
+                        icon.child(
+                            div()
+                                .absolute()
+                                .top(px(3.))
+                                .left(px(2.))
+                                .w(px(42.))
+                                .h(px(41.))
+                                .rounded(px(11.))
+                                .with_animation(
+                                    "kilat-launch-flash",
+                                    Animation::new(Duration::from_millis(290)),
+                                    move |layer, progress| {
+                                        let strength = if progress < 0.14 {
+                                            progress / 0.14
+                                        } else {
+                                            ((1. - progress) / 0.86).powi(2)
+                                        };
+                                        layer.bg(flash_color.opacity(strength * 0.62))
+                                    },
+                                ),
+                        )
+                    }),
+            )
             .child(
                 div()
                     .text_size(px(14.))
