@@ -55,11 +55,9 @@ impl SettingsPage {
 
     fn keywords(self) -> &'static str {
         match self {
-            Self::Appearance => {
-                "appearance theme light dark system color accent font size motion icon"
-            }
+            Self::Appearance => "appearance theme light dark system color accent font size motion",
             Self::Updates => "updates check download version",
-            Self::About => "about kilat version",
+            Self::About => "about ora version",
         }
     }
 
@@ -225,7 +223,7 @@ impl Workbench {
                             Some(self.render_update_settings(theme, cx).into_any_element())
                         }
                         Some(SettingsPage::About) => {
-                            Some(crate::about::content(theme, cx).into_any_element())
+                            Some(crate::about::content(theme).into_any_element())
                         }
                         None => None,
                     }),

@@ -1,5 +1,4 @@
 use super::*;
-use ora_core::store::AppIcon;
 
 impl Workbench {
     pub(super) fn render_appearance(
@@ -9,26 +8,6 @@ impl Workbench {
     ) -> impl IntoElement {
         let prefs = theme::appearance(cx);
         let appearance_mode = theme::preference(cx);
-        let mut icons = div().flex().gap(px(SPACE_2));
-        for (icon, label) in [(AppIcon::Folded, "K Folded"), (AppIcon::Bolt, "K Bolt")] {
-            icons = icons.child(
-                Button::new(label)
-                    .ghost()
-                    .when(icon == prefs.app_icon, |button| button.bg(theme.secondary))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(SPACE_1))
-                            .child(crate::about::app_icon(24., icon))
-                            .child(label),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.update_appearance(window, cx, |prefs| prefs.app_icon = icon);
-                        cx.refresh_windows();
-                    })),
-            );
-        }
         let mut mode = div()
             .flex()
             .p(px(2.))
@@ -81,7 +60,6 @@ impl Workbench {
             .child(setting_group(
                 theme,
                 [
-                    setting_row("App Icon", "", icons, theme),
                     setting_row("Mode", "System follows your OS appearance", mode, theme),
                     setting_row(
                         if dark { "Dark theme" } else { "Light theme" },

@@ -8,38 +8,25 @@ use gpui_kit::{
     WindowOptions,
 };
 
-use ora_core::store::AppIcon;
-
-const FOLDED_ICON_PATH: &str = "kilat-app-icon.png";
-const BOLT_ICON_PATH: &str = "kilat-bolt.png";
-
-pub(crate) fn icon_png(icon: AppIcon) -> &'static [u8] {
-    match icon {
-        AppIcon::Folded => include_bytes!("../assets/icon/AppIcon.iconset/icon_256x256.png"),
-        AppIcon::Bolt => include_bytes!("../assets/icon/kilat-bolt.png"),
-    }
-}
+const APP_ICON: &str = "kilat-app-icon.png";
 
 pub(crate) struct KilatAssets;
 
 impl AssetSource for KilatAssets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
-        let icon = match path {
-            FOLDED_ICON_PATH => AppIcon::Folded,
-            BOLT_ICON_PATH => AppIcon::Bolt,
-            _ => return assets::AllAssets.load(path),
-        };
-        Ok(Some(Cow::Borrowed(icon_png(icon))))
+        if path == APP_ICON {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icon/AppIcon.iconset/icon_256x256.png"
+            ))));
+        }
+        assets::AllAssets.load(path)
     }
 
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
         let mut paths = assets::AllAssets.list(path)?;
-        paths.extend(
-            [FOLDED_ICON_PATH, BOLT_ICON_PATH]
-                .into_iter()
-                .filter(|name| name.starts_with(path))
-                .map(SharedString::from),
-        );
+        if APP_ICON.starts_with(path) {
+            paths.push(APP_ICON.into());
+        }
         Ok(paths)
     }
 }
@@ -58,19 +45,15 @@ impl Render for About {
             .justify_center()
             .items_center()
             .bg(theme.background)
-            .child(content(theme, cx))
+            .child(content(theme))
     }
 }
 
-pub(crate) fn app_icon(size: f32, icon: AppIcon) -> impl IntoElement {
-    let path = match icon {
-        AppIcon::Folded => FOLDED_ICON_PATH,
-        AppIcon::Bolt => BOLT_ICON_PATH,
-    };
-    img(path).size(px(size)).flex_none()
+pub(crate) fn app_icon(size: f32) -> impl IntoElement {
+    img(APP_ICON).size(px(size)).flex_none()
 }
 
-pub(crate) fn content(theme: &gpui_kit::component::Theme, cx: &App) -> impl IntoElement {
+pub(crate) fn content(theme: &gpui_kit::component::Theme) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -79,7 +62,7 @@ pub(crate) fn content(theme: &gpui_kit::component::Theme, cx: &App) -> impl Into
         .text_center()
         .gap(px(14.))
         .p(px(20.))
-        .child(app_icon(76., crate::theme::appearance(cx).app_icon))
+        .child(app_icon(76.))
         .child(
             div()
                 .text_size(crate::theme::ui_size(theme, 22.))
