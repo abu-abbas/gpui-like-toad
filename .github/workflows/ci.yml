@@ -139,9 +139,12 @@ jobs:
           semgrep scan --error --metrics=off
           --config p/rust --config p/secrets --config p/github-actions
 
+  audit:
+    uses: ./.github/workflows/audit.yml
+
   ci-ok:
     if: always()
-    needs: [changes, pr-title, test, gui, security]
+    needs: [changes, pr-title, test, gui, security, audit]
     runs-on: ubuntu-latest
     steps:
       - name: Verifikasi hasil check yang diwajibkan
@@ -153,6 +156,7 @@ jobs:
             .changes.result == "success" and
             .["pr-title"].result == "success" and
             .security.result == "success" and
+            .audit.result == "success" and
             (if .changes.outputs.rust == "true" then
               .test.result == "success" and .gui.result == "success"
             else

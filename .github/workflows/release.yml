@@ -38,7 +38,12 @@ env:
   VERSION: ${{ github.ref_type == 'tag' && github.ref_name || inputs.version || format('0.1.{0}', github.run_number) }}
 
 jobs:
+  # Rilis berhenti kalau ada advisory yang gagal di audit dependency.
+  audit:
+    uses: ./.github/workflows/audit.yml
+
   build:
+    needs: audit
     strategy:
       fail-fast: false
       matrix:
