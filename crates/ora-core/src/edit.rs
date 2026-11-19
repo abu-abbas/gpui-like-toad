@@ -73,6 +73,26 @@ pub fn update_cell_sql(
     }
 }
 
+/// `SELECT column FROM owner.table WHERE <row id> = :1`: one cell, for
+/// "Load full value".
+pub fn select_cell_sql(
+    dialect: &dyn Dialect,
+    owner: &str,
+    table: &str,
+    column: &str,
+    rowid: &str,
+) -> BoundQuery {
+    BoundQuery {
+        sql: format!(
+            "SELECT {} FROM {} WHERE {}",
+            dialect.quote_ident(column),
+            dialect.table_ref(owner, table),
+            dialect.row_id_match(1)
+        ),
+        binds: vec![rowid.to_string()],
+    }
+}
+
 /// `DELETE FROM owner.table WHERE <row id> = :1`.
 pub fn delete_row_sql(dialect: &dyn Dialect, owner: &str, table: &str, rowid: &str) -> BoundQuery {
     BoundQuery {

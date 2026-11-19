@@ -17,6 +17,11 @@ pub fn sql_literal(value: &Value) -> String {
             let hex: String = b.iter().map(|byte| format!("{byte:02X}")).collect();
             format!("HEXTORAW('{hex}')")
         }
+        // Writing the kept start back would silently cut the value.
+        Value::Clipped(c) => format!(
+            "NULL /* value clipped ({}): use Load full value first */",
+            c.describe_len()
+        ),
     }
 }
 

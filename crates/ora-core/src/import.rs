@@ -239,6 +239,7 @@ mod tests {
             }],
             rows: vec![vec![crate::model::Value::Text("x,\"y\"".into())]],
             truncated: false,
+            byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
         };

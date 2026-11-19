@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use ora_core::{
-    ConnectionAccess, ConnectionProfile, DbClient, DbKind, TableFilter, TablePage, Value,
+    ConnectionAccess, ConnectionProfile, DbClient, DbKind, FetchLimits, TableFilter, TablePage,
+    Value,
 };
 
 use super::SqliteClient;
@@ -89,14 +90,19 @@ fn query_maps_sqlite_types_and_caps_rows() {
     let db = TempDb::new("types");
     let mut client = db.client();
     let result = client
-        .query("SELECT id, name, salary FROM emp ORDER BY id;", 2)
+        .query(
+            "SELECT id, name, salary FROM emp ORDER BY id;",
+            FetchLimits::rows(2),
+        )
         .unwrap();
     assert_eq!(result.columns[0].data_type, "INTEGER");
     assert_eq!(result.rows.len(), 2);
     assert!(result.truncated);
     assert_eq!(result.rows[0][0], Value::Integer(1));
     assert_eq!(result.rows[1][2], Value::Float(150.5));
-    let kv = client.query("SELECT v FROM kv", 10).unwrap();
+    let kv = client
+        .query("SELECT v FROM kv", FetchLimits::rows(10))
+        .unwrap();
     assert_eq!(kv.rows[0][0], Value::Bytes(vec![0, 255]));
 }
 
@@ -150,7 +156,7 @@ fn grid_edits_go_by_rowid() {
         .unwrap();
     client.delete_grid_row("main", "emp", "1").unwrap();
     let names = client
-        .query("SELECT name FROM emp ORDER BY id", 10)
+        .query("SELECT name FROM emp ORDER BY id", FetchLimits::rows(10))
         .unwrap();
     let names: Vec<String> = names.rows.iter().map(|r| r[0].display()).collect();
     assert_eq!(names, ["Bud", "Cici", "Dedi"]);
@@ -236,9 +242,74 @@ fn read_only_profile_refuses_writes() {
     let db = TempDb::new("ro");
     let mut client = SqliteClient::new();
     client.connect(&db.profile(true), "").unwrap();
-    assert!(client.query("SELECT * FROM emp", 10).is_ok());
+    assert!(client
+        .query("SELECT * FROM emp", FetchLimits::rows(10))
+        .is_ok());
     let err = client.execute("DELETE FROM emp").unwrap_err();
     assert!(err.to_string().contains("readonly"), "{err}");
+}
+
+/// A table of large text and BLOB cells, like a documents table.
+fn big_cells(db: &TempDb) {
+    let conn = rusqlite::Connection::open(&db.0).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE doc (id INTEGER PRIMARY KEY, body TEXT, data BLOB);
+         INSERT INTO doc (body, data) VALUES (printf('%.*c', 200000, 'x'), zeroblob(300000));
+         INSERT INTO doc (body, data) VALUES ('short', x'01');",
+    )
+    .unwrap();
+}
+
+#[test]
+fn large_cells_keep_only_a_preview() {
+    let db = TempDb::new("big");
+    big_cells(&db);
+    let mut client = db.client();
+    let result = client
+        .query(
+            "SELECT body, data FROM doc ORDER BY id",
+            FetchLimits::grid(),
+        )
+        .unwrap();
+    assert_eq!(result.clipped_cells(), 2);
+    let Value::Clipped(body) = &result.rows[0][0] else {
+        panic!("{:?}", result.rows[0][0].display())
+    };
+    assert_eq!(body.full_len, 200_000);
+    let Value::Clipped(data) = &result.rows[0][1] else {
+        panic!()
+    };
+    assert_eq!(data.full_len, 300_000);
+    // Two 64 KiB previews, not 500 KB of cells.
+    assert!(result.heap_bytes() < 2 * ora_core::fetch::MAX_CELL_BYTES + 4096);
+    assert_eq!(result.rows[1][0], Value::Text("short".into()));
+    assert_eq!(result.rows[1][1], Value::Bytes(vec![1]));
+}
+
+#[test]
+fn result_byte_limit_stops_early() {
+    let db = TempDb::new("bytecap");
+    big_cells(&db);
+    let mut client = db.client();
+    let limits = FetchLimits {
+        max_result_bytes: 1024,
+        ..FetchLimits::grid()
+    };
+    let result = client
+        .query("SELECT body FROM doc ORDER BY id", limits)
+        .unwrap();
+    assert_eq!(result.row_count(), 1);
+    assert!(result.truncated && result.byte_limited);
+}
+
+#[test]
+fn full_value_loads_on_demand_by_rowid() {
+    let db = TempDb::new("fullcell");
+    big_cells(&db);
+    let mut client = db.client();
+    let full = client.fetch_cell("main", "doc", "body", "1").unwrap();
+    assert_eq!(full, Value::Text("x".repeat(200_000)));
+    assert!(client.fetch_cell("main", "doc", "body", "99").is_err());
 }
 
 /// Advisory SQLite lama diperbaiki di 3.54.0; pastikan build memakai versi itu.
