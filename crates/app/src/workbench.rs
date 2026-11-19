@@ -41,9 +41,9 @@ use ora_core::export::{to_csv, to_xlsx};
 use ora_core::sql::{clean_statement, format_sql, statement_at};
 use ora_core::store::{self, HistoryEntry, SavedProfile, ThemePreference};
 use ora_core::{
-    compose_easy_connect, parse_easy_connect, ConnectionAccess, ConnectionEnvironment,
-    ConnectionProfile, DbInfo, ObjectKind, PlanNode, QueryResult, SchemaObject, DEFAULT_MAX_ROWS,
-    MAX_PAGE_LIMIT,
+    compose_easy_connect, default_profile_name, parse_easy_connect, ConnectionAccess,
+    ConnectionEnvironment, ConnectionProfile, DbInfo, DbKind, Dialect, ObjectKind, PlanNode,
+    QueryResult, SchemaObject, DEFAULT_MAX_ROWS, MAX_PAGE_LIMIT,
 };
 
 use crate::completion::SqlCompletionProvider;
@@ -76,6 +76,7 @@ mod results;
 mod results_grid;
 mod settings;
 mod sidebar;
+mod sqlite_form;
 mod tabs;
 mod ui_helpers;
 mod updates;
@@ -525,6 +526,12 @@ impl Workbench {
         }
     }
 
+    /// Empty the Info / Messages log ("Clear messages").
+    pub(crate) fn clear_messages(&mut self, cx: &mut Context<Self>) {
+        self.messages.clear();
+        cx.notify();
+    }
+
     pub(crate) fn push_message(&mut self, message: String) {
         // With several connections open, say which one a message is from.
         let message = if self.open_conn_count() > 1 {
@@ -532,6 +539,9 @@ impl Workbench {
         } else {
             message
         };
+        if crate::error_log::is_error_message(&message) {
+            crate::error_log::append(&message);
+        }
         self.messages.push(message);
         if self.messages.len() > MAX_MESSAGES {
             let excess = self.messages.len() - MAX_MESSAGES;

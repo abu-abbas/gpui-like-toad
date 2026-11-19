@@ -1,0 +1,12 @@
+[package]
+name = "sqlite-driver"
+version = "0.1.0"
+description = "SQLite implementation of ora-core's DbClient (bundled SQLite, nothing to install)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ora-core = { path = "../ora-core" }
+# `bundled` compiles SQLite into the app, so users need no system library.
+rusqlite = { version = "0.37", features = ["bundled", "column_decltype"] }

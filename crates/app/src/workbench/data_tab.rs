@@ -540,7 +540,7 @@ impl Workbench {
             data.applied.clone(),
             data.page,
         );
-        let query = select_sql(&owner, &name, &filter, page);
+        let query = select_sql(self.active_dialect(), &owner, &name, &filter, page);
         let mut log = query.sql.clone();
         if !query.binds.is_empty() {
             let binds: Vec<String> = query
@@ -929,7 +929,13 @@ impl Workbench {
                 ),
         );
         if data.show_sql {
-            let query = select_sql(&data.owner, &data.name, &data.draft(cx), data.page);
+            let query = select_sql(
+                self.active_dialect(),
+                &data.owner,
+                &data.name,
+                &data.draft(cx),
+                data.page,
+            );
             let preview = query.preview();
             let runnable = query.inlined();
             let open_sql = runnable.clone();

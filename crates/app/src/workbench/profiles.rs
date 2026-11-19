@@ -8,6 +8,8 @@ pub(super) struct ConnectionForm {
     pub(super) port_input: Entity<InputState>,
     pub(super) service_input: Entity<InputState>,
     pub(super) tns_input: Entity<InputState>,
+    /// SQLite database file path.
+    pub(super) file_input: Entity<InputState>,
     /// Connection dialog mode: separate host/port/service (Basic) or one
     /// TNS alias / connect descriptor.
     pub(super) use_tns: bool,
@@ -18,6 +20,9 @@ pub(super) struct ConnectionForm {
     /// "Save password" checkbox in the connection dialog. Off by default;
     /// follows the profile when editing one.
     pub(super) save_password: bool,
+    /// Database engine of the profile being edited. Only Oracle can be
+    /// picked today; kept so editing a profile never changes its kind.
+    pub(super) kind: DbKind,
     pub(super) access: ConnectionAccess,
     pub(super) editing_profile: Option<usize>,
     /// Whether the connection dialog (modal) is open. Closing it never
@@ -43,6 +48,8 @@ impl ConnectionForm {
         let service_input = cx.new(|cx| InputState::new(&mut *window, cx).placeholder("orclpdb"));
         let tns_input = cx
             .new(|cx| InputState::new(&mut *window, cx).placeholder("ORCL atau (DESCRIPTION=...)"));
+        let file_input =
+            cx.new(|cx| InputState::new(&mut *window, cx).placeholder("/path/to/database.sqlite"));
         let password_input = cx.new(|cx| InputState::new(&mut *window, cx).masked(true));
         Self {
             name_input,
@@ -52,11 +59,13 @@ impl ConnectionForm {
             port_input,
             service_input,
             tns_input,
+            file_input,
             use_tns: false,
             show_advanced: false,
             form_notice: None,
             password_input,
             save_password: false,
+            kind: DbKind::default(),
             access: ConnectionAccess::default(),
             editing_profile: None,
             show_connection_form: false,
@@ -194,6 +203,9 @@ impl Workbench {
     /// or `host:port/service` built from the Basic fields. Empty when the
     /// required field (TNS text or host) is blank.
     pub(super) fn form_connect_string(&self, cx: &App) -> String {
+        if self.connection_form.kind == DbKind::Sqlite {
+            return Self::input_text(&self.connection_form.file_input, cx);
+        }
         if self.connection_form.use_tns {
             return Self::input_text(&self.connection_form.tns_input, cx);
         }
@@ -233,9 +245,19 @@ impl Workbench {
             window,
             cx,
         );
+        let file = if profile.kind == DbKind::Sqlite {
+            profile.connect_string.clone()
+        } else {
+            String::new()
+        };
+        Self::set_input(&self.connection_form.file_input.clone(), file, window, cx);
         // Easy Connect strings split into the Basic fields; descriptors and
-        // TNS aliases open in TNS mode unchanged.
-        match parse_easy_connect(&profile.connect_string) {
+        // TNS aliases open in TNS mode unchanged. A SQLite path fills none.
+        let oracle_target = match profile.kind {
+            DbKind::Oracle => profile.connect_string.as_str(),
+            DbKind::Sqlite => "",
+        };
+        match parse_easy_connect(oracle_target) {
             Some((host, port, service)) => {
                 self.connection_form.use_tns = false;
                 Self::set_input(&self.connection_form.host_input.clone(), host, window, cx);
@@ -275,7 +297,7 @@ impl Workbench {
                 );
                 Self::set_input(
                     &self.connection_form.tns_input.clone(),
-                    profile.connect_string.clone(),
+                    oracle_target.to_string(),
                     window,
                     cx,
                 );
@@ -289,6 +311,7 @@ impl Workbench {
             window,
             cx,
         );
+        self.connection_form.kind = profile.kind;
         self.connection_form.access = profile.access;
         self.connection_form.save_password = profile.save_password;
     }
@@ -359,7 +382,14 @@ impl Workbench {
             window,
             cx,
         );
+        Self::set_input(
+            &self.connection_form.file_input.clone(),
+            String::new(),
+            window,
+            cx,
+        );
         self.connection_form.save_password = false;
+        self.connection_form.kind = DbKind::default();
         self.connection_form.access = ConnectionAccess::default();
         cx.notify();
     }
@@ -397,7 +427,7 @@ impl Workbench {
     pub(super) fn save_profile_quiet(&mut self, cx: &mut Context<Self>) -> bool {
         let username = Self::input_text(&self.connection_form.user_input, cx);
         let connect_string = self.form_connect_string(cx);
-        if username.is_empty() || connect_string.is_empty() {
+        if self.form_incomplete(&username, &connect_string) {
             self.connection_form.show_advanced = false;
             self.connection_form.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
             cx.notify();
@@ -415,10 +445,11 @@ impl Workbench {
                 .map(|p| p.id.clone())
                 .unwrap_or_else(store::new_profile_id),
             name: if name.is_empty() {
-                format!("{username}@{connect_string}")
+                default_profile_name(self.connection_form.kind, &username, &connect_string)
             } else {
                 name
             },
+            kind: self.connection_form.kind,
             username,
             connect_string,
             access: self.connection_form.access,

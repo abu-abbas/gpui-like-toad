@@ -13,7 +13,7 @@
 //! flag. When that flag is set the password lives in the OS keychain
 //! under the profile id (see [`crate::credentials`]), never on disk here.
 
-use crate::{ConnectionAccess, ConnectionEnvironment};
+use crate::{ConnectionAccess, ConnectionEnvironment, DbKind};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -30,6 +30,7 @@ pub struct SavedProfile {
     /// Unlike the name it never changes when the profile is edited.
     pub id: String,
     pub name: String,
+    pub kind: DbKind,
     pub username: String,
     pub connect_string: String,
     /// Optional folder in the Connections tree.
@@ -515,6 +516,7 @@ fn profile_to_json(p: &SavedProfile) -> Json {
     Json::Obj(vec![
         ("id".to_string(), Json::Str(p.id.clone())),
         ("name".to_string(), Json::Str(p.name.clone())),
+        ("kind".to_string(), Json::Str(p.kind.key().to_string())),
         ("username".to_string(), Json::Str(p.username.clone())),
         (
             "connect_string".to_string(),
@@ -546,6 +548,7 @@ fn profile_from_json(v: &Json) -> Option<SavedProfile> {
             .map(str::to_string)
             .unwrap_or_default(),
         name: v.get("name")?.as_str()?.to_string(),
+        kind: DbKind::from_key(v.get("kind").and_then(Json::as_str).unwrap_or_default()),
         username: v.get("username")?.as_str()?.to_string(),
         connect_string: v.get("connect_string")?.as_str()?.to_string(),
         folder: v
@@ -808,6 +811,7 @@ pub fn import_toad_logins(text: &str) -> Result<Vec<SavedProfile>, String> {
             Some(SavedProfile {
                 id: new_profile_id(),
                 name,
+                kind: DbKind::Oracle,
                 username: username.to_string(),
                 connect_string,
                 folder: "Toad".to_string(),
@@ -1305,6 +1309,7 @@ mod tests {
     #[test]
     fn import_preserves_environment_without_reusing_credentials() {
         let original = SavedProfile {
+            kind: Default::default(),
             id: "machine-keychain-id".into(),
             name: "Production".into(),
             username: "REPORTS".into(),
@@ -1419,6 +1424,7 @@ mod tests {
         assert!(load_profiles_in(&dir).is_empty());
         let profiles = vec![
             SavedProfile {
+                kind: Default::default(),
                 id: "p1".to_string(),
                 name: "HR Local".to_string(),
                 username: "hr".to_string(),
@@ -1428,6 +1434,7 @@ mod tests {
                 save_password: true,
             },
             SavedProfile {
+                kind: DbKind::Sqlite,
                 id: "p2".to_string(),
                 name: "Prod \"A\"".to_string(),
                 username: "app".to_string(),
@@ -1448,7 +1455,10 @@ mod tests {
             r#"[{"name":"x"},{"name":"y","username":"u","connect_string":"c"}]"#,
         )
         .unwrap();
-        assert_eq!(load_profiles_in(&dir).len(), 1);
+        let legacy = load_profiles_in(&dir);
+        assert_eq!(legacy.len(), 1);
+        // Files from before the database kind existed are Oracle profiles.
+        assert_eq!(legacy[0].kind, DbKind::Oracle);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1456,6 +1466,7 @@ mod tests {
     fn profiles_file_never_holds_a_password() {
         let dir = scratch("profiles-nopw");
         let profiles = vec![SavedProfile {
+            kind: Default::default(),
             id: "p1".to_string(),
             name: "HR".to_string(),
             username: "hr".to_string(),

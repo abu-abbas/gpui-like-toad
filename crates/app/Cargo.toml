@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 ora-core = { path = "../ora-core" }
 ora-driver = { path = "../ora-driver" }
+sqlite-driver = { path = "../sqlite-driver" }
 # `syntect` enables SQL syntax highlighting in the editor with a small
 # footprint (no Tree-sitter grammars bundled).
 gpui-kit = { version = "0.9.1", features = ["syntect"] }

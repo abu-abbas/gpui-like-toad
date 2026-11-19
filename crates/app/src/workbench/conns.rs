@@ -22,6 +22,21 @@ pub(super) struct DisconnectPrompt {
 }
 
 impl Workbench {
+    /// Database engine of the active connection; Oracle when nothing is
+    /// connected (the demo database speaks Oracle SQL too).
+    pub(super) fn active_kind(&self) -> DbKind {
+        self.conn
+            .last_connection
+            .as_ref()
+            .filter(|last| !last.demo)
+            .map_or(DbKind::Oracle, |last| last.profile.kind)
+    }
+
+    /// SQL dialect of the active connection, for SQL the UI shows or logs.
+    pub(super) fn active_dialect(&self) -> &'static dyn Dialect {
+        self.active_kind().dialect()
+    }
+
     /// Connections that are connected (or connecting), active one included.
     pub(super) fn open_conn_count(&self) -> usize {
         usize::from(self.conn.is_open()) + self.parked.iter().filter(|c| c.is_open()).count()
@@ -655,6 +670,7 @@ impl Workbench {
             (
                 ConnectionProfile {
                     name: "Demo database".to_string(),
+                    kind: DbKind::Oracle,
                     username: "DEMO".to_string(),
                     connect_string: "demo".to_string(),
                     access: Default::default(),
@@ -664,7 +680,7 @@ impl Workbench {
         } else {
             let username = Self::input_text(&self.connection_form.user_input, cx);
             let connect_string = self.form_connect_string(cx);
-            if username.is_empty() || connect_string.is_empty() {
+            if self.form_incomplete(&username, &connect_string) {
                 self.connection_form.show_advanced = false;
                 self.connection_form.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
                 cx.notify();
@@ -686,10 +702,11 @@ impl Workbench {
             (
                 ConnectionProfile {
                     name: if name.is_empty() {
-                        format!("{username}@{connect_string}")
+                        default_profile_name(self.connection_form.kind, &username, &connect_string)
                     } else {
                         name
                     },
+                    kind: self.connection_form.kind,
                     username,
                     connect_string,
                     access: self.connection_form.access,
@@ -711,7 +728,8 @@ impl Workbench {
     }
 
     /// Connect straight to a saved profile when its password is in the
-    /// keychain; otherwise open its dialog so the user types one.
+    /// keychain (or it needs none, like a SQLite file); otherwise open its
+    /// dialog so the user types one.
     pub(super) fn open_profile(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(saved) = self.profiles.get(ix).cloned() else {
             return;
@@ -721,25 +739,26 @@ impl Workbench {
             self.switch_conn(id, cx);
             return;
         }
-        if !saved.save_password || self.conn.busy {
+        let needs_password = saved.kind.capabilities().password;
+        if (needs_password && !saved.save_password) || self.conn.busy {
             self.edit_profile(ix, window, cx);
             return;
         }
         let profile = ConnectionProfile {
             name: saved.name.clone(),
+            kind: saved.kind,
             username: saved.username.clone(),
             connect_string: saved.connect_string.clone(),
             access: saved.access,
         };
-        self.start_connect(
-            profile,
+        let password = if needs_password {
             Password::Saved {
                 profile_id: saved.id.clone(),
-            },
-            false,
-            Some(ix),
-            cx,
-        );
+            }
+        } else {
+            Password::Typed(SecretString::from(String::new()))
+        };
+        self.start_connect(profile, password, false, Some(ix), cx);
     }
 
     fn start_connect(
@@ -805,7 +824,7 @@ impl Workbench {
         }
         let username = Self::input_text(&self.connection_form.user_input, cx);
         let connect_string = self.form_connect_string(cx);
-        if username.is_empty() || connect_string.is_empty() {
+        if self.form_incomplete(&username, &connect_string) {
             self.connection_form.show_advanced = false;
             self.connection_form.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
             cx.notify();
@@ -821,6 +840,7 @@ impl Workbench {
             Job::TestConnect {
                 profile: ConnectionProfile {
                     name,
+                    kind: self.connection_form.kind,
                     username,
                     connect_string,
                     access: self.connection_form.access,
@@ -882,6 +902,7 @@ impl Workbench {
                 let profile = SavedProfile {
                     id: String::new(),
                     name: last.profile.name.clone(),
+                    kind: last.profile.kind,
                     username: last.profile.username.clone(),
                     connect_string: last.profile.connect_string.clone(),
                     folder: String::new(),

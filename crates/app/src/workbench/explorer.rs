@@ -164,13 +164,20 @@ impl Workbench {
             .flex_col()
             .gap(px(6.))
             .pt(px(8.))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .px(px(SPACE_2))
-                    .flex_none()
-                    .child(self.schema_picker("schema-select", theme, cx)),
+            // SQLite has one database per file, so there is nothing to pick
+            // unless another file was ATTACHed.
+            .when(
+                self.active_kind().capabilities().schemas || self.conn.schemas.len() > 1,
+                |panel| {
+                    panel.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .px(px(SPACE_2))
+                            .flex_none()
+                            .child(self.schema_picker("schema-select", theme, cx)),
+                    )
+                },
             )
             .child(
                 div()
@@ -424,6 +431,7 @@ impl Workbench {
         self.add_tab(window, cx);
         let view = cx.entity().downgrade();
         let editable = kind == ObjectKind::Table;
+        let table_name = self.active_dialect().table_ref(owner, name);
         let data = DataTab::new(owner, name, kind, window, cx);
         let table_state = self.active_tab().table_state.clone();
         let observe = cx.observe(&table_state, |_, _, cx| cx.notify());
@@ -434,11 +442,7 @@ impl Workbench {
         tab.kind = TabKind::Data;
         tab.data = Some(data);
         let edit_view = view.clone();
-        let table_name = format!(
-            "{}.{}",
-            ora_core::import::quote_ident(owner),
-            ora_core::import::quote_ident(name)
-        );
+
         tab.table_state.update(cx, |state, _| {
             let mut delegate = ResultsDelegate::empty()
                 .with_page_size(DATA_PAGE_SIZE)

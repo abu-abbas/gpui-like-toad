@@ -12,8 +12,8 @@ use std::time::Instant;
 use ora_core::completion::CatalogObject;
 use ora_core::sql::clean_statement;
 use ora_core::{
-    ColumnDef, ColumnInfo, ConnectionProfile, DbClient, DbError, DbInfo, IndexDef, ObjectKind,
-    PlanNode, QueryResult, SchemaObject, Value,
+    ColumnDef, ColumnInfo, ConnectionProfile, DbClient, DbError, DbInfo, DbKind, IndexDef,
+    ObjectKind, PlanNode, QueryResult, SchemaObject, Value,
 };
 
 /// Blocking Oracle client. Owned exclusively by the GUI's background DB
@@ -183,6 +183,10 @@ fn fetch_rows(
 }
 
 impl DbClient for ThinClient {
+    fn kind(&self) -> DbKind {
+        DbKind::Oracle
+    }
+
     fn connect(&mut self, profile: &ConnectionProfile, password: &str) -> Result<DbInfo, DbError> {
         if profile.access.read_only
             && (profile.access.sysdba || profile.username.eq_ignore_ascii_case("SYS"))
@@ -644,6 +648,7 @@ mod tests {
             .connect(
                 &ora_core::ConnectionProfile {
                     name: "refused".into(),
+                    kind: DbKind::Oracle,
                     username: "hr".into(),
                     connect_string: "127.0.0.1:1/nonexistent".into(),
                     access: Default::default(),

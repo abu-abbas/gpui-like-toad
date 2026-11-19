@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-/// Connection details for one Oracle database.
+use crate::dialect::DbKind;
+
+/// Connection details for one database.
 ///
 /// The password is deliberately NOT part of this struct: it lives only in the
 /// connection form's memory for the current session and is passed separately
@@ -9,6 +11,8 @@ use std::time::Duration;
 pub struct ConnectionProfile {
     /// Display name shown in the UI, e.g. "Exadata DEV".
     pub name: String,
+    /// Which database engine this profile connects to.
+    pub kind: DbKind,
     /// Database username, e.g. "HR".
     pub username: String,
     /// Oracle Net connect string: Easy Connect (`host:1521/service`), a full
@@ -314,6 +318,20 @@ pub fn compose_easy_connect(host: &str, port: &str, service: &str) -> String {
         format!("{host}:{port}")
     } else {
         format!("{host}:{port}/{service}")
+    }
+}
+
+/// Name for a profile saved without one: `user@connect string` for a
+/// database with logins, the file name for a SQLite file.
+pub fn default_profile_name(kind: DbKind, username: &str, connect_string: &str) -> String {
+    match kind {
+        DbKind::Sqlite => std::path::Path::new(connect_string)
+            .file_name()
+            .map_or_else(
+                || connect_string.to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
+        DbKind::Oracle => format!("{username}@{connect_string}"),
     }
 }
 

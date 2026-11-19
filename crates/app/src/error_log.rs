@@ -1,0 +1,125 @@
+//! Error log. Every error shown in the Info / Messages panel is also
+//! appended, with a timestamp, to `errors.log` in the config dir, so it
+//! survives a restart and can be copied from Settings > Logs for a bug
+//! report. Panics go to the separate `crash.log` (see `crash_log`).
+
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
+use std::path::PathBuf;
+
+const LOG_FILE: &str = "errors.log";
+/// The log is cut back to its newest half once it passes this size.
+const MAX_LOG_BYTES: u64 = 256 * 1024;
+/// How much of the end of each log Settings shows and copies.
+const VIEW_BYTES: usize = 32 * 1024;
+
+pub fn log_path() -> PathBuf {
+    ora_core::store::config_dir().join(LOG_FILE)
+}
+
+/// Messages are plain strings; Oracle/SQLite driver errors and Indonesian
+/// failure texts ("gagal") count as errors. Also drives the danger color in
+/// the Info panel.
+pub fn is_error_message(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    message.contains("ORA-")
+        || message.contains("DPY-")
+        || message.starts_with("SQLite:")
+        || lower.contains("error")
+        || lower.contains("gagal")
+        || lower.starts_with("demo:")
+}
+
+/// Append one error line. Best effort: logging must never break the app.
+pub fn append(message: &str) {
+    let dir = ora_core::store::config_dir();
+    let _ = fs::create_dir_all(&dir);
+    let path = dir.join(LOG_FILE);
+    trim(&path);
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        // One entry per line: continuation lines are indented.
+        let text = message.trim_end().replace('\n', "\n    ");
+        let _ = writeln!(file, "[{stamp}] {text}");
+    }
+}
+
+fn trim(path: &std::path::Path) {
+    let Ok(meta) = fs::metadata(path) else {
+        return;
+    };
+    if meta.len() <= MAX_LOG_BYTES {
+        return;
+    }
+    if let Ok(bytes) = fs::read(path) {
+        let tail = &bytes[bytes.len() - MAX_LOG_BYTES as usize / 2..];
+        // Start at a line boundary so the first entry is whole.
+        let start = tail.iter().position(|&b| b == b'\n').map_or(0, |i| i + 1);
+        let _ = fs::write(path, &tail[start..]);
+    }
+}
+
+pub fn clear() -> std::io::Result<()> {
+    match fs::remove_file(log_path()) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
+        _ => Ok(()),
+    }
+}
+
+/// The newest part of a log file, or empty when there is none.
+fn tail_of(path: &std::path::Path) -> String {
+    let Ok(bytes) = fs::read(path) else {
+        return String::new();
+    };
+    let tail = if bytes.len() > VIEW_BYTES {
+        let cut = &bytes[bytes.len() - VIEW_BYTES..];
+        let start = cut.iter().position(|&b| b == b'\n').map_or(0, |i| i + 1);
+        &cut[start..]
+    } else {
+        &bytes[..]
+    };
+    String::from_utf8_lossy(tail).trim_end().to_string()
+}
+
+/// The newest errors, for the Settings view.
+pub fn recent_errors() -> String {
+    tail_of(&log_path())
+}
+
+/// Everything a bug report needs: app version, OS, then the newest
+/// errors and panics.
+pub fn report() -> String {
+    let crashes = tail_of(&crate::crash_log::log_path());
+    let errors = recent_errors();
+    format!(
+        "{} {} | {} {}\n\n== errors.log ==\n{}\n\n== crash.log ==\n{}\n",
+        app_name!(),
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        if errors.is_empty() {
+            "(kosong)"
+        } else {
+            &errors
+        },
+        if crashes.is_empty() {
+            "(kosong)"
+        } else {
+            &crashes
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_error_message;
+
+    #[test]
+    fn errors_are_recognized_by_driver_prefix_or_wording() {
+        assert!(is_error_message("ORA-00942: table or view does not exist"));
+        assert!(is_error_message("SQLite: no such table: x"));
+        assert!(is_error_message("Gagal menyimpan koneksi"));
+        assert!(!is_error_message("Connected: main @ toko.sqlite"));
+        assert!(!is_error_message("40 baris dalam 0ms"));
+    }
+}

@@ -1,6 +1,7 @@
 use super::*;
 
 mod appearance;
+mod logs;
 
 impl Workbench {
     /// Pick the color theme for light (`dark == false`) or dark mode;
@@ -39,16 +40,18 @@ impl Workbench {
 enum SettingsPage {
     Appearance,
     Updates,
+    Logs,
     About,
 }
 
 impl SettingsPage {
-    const ALL: [Self; 3] = [Self::Appearance, Self::Updates, Self::About];
+    const ALL: [Self; 4] = [Self::Appearance, Self::Updates, Self::Logs, Self::About];
 
     fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
             Self::Updates => "Updates",
+            Self::Logs => "Logs",
             Self::About => "About Ora",
         }
     }
@@ -59,6 +62,7 @@ impl SettingsPage {
                 "appearance theme light dark system color accent font size motion icon"
             }
             Self::Updates => "updates check download version proxy network",
+            Self::Logs => "logs log error crash report bug lapor",
             Self::About => "about kilat version",
         }
     }
@@ -67,6 +71,7 @@ impl SettingsPage {
         match self {
             Self::Appearance => IconName::Sun,
             Self::Updates => IconName::Download,
+            Self::Logs => IconName::FileText,
             Self::About => IconName::Info,
         }
     }
@@ -77,6 +82,8 @@ pub(super) struct SettingsState {
     page: SettingsPage,
     pub(super) search: Entity<InputState>,
     pub(super) proxy_input: Entity<InputState>,
+    /// What Settings > Logs shows; read from disk when the page opens.
+    pub(super) log_text: String,
     previous_focus: Option<gpui_kit::FocusHandle>,
 }
 
@@ -94,6 +101,7 @@ impl SettingsState {
             page: SettingsPage::Appearance,
             search,
             proxy_input,
+            log_text: String::new(),
             previous_focus: None,
         }
     }
@@ -106,6 +114,7 @@ impl Workbench {
         }
         self.settings.previous_focus = window.focused(cx);
         self.settings.open = true;
+        self.reload_error_log();
         Self::set_input(&self.settings.search, String::new(), window, cx);
         self.settings
             .search
@@ -184,6 +193,9 @@ impl Workbench {
                     .when(selected, |button| button.bg(theme.accent))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.settings.page = entry;
+                        if entry == SettingsPage::Logs {
+                            this.reload_error_log();
+                        }
                         cx.notify();
                     }))
                     .child(
@@ -231,6 +243,9 @@ impl Workbench {
                         }
                         Some(SettingsPage::Updates) => {
                             Some(self.render_update_settings(theme, cx).into_any_element())
+                        }
+                        Some(SettingsPage::Logs) => {
+                            Some(self.render_logs(theme, cx).into_any_element())
                         }
                         Some(SettingsPage::About) => {
                             Some(crate::about::content(theme, cx).into_any_element())

@@ -148,6 +148,7 @@ mod tests {
 
     fn profile(id: &str, save: bool) -> SavedProfile {
         SavedProfile {
+            kind: Default::default(),
             id: id.to_string(),
             name: "HR".to_string(),
             username: "hr".to_string(),
