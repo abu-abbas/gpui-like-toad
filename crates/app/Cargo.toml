@@ -40,6 +40,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 # Migrate the old bundle name without replacing an existing Kilat.app.
 rustix = { version = "1", features = ["fs"] }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSCell", "NSControl", "NSDockTile", "NSImage", "NSImageView", "NSResponder", "NSView"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSData", "NSGeometry"] }
 
 # Windows: build.rs embeds assets/icon/AppIcon.ico as the .exe icon
 # (Explorer, shortcuts, taskbar, title bar). Uses the MSVC rc.exe found by

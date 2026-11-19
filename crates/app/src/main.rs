@@ -24,6 +24,8 @@ mod error_log;
 mod keychain;
 #[cfg(target_os = "macos")]
 mod macos_bundle;
+#[cfg(target_os = "macos")]
+mod macos_dock;
 mod plan;
 mod results;
 mod schema;
@@ -99,6 +101,8 @@ fn main() {
             eprintln!("warning: bundled theme failed to load: {err}");
         }
         theme::init_appearance(cx);
+        #[cfg(target_os = "macos")]
+        macos_dock::apply_icon(theme::appearance(cx).app_icon);
         theme::set_theme_names(ora_core::store::load_theme_names(), cx);
         // Cmd/Ctrl+Enter and F5 run the active query. "cmd" is the
         // platform modifier (Command on macOS, Super/Win elsewhere);
