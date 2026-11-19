@@ -1043,8 +1043,16 @@ pub fn save_theme_preference(pref: ThemePreference) -> std::io::Result<()> {
 // Update-check preferences
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AppIcon {
+    #[default]
+    Folded,
+    Bolt,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppearancePrefs {
+    pub app_icon: AppIcon,
     pub accent: String,
     pub ui_font: Option<String>,
     pub ui_font_size: u8,
@@ -1056,6 +1064,7 @@ pub struct AppearancePrefs {
 impl Default for AppearancePrefs {
     fn default() -> Self {
         Self {
+            app_icon: AppIcon::default(),
             accent: "Violet".into(),
             ui_font: None,
             ui_font_size: 13,
@@ -1078,6 +1087,10 @@ fn read_appearance(dir: &Path) -> AppearancePrefs {
             .map_or(default, |size| size as u8)
     };
     AppearancePrefs {
+        app_icon: match settings.get("app_icon").and_then(Json::as_str) {
+            Some("bolt") => AppIcon::Bolt,
+            _ => AppIcon::Folded,
+        },
         accent: settings
             .get("accent")
             .and_then(Json::as_str)
@@ -1106,6 +1119,11 @@ fn write_appearance(dir: &Path, prefs: &AppearancePrefs) -> std::io::Result<()> 
     } else {
         pairs.remove("ui_font");
     }
+    let app_icon = match prefs.app_icon {
+        AppIcon::Folded => "folded",
+        AppIcon::Bolt => "bolt",
+    };
+    pairs.insert("app_icon".into(), Json::Str(app_icon.into()));
     pairs.insert("accent".into(), Json::Str(prefs.accent.clone()));
     pairs.insert("ui_font_size".into(), Json::Num(prefs.ui_font_size.into()));
     pairs.insert(
@@ -1302,6 +1320,7 @@ mod tests {
     fn appearance_round_trips_alongside_theme_preference() {
         let dir = scratch("appearance");
         let prefs = AppearancePrefs {
+            app_icon: AppIcon::Bolt,
             accent: "Teal".into(),
             ui_font: Some("Arial".into()),
             ui_font_size: 15,

@@ -1,7 +1,7 @@
 [package]
 name = "gpui-like-toad"
 version = "0.1.0"
-description = "Ora The Explorer: Toad-like Oracle desktop workbench in Rust + gpui-kit"
+description = "Kilat: lightweight database workbench built with Rust and gpui-kit"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

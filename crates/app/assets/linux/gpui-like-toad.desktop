@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=Ora The Explorer
-GenericName=Oracle Database Explorer
+Name=Kilat
+GenericName=Database Client
 Comment=Browse and query Oracle databases
 Exec=gpui-like-toad
 Icon=gpui-like-toad
