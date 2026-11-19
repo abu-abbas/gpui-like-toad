@@ -690,21 +690,12 @@ impl Workbench {
                 cx.notify();
                 return;
             }
-            // "Save password" ticked, or unticked on a profile that had
-            // one: Connect also saves the profile so the keychain matches
-            // the checkbox. A database without logins (a SQLite file) has
-            // no such checkbox, so Connect always saves it: otherwise it
-            // would never show up in the Connections list.
-            let had_saved = self
-                .connection_form
-                .editing_profile
-                .and_then(|ix| self.profiles.get(ix))
-                .is_some_and(|p| p.save_password);
+            // Connect always saves the profile, so every connection opened
+            // from the dialog shows up in the Connections list. "Save
+            // password" only decides whether the password goes to the
+            // keychain (save_profile_quiet keeps the keychain in line).
             let password = self.dialog_password(cx);
-            let no_login = !self.connection_form.kind.capabilities().password;
-            if self.connection_form.save_password || had_saved || no_login {
-                self.save_profile_quiet(cx);
-            }
+            self.save_profile_quiet(cx);
             let name = Self::input_text(&self.connection_form.name_input, cx);
             (
                 ConnectionProfile {

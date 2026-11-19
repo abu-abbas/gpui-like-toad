@@ -434,6 +434,19 @@ impl Workbench {
             return false;
         }
         let name = Self::input_text(&self.connection_form.name_input, cx);
+        // Connect saves every new connection, so a fresh dialog for a
+        // database that is already in the list updates that profile
+        // instead of adding a duplicate.
+        let fresh_dialog = self.connection_form.editing_profile.is_none();
+        if fresh_dialog {
+            let kind = self.connection_form.kind;
+            self.connection_form.editing_profile = self.profiles.iter().position(|p| {
+                p.kind == kind
+                    && p.username == username
+                    && p.connect_string == connect_string
+                    && (name.is_empty() || p.name == name)
+            });
+        }
         let existing = self
             .connection_form
             .editing_profile
@@ -453,7 +466,14 @@ impl Workbench {
             username,
             connect_string,
             access: self.connection_form.access,
-            folder: Self::input_text(&self.connection_form.folder_input, cx),
+            folder: {
+                let typed = Self::input_text(&self.connection_form.folder_input, cx);
+                // A fresh dialog matched to a saved profile keeps its folder.
+                match &existing {
+                    Some(p) if fresh_dialog && typed.is_empty() => p.folder.clone(),
+                    _ => typed,
+                }
+            },
             save_password: self.connection_form.save_password,
         };
         let action =
