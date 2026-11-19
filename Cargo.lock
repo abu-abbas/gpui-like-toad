@@ -2536,6 +2536,7 @@ dependencies = [
  "gpui-updater-core",
  "image",
  "keyring",
+ "libc",
  "lsp-types",
  "ora-core",
  "ora-driver",
@@ -2543,6 +2544,7 @@ dependencies = [
  "rust-embed",
  "serde_json",
  "sqlite-driver",
+ "tempfile",
  "ureq",
  "winresource",
 ]
