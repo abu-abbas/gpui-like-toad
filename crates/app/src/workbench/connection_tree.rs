@@ -794,7 +794,7 @@ impl Workbench {
                     .w_full()
                     .disabled(self.conn.busy)
                     .when(active, |button| button.text_color(theme.primary))
-                    .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx)))
+                    .on_click(cx.listener(|this, _, window, cx| this.connect(true, window, cx)))
                     .child(
                         connection_tree_label(IconName::Database, "Demo".into(), None, theme)
                             .when(active, |row| row.child(status_dot(theme.success))),

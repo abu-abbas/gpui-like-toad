@@ -583,6 +583,11 @@ impl Render for Workbench {
         // Match the app's default layout at 13px and pass changes through to
         // GPUI controls whose text and row dimensions use rem units.
         window.set_rem_size(theme::ui_size(&theme, 16.));
+        // The connection dialog was hidden by a path without a window
+        // (disconnect): empty its password field now.
+        if self.connection_form.scrub_password && !self.connection_form.show_connection_form {
+            self.scrub_password_input(window, cx);
+        }
         // Nothing focused (fresh start, closed palette): take focus so
         // window-level shortcuts reach this view.
         if window.focused(cx).is_none() {

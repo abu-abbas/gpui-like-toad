@@ -660,7 +660,7 @@ mod tests {
 }
 
 impl Workbench {
-    pub(super) fn connect(&mut self, demo: bool, cx: &mut Context<Self>) {
+    pub(super) fn connect(&mut self, demo: bool, window: &mut Window, cx: &mut Context<Self>) {
         if demo {
             if let Some(id) = self.find_open_conn(None, true) {
                 self.switch_conn(id, cx);
@@ -694,8 +694,14 @@ impl Workbench {
             // from the dialog shows up in the Connections list. "Save
             // password" only decides whether the password goes to the
             // keychain (save_profile_quiet keeps the keychain in line).
-            let password = self.dialog_password(cx);
+            let Some(password) = self.dialog_password(cx) else {
+                self.ask_password_for_new_target(cx);
+                return;
+            };
             self.save_profile_quiet(cx);
+            // The password now travels with the job (and is in the
+            // keychain if "Save password" is ticked): empty the field.
+            self.scrub_password_input(window, cx);
             let name = Self::input_text(&self.connection_form.name_input, cx);
             (
                 ConnectionProfile {
@@ -828,6 +834,12 @@ impl Workbench {
             cx.notify();
             return;
         }
+        // The field stays filled after Test so Connect can follow; it is
+        // emptied on Connect and when the dialog closes.
+        let Some(password) = self.dialog_password(cx) else {
+            self.ask_password_for_new_target(cx);
+            return;
+        };
         self.connection_form.form_notice = None;
         if self.conn.db.is_none() {
             self.conn.db = Some(DbHandle::spawn());
@@ -843,7 +855,7 @@ impl Workbench {
                     connect_string,
                     access: self.connection_form.access,
                 },
-                password: self.dialog_password(cx),
+                password,
             },
             PendingOp::TestConnect,
             cx,
@@ -863,6 +875,7 @@ impl Workbench {
         self.conn.demo_mode = false;
         self.conn.uncommitted = false;
         self.connection_form.show_connection_form = false;
+        self.connection_form.scrub_password = true;
         self.conn.objects.clear();
         self.conn.schemas.clear();
         self.conn.current_schema = None;
@@ -879,7 +892,7 @@ impl Workbench {
             return;
         };
         if last.demo {
-            self.connect(true, cx);
+            self.connect(true, window, cx);
         } else if let Some(ix) = last.profile_ix.filter(|ix| *ix < self.profiles.len()) {
             self.open_profile(ix, window, cx);
         } else {
