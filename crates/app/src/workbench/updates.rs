@@ -53,8 +53,10 @@ pub(super) struct UpdateState {
 
 impl UpdateState {
     pub(super) fn load(cx: &mut Context<Workbench>) -> Self {
+        let prefs = store::load_update_prefs();
+        set_http_proxy(prefs.proxy.clone());
         Self {
-            prefs: store::load_update_prefs(),
+            prefs,
             checking: false,
             check_generation: 0,
             dialog: None,
@@ -82,8 +84,30 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn http_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
+/// Proxy URL chosen in Settings; `None` falls back to the `HTTPS_PROXY` /
+/// `ALL_PROXY` environment variables (ureq's default).
+static HTTP_PROXY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub(super) fn set_http_proxy(url: Option<String>) {
+    if let Ok(mut slot) = HTTP_PROXY.lock() {
+        *slot = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+    }
+}
+
+/// `Ok(None)` keeps the default; a bad URL is reported instead of ignored.
+fn configured_proxy() -> Result<Option<ureq::Proxy>, String> {
+    let url = HTTP_PROXY.lock().ok().and_then(|slot| slot.clone());
+    url.map(|u| ureq::Proxy::new(&u).map_err(|e| format!("Proxy tidak valid ({u}): {e}")))
+        .transpose()
+}
+
+fn http_agent() -> Result<ureq::Agent, String> {
+    let proxy = configured_proxy()?;
+    let mut builder = ureq::Agent::config_builder();
+    if proxy.is_some() {
+        builder = builder.proxy(proxy);
+    }
+    Ok(builder
         .timeout_global(Some(Duration::from_secs(10)))
         // OS trust store (macOS Keychain, Windows, Linux CA bundle), so
         // corporate TLS-inspecting proxies work like in the browser.
@@ -94,12 +118,12 @@ fn http_agent() -> ureq::Agent {
         )
         .user_agent(concat!("gpui-like-toad/", env!("CARGO_PKG_VERSION")))
         .build()
-        .into()
+        .into())
 }
 
 /// Blocking fetch of the latest release; run on a background thread.
 fn fetch_release(url: &str) -> Result<ReleaseInfo, String> {
-    let agent = http_agent();
+    let agent = http_agent()?;
     let mut resp = agent
         .get(url)
         .header("Accept", "application/vnd.github+json")
@@ -127,7 +151,12 @@ fn download_dir() -> std::path::PathBuf {
 fn download_asset(asset: &update::Asset) -> Result<std::path::PathBuf, String> {
     use std::io::Write as _;
     const MAX_BYTES: u64 = 400 * 1024 * 1024;
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let proxy = configured_proxy()?;
+    let mut builder = ureq::Agent::config_builder();
+    if proxy.is_some() {
+        builder = builder.proxy(proxy);
+    }
+    let agent: ureq::Agent = builder
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_recv_body(Some(Duration::from_secs(60)))
         .tls_config(
@@ -193,6 +222,7 @@ impl gpui_updater_core::UpdateSource for ReleaseSource {
         }
         if let Some(sums) = info.assets.iter().find(|a| a.name == "SHA256SUMS") {
             let mut resp = http_agent()
+                .map_err(up::Error::Http)?
                 .get(&sums.url)
                 .call()
                 .map_err(|e| up::Error::Http(e.to_string()))?;
@@ -612,6 +642,18 @@ impl Workbench {
         self.save_update_prefs();
     }
 
+    /// Settings > Updates > Proxy: apply and remember the proxy URL (blank =
+    /// use the system environment variables).
+    pub(super) fn set_proxy(&mut self, text: &str) {
+        let url = Some(text.trim().to_string()).filter(|u| !u.is_empty());
+        if url == self.updates.prefs.proxy {
+            return;
+        }
+        set_http_proxy(url.clone());
+        self.updates.prefs.proxy = url;
+        self.save_update_prefs();
+    }
+
     fn dismiss_update_banner(&mut self) {
         self.updates.banner = false;
         if let Some(r) = &self.updates.available {
@@ -654,6 +696,17 @@ impl Workbench {
         if let Some(status) = &u.status {
             section = section.child(caption_text(status.clone(), theme));
         }
+        section = section
+            .child(div().h(px(SPACE_2)))
+            .child(form_label("Proxy", theme))
+            .child(Input::new(&self.settings.proxy_input).small().w_full())
+            .child(caption_text(
+                "Isi kalau jaringan kantor harus lewat proxy, contoh http://proxy.kantor:8080 \
+                 (bisa http://user:pass@host:port). Kosong = pakai HTTPS_PROXY / ALL_PROXY \
+                 dari environment. Berlaku untuk cek dan unduh update."
+                    .to_string(),
+                theme,
+            ));
         section.child(caption_text(
             "Cek ke GitHub Releases (maksimal sehari sekali); tidak ada data kamu yang dikirim."
                 .to_string(),
