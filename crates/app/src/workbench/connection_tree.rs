@@ -980,7 +980,10 @@ fn tree_label(
         .child(icon(symbol, 14., icon_color))
         .child(
             div()
-                .flex_1()
+                // With a count the text pushes it to the right edge; without
+                // one a trailing flag (DEV, the connected dot) sits right
+                // after the name so it never scrolls out of sight.
+                .when(count.is_some(), |text| text.flex_1())
                 .min_w(px(0.))
                 .text_left()
                 .truncate()
