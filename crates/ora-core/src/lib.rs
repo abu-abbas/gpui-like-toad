@@ -13,6 +13,7 @@ pub mod completion;
 pub mod copy;
 pub mod credentials;
 pub mod demo;
+pub mod dialect;
 pub mod edit;
 pub mod export;
 pub mod filter;
@@ -23,6 +24,7 @@ pub mod store;
 pub mod update;
 
 pub use client::{DbClient, DbError, DbInfo};
+pub use dialect::{Capabilities, DbKind, Dialect};
 pub use filter::{
     BoundQuery, FilterCondition, FilterJoin, FilterOp, TableFilter, TablePage, MAX_PAGE_LIMIT,
     ROWID_COLUMN,

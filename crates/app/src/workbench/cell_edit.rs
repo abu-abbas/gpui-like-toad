@@ -298,14 +298,17 @@ impl Workbench {
                 value: e.new.clone(),
             })
             .collect();
+        let dialect = self.active_dialect();
         for u in &updates {
-            let value = u.value.as_deref().map_or("NULL".to_string(), |v| {
-                format!("'{}'", v.replace('\'', "''"))
-            });
-            self.push_message(format!(
-                "UPDATE {owner}.{name} SET {} = {value} WHERE ROWID = '{}'",
-                u.column, u.rowid
-            ));
+            let query = ora_core::edit::update_cell_sql(
+                dialect,
+                &owner,
+                &name,
+                &u.column,
+                &u.rowid,
+                u.value.as_deref(),
+            );
+            self.push_message(query.inlined());
         }
         self.conn.status = format!("Mengirim {} perubahan...", updates.len());
         self.spawn_db(

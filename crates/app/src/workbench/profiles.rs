@@ -18,6 +18,9 @@ pub(super) struct ConnectionForm {
     /// "Save password" checkbox in the connection dialog. Off by default;
     /// follows the profile when editing one.
     pub(super) save_password: bool,
+    /// Database engine of the profile being edited. Only Oracle can be
+    /// picked today; kept so editing a profile never changes its kind.
+    pub(super) kind: DbKind,
     pub(super) access: ConnectionAccess,
     pub(super) editing_profile: Option<usize>,
     /// Whether the connection dialog (modal) is open. Closing it never
@@ -57,6 +60,7 @@ impl ConnectionForm {
             form_notice: None,
             password_input,
             save_password: false,
+            kind: DbKind::default(),
             access: ConnectionAccess::default(),
             editing_profile: None,
             show_connection_form: false,
@@ -289,6 +293,7 @@ impl Workbench {
             window,
             cx,
         );
+        self.connection_form.kind = profile.kind;
         self.connection_form.access = profile.access;
         self.connection_form.save_password = profile.save_password;
     }
@@ -360,6 +365,7 @@ impl Workbench {
             cx,
         );
         self.connection_form.save_password = false;
+        self.connection_form.kind = DbKind::default();
         self.connection_form.access = ConnectionAccess::default();
         cx.notify();
     }
@@ -419,6 +425,7 @@ impl Workbench {
             } else {
                 name
             },
+            kind: self.connection_form.kind,
             username,
             connect_string,
             access: self.connection_form.access,

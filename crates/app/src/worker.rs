@@ -15,10 +15,10 @@ use ora_core::completion::CatalogObject;
 use ora_core::credentials::{CredentialStore as _, ExposeSecret as _, SecretString};
 use ora_core::demo::DemoClient;
 use ora_core::export::{to_csv, to_xlsx};
-use ora_core::import::{map_columns, parse_csv, quote_ident};
+use ora_core::import::{map_columns, parse_csv};
 use ora_core::sql::statement_kind;
 use ora_core::{
-    ColumnDef, ConnectionAccess, ConnectionProfile, DbClient, DbError, DbInfo, IndexDef,
+    ColumnDef, ConnectionAccess, ConnectionProfile, DbClient, DbError, DbInfo, DbKind, IndexDef,
     ObjectKind, PlanNode, QueryResult, SchemaObject, TableFilter, TablePage, DEFAULT_MAX_ROWS,
     EXPORT_MAX_ROWS,
 };
@@ -384,6 +384,18 @@ fn handle_guarded_job(
     result
 }
 
+/// A fresh, unconnected client for `kind`. Each database engine gets its
+/// own driver crate; this is the only place that picks one.
+fn new_client(kind: DbKind, demo: bool) -> Result<Box<dyn DbClient>, String> {
+    if demo {
+        return Ok(Box::new(DemoClient::new()));
+    }
+    match kind {
+        DbKind::Oracle => Ok(Box::new(ThinClient::new())),
+        other => Err(format!("{} belum didukung.", other.label())),
+    }
+}
+
 fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
     match job {
         Job::Ping => Response::Alive,
@@ -396,10 +408,9 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                 Ok(pw) => pw,
                 Err(message) => return Response::Failed(message),
             };
-            let mut new_client: Box<dyn DbClient> = if demo {
-                Box::new(DemoClient::new())
-            } else {
-                Box::new(ThinClient::new())
+            let mut new_client = match new_client(profile.kind, demo) {
+                Ok(c) => c,
+                Err(message) => return Response::Failed(message),
             };
             // `password` is zeroed when it drops at the end of this arm.
             match new_client.connect(&profile, password.expose_secret()) {
@@ -425,7 +436,10 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                 Ok(pw) => pw,
                 Err(message) => return Response::Tested(Err(message)),
             };
-            let mut probe = ThinClient::new();
+            let mut probe = match new_client(profile.kind, false) {
+                Ok(c) => c,
+                Err(message) => return Response::Tested(Err(message)),
+            };
             let outcome = probe
                 .connect(&profile, password.expose_secret())
                 .map_err(|e| e.to_string());
@@ -660,7 +674,7 @@ fn export_table(
     path: &std::path::Path,
     format: ExportFormat,
 ) -> Result<(usize, bool), DbError> {
-    let sql = format!("SELECT * FROM {}.{}", quote_ident(owner), quote_ident(name));
+    let sql = format!("SELECT * FROM {}", client.dialect().table_ref(owner, name));
     let result = client.query(&sql, EXPORT_MAX_ROWS)?;
     let bytes = match format {
         ExportFormat::Csv => to_csv(&result).into_bytes(),
@@ -713,6 +727,7 @@ mod tests {
             .connect(
                 &ConnectionProfile {
                     name: "demo".into(),
+                    kind: DbKind::Oracle,
                     username: "hr".into(),
                     connect_string: "demo".into(),
                     access: Default::default(),

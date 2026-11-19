@@ -22,6 +22,21 @@ pub(super) struct DisconnectPrompt {
 }
 
 impl Workbench {
+    /// Database engine of the active connection; Oracle when nothing is
+    /// connected (the demo database speaks Oracle SQL too).
+    pub(super) fn active_kind(&self) -> DbKind {
+        self.conn
+            .last_connection
+            .as_ref()
+            .filter(|last| !last.demo)
+            .map_or(DbKind::Oracle, |last| last.profile.kind)
+    }
+
+    /// SQL dialect of the active connection, for SQL the UI shows or logs.
+    pub(super) fn active_dialect(&self) -> &'static dyn Dialect {
+        self.active_kind().dialect()
+    }
+
     /// Connections that are connected (or connecting), active one included.
     pub(super) fn open_conn_count(&self) -> usize {
         usize::from(self.conn.is_open()) + self.parked.iter().filter(|c| c.is_open()).count()
@@ -655,6 +670,7 @@ impl Workbench {
             (
                 ConnectionProfile {
                     name: "Demo database".to_string(),
+                    kind: DbKind::Oracle,
                     username: "DEMO".to_string(),
                     connect_string: "demo".to_string(),
                     access: Default::default(),
@@ -690,6 +706,7 @@ impl Workbench {
                     } else {
                         name
                     },
+                    kind: self.connection_form.kind,
                     username,
                     connect_string,
                     access: self.connection_form.access,
@@ -727,6 +744,7 @@ impl Workbench {
         }
         let profile = ConnectionProfile {
             name: saved.name.clone(),
+            kind: saved.kind,
             username: saved.username.clone(),
             connect_string: saved.connect_string.clone(),
             access: saved.access,
@@ -821,6 +839,7 @@ impl Workbench {
             Job::TestConnect {
                 profile: ConnectionProfile {
                     name,
+                    kind: self.connection_form.kind,
                     username,
                     connect_string,
                     access: self.connection_form.access,
@@ -882,6 +901,7 @@ impl Workbench {
                 let profile = SavedProfile {
                     id: String::new(),
                     name: last.profile.name.clone(),
+                    kind: last.profile.kind,
                     username: last.profile.username.clone(),
                     connect_string: last.profile.connect_string.clone(),
                     folder: String::new(),

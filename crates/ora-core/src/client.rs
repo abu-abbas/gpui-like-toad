@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::completion::CatalogObject;
+use crate::dialect::{Capabilities, DbKind, Dialect};
 use crate::filter::{self, TableFilter, TablePage};
 use crate::model::IndexDef;
 use crate::model::{ColumnDef, ConnectionProfile, ObjectKind, PlanNode, QueryResult, SchemaObject};
@@ -36,7 +37,7 @@ pub struct DbInfo {
     pub version: String,
 }
 
-/// The single seam between the GUI and any Oracle access implementation.
+/// The single seam between the GUI and any database access implementation.
 ///
 /// Implementations must be `Send`: the GUI owns the client on a dedicated
 /// background thread and never touches it from the UI thread. All methods are
@@ -46,6 +47,19 @@ pub struct DbInfo {
 /// closes it. Dropping a connected client must also close the session
 /// (rollback of uncommitted work follows the driver's default).
 pub trait DbClient: Send {
+    /// The database engine this client talks to.
+    fn kind(&self) -> DbKind;
+
+    /// SQL differences of [`DbClient::kind`]; the default builders below
+    /// use it for paging and row ids.
+    fn dialect(&self) -> &'static dyn Dialect {
+        self.kind().dialect()
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        self.kind().capabilities()
+    }
+
     /// Open a session. `password` is passed separately and must not be stored
     /// by the implementation beyond the connect call itself.
     fn connect(&mut self, profile: &ConnectionProfile, password: &str) -> Result<DbInfo, DbError>;
@@ -99,7 +113,7 @@ pub trait DbClient: Send {
         filter: &TableFilter,
         page: TablePage,
     ) -> Result<QueryResult, DbError> {
-        let query = filter::select_sql(owner, table, filter, page);
+        let query = filter::select_sql(self.dialect(), owner, table, filter, page);
         self.query_binds(&query.sql, &query.binds, page.limit)
     }
 
@@ -121,7 +135,7 @@ pub trait DbClient: Send {
 
     /// Set one cell (`None` = NULL) of the row with `rowid`. Does not
     /// commit. Exactly one row must change: anything else is an error, so
-    /// a stale ROWID can never touch the wrong row.
+    /// a stale row id can never touch the wrong row.
     fn update_cell(
         &mut self,
         owner: &str,
@@ -130,7 +144,8 @@ pub trait DbClient: Send {
         rowid: &str,
         value: Option<&str>,
     ) -> Result<(), DbError> {
-        let query = crate::edit::update_cell_sql(owner, table, column, rowid, value);
+        let query =
+            crate::edit::update_cell_sql(self.dialect(), owner, table, column, rowid, value);
         match self.execute_binds(&query.sql, &query.binds)? {
             1 => Ok(()),
             0 => Err(DbError::new(
@@ -143,13 +158,8 @@ pub trait DbClient: Send {
     }
 
     fn delete_grid_row(&mut self, owner: &str, table: &str, rowid: &str) -> Result<(), DbError> {
-        use crate::import::quote_ident;
-        let sql = format!(
-            "DELETE FROM {}.{} WHERE ROWID = CHARTOROWID(:1)",
-            quote_ident(owner),
-            quote_ident(table)
-        );
-        match self.execute_binds(&sql, &[rowid.to_owned()])? {
+        let query = crate::edit::delete_row_sql(self.dialect(), owner, table, rowid);
+        match self.execute_binds(&query.sql, &query.binds)? {
             1 => Ok(()),
             n => Err(DbError::new(format!(
                 "Expected to delete one row, affected {n}"
@@ -163,26 +173,9 @@ pub trait DbClient: Send {
         table: &str,
         fields: &[(String, String)],
     ) -> Result<(), DbError> {
-        use crate::import::quote_ident;
-        if fields.is_empty() {
-            return Err(DbError::new("Enter at least one column value"));
-        }
-        let columns = fields
-            .iter()
-            .map(|(c, _)| quote_ident(c))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let params = (1..=fields.len())
-            .map(|n| format!(":{n}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "INSERT INTO {}.{} ({columns}) VALUES ({params})",
-            quote_ident(owner),
-            quote_ident(table)
-        );
-        let binds = fields.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>();
-        self.execute_binds(&sql, &binds).map(|_| ())
+        let query = crate::edit::insert_row_sql(self.dialect(), owner, table, fields)
+            .ok_or_else(|| DbError::new("Enter at least one column value"))?;
+        self.execute_binds(&query.sql, &query.binds).map(|_| ())
     }
 
     fn commit(&mut self) -> Result<(), DbError>;

@@ -1,7 +1,7 @@
 //! Table data filters for the data tab's filter bar (and Quick Filter).
 //!
 //! A [`TableFilter`] is a list of `column op value` conditions joined with
-//! AND or OR. It turns into an Oracle `SELECT ... WHERE ...` with
+//! AND or OR. It turns into a `SELECT ... WHERE ...` with
 //! positional bind variables (`:1`, `:2`, ...): values never become part of
 //! the SQL text, so quotes in a value cannot break or inject into the
 //! statement. Column names are quoted identifiers.
@@ -11,6 +11,7 @@
 
 use std::cmp::Ordering;
 
+use crate::dialect::Dialect;
 use crate::import::quote_ident;
 use crate::model::{ColumnInfo, Value};
 
@@ -428,24 +429,24 @@ impl TablePage {
     }
 }
 
-/// `SELECT *` from `owner.table` with the filter's WHERE clause and an
-/// Oracle 12c+ row window. Offset and limit are `usize`s written as
-/// literals, so they cannot carry SQL. No `ORDER BY`: that would force a
-/// full scan to open a big table, so the order is whatever Oracle returns
-/// (Oracle only guarantees a stable order with an explicit sort).
-pub fn select_sql(owner: &str, table: &str, filter: &TableFilter, page: TablePage) -> BoundQuery {
+/// `SELECT *` from `owner.table` with the filter's WHERE clause and the
+/// dialect's row window. No `ORDER BY`: that would force a full scan to
+/// open a big table, so the order is whatever the database returns.
+pub fn select_sql(
+    dialect: &dyn Dialect,
+    owner: &str,
+    table: &str,
+    filter: &TableFilter,
+    page: TablePage,
+) -> BoundQuery {
+    let target = dialect.table_ref(owner, table);
     let mut sql = if page.rowid {
         format!(
-            "SELECT t.ROWID AS \"{ROWID_COLUMN}\", t.* FROM {}.{} t",
-            quote_ident(owner),
-            quote_ident(table)
+            "SELECT {} AS \"{ROWID_COLUMN}\", t.* FROM {target} t",
+            dialect.row_id_expr()
         )
     } else {
-        format!(
-            "SELECT * FROM {}.{}",
-            quote_ident(owner),
-            quote_ident(table)
-        )
+        format!("SELECT * FROM {target}")
     };
     let mut binds = Vec::new();
     if let Some((clause, b)) = filter.where_clause() {
@@ -453,14 +454,7 @@ pub fn select_sql(owner: &str, table: &str, filter: &TableFilter, page: TablePag
         sql.push_str(&clause);
         binds = b;
     }
-    if page.offset == 0 {
-        sql.push_str(&format!(" FETCH FIRST {} ROWS ONLY", page.limit));
-    } else {
-        sql.push_str(&format!(
-            " OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
-            page.offset, page.limit
-        ));
-    }
+    dialect.push_page(&mut sql, page);
     BoundQuery { sql, binds }
 }
 
@@ -480,6 +474,7 @@ mod tests {
         );
     }
     use super::*;
+    use crate::dialect::{OracleDialect, SqliteDialect};
 
     fn cond(column: &str, op: FilterOp, value: &str) -> FilterCondition {
         FilterCondition::new(column, op, value)
@@ -498,6 +493,7 @@ mod tests {
     #[test]
     fn empty_filter_selects_everything() {
         let q = select_sql(
+            &OracleDialect,
             "HR",
             "ORDERS",
             &TableFilter::default(),
@@ -511,8 +507,35 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_pages_with_limit_offset_and_rowid() {
+        let first = select_sql(
+            &SqliteDialect,
+            "main",
+            "t",
+            &TableFilter::default(),
+            TablePage::new(0, 50).with_rowid(true),
+        );
+        assert_eq!(
+            first.sql,
+            "SELECT t.rowid AS \"__ROWID__\", t.* FROM \"main\".\"t\" t LIMIT 50"
+        );
+        let later = select_sql(
+            &SqliteDialect,
+            "main",
+            "t",
+            &TableFilter::default(),
+            TablePage::new(300, 100),
+        );
+        assert_eq!(
+            later.sql,
+            "SELECT * FROM \"main\".\"t\" LIMIT 100 OFFSET 300"
+        );
+    }
+
+    #[test]
     fn rowid_page_selects_rowid_first() {
         let q = select_sql(
+            &OracleDialect,
             "HR",
             "EMP",
             &TableFilter::default(),
@@ -529,7 +552,7 @@ mod tests {
     #[test]
     fn paging_uses_offset_fetch_and_clamps_limit() {
         let none = TableFilter::default();
-        let q = select_sql("HR", "T", &none, TablePage::new(300, 100));
+        let q = select_sql(&OracleDialect, "HR", "T", &none, TablePage::new(300, 100));
         assert_eq!(
             q.sql,
             "SELECT * FROM \"HR\".\"T\" OFFSET 300 ROWS FETCH NEXT 100 ROWS ONLY"
@@ -551,7 +574,13 @@ mod tests {
             ],
             FilterJoin::And,
         );
-        let q = select_sql("HR", "ORDERS", &filter, TablePage::new(0, 50));
+        let q = select_sql(
+            &OracleDialect,
+            "HR",
+            "ORDERS",
+            &filter,
+            TablePage::new(0, 50),
+        );
         assert_eq!(
             q.sql,
             "SELECT * FROM \"HR\".\"ORDERS\" WHERE \"STATUS\" = :1 AND \"TOTAL\" > :2 FETCH FIRST 50 ROWS ONLY"

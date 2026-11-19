@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-/// Connection details for one Oracle database.
+use crate::dialect::DbKind;
+
+/// Connection details for one database.
 ///
 /// The password is deliberately NOT part of this struct: it lives only in the
 /// connection form's memory for the current session and is passed separately
@@ -9,6 +11,8 @@ use std::time::Duration;
 pub struct ConnectionProfile {
     /// Display name shown in the UI, e.g. "Exadata DEV".
     pub name: String,
+    /// Which database engine this profile connects to.
+    pub kind: DbKind,
     /// Database username, e.g. "HR".
     pub username: String,
     /// Oracle Net connect string: Easy Connect (`host:1521/service`), a full

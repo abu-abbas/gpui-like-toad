@@ -287,6 +287,7 @@ impl Workbench {
                     .child(input_field("Folder", Input::new(&form.folder_input))),
             );
             let access = form.access;
+            let caps = form.kind.capabilities();
             let environment = Button::new("connection-environment")
                 .small()
                 .ghost()
@@ -344,17 +345,19 @@ impl Workbench {
                             cx.notify();
                         })),
                 )
-                .child(
-                    Checkbox::new("connect-sysdba")
-                        .small()
-                        .label("Connect as SYSDBA")
-                        .checked(access.sysdba)
-                        .disabled(access.read_only)
-                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                            this.connection_form.access.sysdba = *checked;
-                            cx.notify();
-                        })),
-                )
+                .when(caps.sysdba, |section| {
+                    section.child(
+                        Checkbox::new("connect-sysdba")
+                            .small()
+                            .label("Connect as SYSDBA")
+                            .checked(access.sysdba)
+                            .disabled(access.read_only)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.connection_form.access.sysdba = *checked;
+                                cx.notify();
+                            })),
+                    )
+                })
                 .when(access.read_only, |section| {
                     section.child(caption_text(
                         "Use an Oracle account with read-only grants for database-enforced permissions.".into(),

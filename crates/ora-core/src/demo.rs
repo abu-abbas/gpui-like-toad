@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use crate::client::{DbClient, DbError, DbInfo};
+use crate::dialect::DbKind;
 use crate::filter::{TableFilter, TablePage};
 use crate::model::{
     ColumnDef, ColumnInfo, ConnectionProfile, IndexDef, ObjectKind, PlanNode, QueryResult,
@@ -229,6 +230,11 @@ fn finish(columns: Vec<ColumnInfo>, rows: Vec<Vec<Value>>, max_rows: usize) -> Q
 }
 
 impl DbClient for DemoClient {
+    /// The demo database answers Oracle-flavored SQL.
+    fn kind(&self) -> DbKind {
+        DbKind::Oracle
+    }
+
     fn connect(&mut self, profile: &ConnectionProfile, _password: &str) -> Result<DbInfo, DbError> {
         if profile.username.trim().is_empty() {
             return Err(DbError::new("demo: username is required"));
@@ -290,7 +296,9 @@ impl DbClient for DemoClient {
         page: TablePage,
     ) -> Result<QueryResult, DbError> {
         let started = Instant::now();
-        let sql = crate::filter::select_sql(owner, table, &TableFilter::default(), page).sql;
+        let sql =
+            crate::filter::select_sql(self.dialect(), owner, table, &TableFilter::default(), page)
+                .sql;
         let all = self.query(&sql, usize::MAX)?;
         let mut columns = all.columns;
         let mut rows: Vec<(usize, Vec<Value>)> = all.rows.into_iter().enumerate().collect();
@@ -686,6 +694,7 @@ mod tests {
         client
             .connect(
                 &ConnectionProfile {
+                    kind: Default::default(),
                     name: "demo".into(),
                     username: "demo".into(),
                     connect_string: "demo".into(),
@@ -951,6 +960,7 @@ mod tests {
         let err = client
             .connect(
                 &ConnectionProfile {
+                    kind: Default::default(),
                     name: "demo".into(),
                     username: "  ".into(),
                     connect_string: "demo".into(),
@@ -963,6 +973,7 @@ mod tests {
         let info = client
             .connect(
                 &ConnectionProfile {
+                    kind: Default::default(),
                     name: "demo".into(),
                     username: "demo".into(),
                     connect_string: "demo".into(),
