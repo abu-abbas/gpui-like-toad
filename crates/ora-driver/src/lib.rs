@@ -290,7 +290,8 @@ impl DbClient for ThinClient {
                 // container table so the MV shows up in its own category only.
                 "SELECT o.owner, o.object_name, o.object_type FROM all_objects o \
                  WHERE o.owner = :1 AND o.object_type IN \
-                 ('TABLE','VIEW','MATERIALIZED VIEW','INDEX','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','TRIGGER','SYNONYM') \
+                 ('TABLE','VIEW','MATERIALIZED VIEW','INDEX','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','TRIGGER','SYNONYM','TYPE','DATABASE LINK') \
+                 AND NOT (o.object_type = 'TYPE' AND o.object_name LIKE 'SYS\\_PLSQL\\_%' ESCAPE '\\') \
                  AND NOT (o.object_type = 'TABLE' AND EXISTS \
                    (SELECT 1 FROM all_mviews m WHERE m.owner = o.owner AND m.mview_name = o.object_name)) \
                  ORDER BY o.object_type, o.object_name",
@@ -346,7 +347,10 @@ impl DbClient for ThinClient {
         .map_err(db_err)?;
         // DBMS_METADATA spells multi-word types with an underscore
         // (MATERIALIZED_VIEW).
-        let type_owned = kind.oracle_type().replace(' ', "_");
+        let type_owned = match kind {
+            ObjectKind::DbLink => "DB_LINK".to_string(),
+            other => other.oracle_type().replace(' ', "_"),
+        };
         let type_param: &str = &type_owned;
         let name_param: &str = name;
         let owner_param: &str = owner;
@@ -360,7 +364,25 @@ impl DbClient for ThinClient {
             return Err(DbError::new(format!("DDL kosong untuk {owner}.{name}")));
         };
         let ddl: Option<String> = row.map_err(db_err)?.get(0).map_err(db_err)?;
-        Ok(ddl.unwrap_or_default().trim().to_string())
+        let mut ddl = ddl.unwrap_or_default().trim().to_string();
+        // GET_DDL('TYPE') is the spec only; add the body when there is one.
+        if matches!(kind, ObjectKind::Type) {
+            let body_type: &str = "TYPE_BODY";
+            if let Ok(cursor) = conn.query(
+                "SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM dual",
+                &[&body_type, &name_param, &owner_param],
+            ) {
+                let body = cursor
+                    .into_iter()
+                    .next()
+                    .and_then(|row| row.ok())
+                    .and_then(|row| row.get::<Option<String>>(0).ok().flatten());
+                if let Some(body) = body.filter(|b| !b.trim().is_empty()) {
+                    ddl = format!("{ddl}\n\n{}", body.trim());
+                }
+            }
+        }
+        Ok(ddl)
     }
 
     fn describe_table(&mut self, owner: &str, name: &str) -> Result<Vec<ColumnDef>, DbError> {

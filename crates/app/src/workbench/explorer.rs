@@ -222,6 +222,8 @@ fn render_object_row(
         ObjectKind::Package => IconName::Braces,
         ObjectKind::Trigger => IconName::Zap,
         ObjectKind::Synonym => IconName::Link,
+        ObjectKind::Type => IconName::Braces,
+        ObjectKind::DbLink => IconName::Plug,
         ObjectKind::Other(_) => IconName::FileText,
     };
     let click_object = object.clone();

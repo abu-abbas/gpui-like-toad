@@ -463,6 +463,8 @@ impl DbClient for DemoClient {
             ("EMP_SEQ", ObjectKind::Sequence),
             ("EMP_SYN", ObjectKind::Synonym),
             ("EMP_SAL_TRG", ObjectKind::Trigger),
+            ("EMP_ADDRESS_T", ObjectKind::Type),
+            ("REMOTE_HR", ObjectKind::DbLink),
         ];
         Ok(catalog
             .into_iter()
@@ -912,7 +914,7 @@ mod tests {
     fn demo_list_objects_and_describe() {
         let mut client = connected();
         let objects = client.list_objects("hr").unwrap();
-        assert_eq!(objects.len(), 13);
+        assert_eq!(objects.len(), 15);
         assert!(objects.iter().all(|o| o.owner == "HR"));
         // Every group the schema tree shows is represented.
         for kind in [
@@ -926,6 +928,8 @@ mod tests {
             ObjectKind::Sequence,
             ObjectKind::Synonym,
             ObjectKind::Trigger,
+            ObjectKind::Type,
+            ObjectKind::DbLink,
         ] {
             assert!(
                 objects.iter().any(|o| o.kind == kind),

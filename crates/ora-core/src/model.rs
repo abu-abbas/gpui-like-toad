@@ -157,6 +157,8 @@ pub enum ObjectKind {
     Package,
     Trigger,
     Synonym,
+    Type,
+    DbLink,
     Other(String),
 }
 
@@ -173,6 +175,8 @@ impl ObjectKind {
             "PACKAGE" => ObjectKind::Package,
             "TRIGGER" => ObjectKind::Trigger,
             "SYNONYM" => ObjectKind::Synonym,
+            "TYPE" => ObjectKind::Type,
+            "DATABASE LINK" => ObjectKind::DbLink,
             other => ObjectKind::Other(other.to_string()),
         }
     }
@@ -190,6 +194,8 @@ impl ObjectKind {
             ObjectKind::Package => "Packages",
             ObjectKind::Trigger => "Triggers",
             ObjectKind::Synonym => "Synonyms",
+            ObjectKind::Type => "Types",
+            ObjectKind::DbLink => "DB Links",
             ObjectKind::Other(label) => label,
         }
     }
@@ -207,6 +213,8 @@ impl ObjectKind {
             ObjectKind::Package => "PACKAGE",
             ObjectKind::Trigger => "TRIGGER",
             ObjectKind::Synonym => "SYNONYM",
+            ObjectKind::Type => "TYPE",
+            ObjectKind::DbLink => "DATABASE LINK",
             ObjectKind::Other(raw) => raw,
         }
     }
