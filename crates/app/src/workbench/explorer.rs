@@ -319,6 +319,12 @@ fn object_menu(menu: PopupMenu, view: &Entity<Workbench>, object: &ObjectRef) ->
             |this, o, _, cx| this.export_table(o, ExportFormat::Csv, cx),
         ))
         .item(item(
+            "Export Data (CSV, spreadsheet-safe)",
+            IconName::Download,
+            has_data,
+            |this, o, _, cx| this.export_table(o, ExportFormat::CsvSpreadsheetSafe, cx),
+        ))
+        .item(item(
             "Export Data (XLSX)",
             IconName::FileSpreadsheet,
             has_data,

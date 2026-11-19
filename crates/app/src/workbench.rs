@@ -38,7 +38,6 @@ use gpui_kit::{
 };
 use ora_core::completion::Catalog;
 use ora_core::credentials::{PasswordAction, SecretString};
-use ora_core::export::{to_csv, to_xlsx};
 use ora_core::sql::{clean_statement, format_sql, statement_at};
 use ora_core::store::{self, HistoryEntry, SavedProfile, ThemePreference};
 use ora_core::{
@@ -73,6 +72,7 @@ mod grid_clipboard;
 mod profiles;
 mod query;
 mod quick_open;
+mod result_export;
 mod results;
 mod results_grid;
 mod settings;
@@ -405,6 +405,8 @@ pub struct Workbench {
     /// Messages tab scroll; follows the newest message.
     messages_scroll: ScrollHandle,
     show_empty_workspace: bool,
+    /// SQL result export running in the background, if any.
+    result_export: Option<result_export::ResultExport>,
     /// Demo database is offered in the UI only with ORA_DEMO set (kept for
     /// screenshots and tests; real use connects to Oracle).
     show_demo: bool,
@@ -511,6 +513,7 @@ impl Workbench {
             plan_collapsed: layout.plan_collapsed,
             messages_scroll: ScrollHandle::new(),
             show_empty_workspace: true,
+            result_export: None,
             show_demo: std::env::var_os("ORA_DEMO").is_some(),
             next_tab_id: 0,
             conn: ConnState::new(1),
