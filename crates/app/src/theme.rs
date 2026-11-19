@@ -344,6 +344,9 @@ pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
         theme.mono_font_size = gpui_kit::px(appearance.sql_font_size.into());
         theme.radius = gpui_kit::px(RADIUS_MD);
         theme.radius_lg = gpui_kit::px(RADIUS_LG);
+        // macOS hides overlay scrollbars until a scroll gesture, so wide
+        // tables looked like they had nothing to the right. Keep them shown.
+        theme.scrollbar_mode = gpui_kit::component::scroll::ScrollbarMode::Always;
     });
     // Belt and suspenders: the Base theme projection is rebuilt by
     // `update`, but pin its typography tokens to JetBrains Mono directly
