@@ -58,7 +58,15 @@ pub(super) struct UpdateState {
 impl UpdateState {
     pub(super) fn load(cx: &mut Context<Workbench>) -> Self {
         let prefs = store::load_update_prefs();
-        set_http_proxy(prefs.proxy.clone());
+        // The saved proxy (with its password from the keychain) is loaded
+        // off the UI thread; the first update request waits for it too.
+        cx.background_executor()
+            .spawn(async {
+                if let Some(warning) = crate::release_fetch::ensure_proxy_resolved() {
+                    crate::error_log::append(&warning);
+                }
+            })
+            .detach();
         Self {
             prefs,
             checking: false,
@@ -468,14 +476,52 @@ impl Workbench {
 
     /// Settings > About Kilat > Proxy: apply and remember the proxy URL (blank =
     /// use the system environment variables).
-    pub(super) fn set_proxy(&mut self, text: &str) {
+    pub(super) fn set_proxy(&mut self, text: &str, cx: &mut Context<Self>) {
         let url = Some(text.trim().to_string()).filter(|u| !u.is_empty());
         if url == self.updates.prefs.proxy {
             return;
         }
-        set_http_proxy(url.clone());
-        self.updates.prefs.proxy = url;
+        // The password goes to the keychain, the rest to settings.json; the
+        // prefs in memory never hold it.
+        let (clean, password) = match &url {
+            Some(u) => {
+                let (c, p) = ora_core::redact::split_proxy_password(u);
+                (Some(c), p)
+            }
+            None => (None, None),
+        };
+        let had_user = self
+            .updates
+            .prefs
+            .proxy
+            .as_deref()
+            .is_some_and(ora_core::redact::proxy_has_user);
+        set_http_proxy(url);
+        self.updates.prefs.proxy = clean;
         self.save_update_prefs();
+        self.save_proxy_password(had_user, password, cx);
+    }
+
+    /// Put the proxy password in the keychain (or drop the old one), off
+    /// the UI thread because the keychain can block.
+    fn save_proxy_password(
+        &mut self,
+        had_user: bool,
+        password: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let task = cx.background_executor().spawn(async move {
+            store::sync_proxy_password(crate::keychain::store(), had_user, password.as_deref())
+        });
+        cx.spawn(async move |view, cx| {
+            if let Some(warning) = task.await {
+                let _ = view.update(cx, |this, cx| {
+                    this.push_message(warning);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn dismiss_update_banner(&mut self) {
@@ -526,7 +572,7 @@ impl Workbench {
             .child(Input::new(&self.settings.proxy_input).small().w_full())
             .child(caption_text(
                 "Enter a proxy URL if your network requires one, for example http://proxy.example.com:8080 \
-                 (or http://user:pass@host:port). Leave blank to use HTTPS_PROXY or ALL_PROXY \
+                 (or http://user:pass@host:port; the password is kept in the system keychain, not in the settings file). Leave blank to use HTTPS_PROXY or ALL_PROXY \
                  from the environment. Applies to update checks and downloads."
                     .to_string(),
                 theme,

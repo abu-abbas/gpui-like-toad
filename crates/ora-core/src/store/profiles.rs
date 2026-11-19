@@ -59,6 +59,7 @@ pub(super) fn profile_to_json(p: &SavedProfile) -> Json {
             Json::Bool(p.access.protect_production),
         ),
         ("sysdba".into(), Json::Bool(p.access.sysdba)),
+        ("record_history".into(), Json::Bool(!p.access.skip_history)),
         ("save_password".to_string(), Json::Bool(p.save_password)),
     ])
 }
@@ -95,6 +96,11 @@ pub(super) fn profile_from_json(v: &Json) -> Option<SavedProfile> {
                 .and_then(Json::as_bool)
                 .unwrap_or(false),
             sysdba: v.get("sysdba").and_then(Json::as_bool).unwrap_or(false),
+            // Files from before this option keep recording history.
+            skip_history: !v
+                .get("record_history")
+                .and_then(Json::as_bool)
+                .unwrap_or(true),
         },
         save_password: v
             .get("save_password")

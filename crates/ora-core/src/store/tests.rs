@@ -64,6 +64,7 @@ fn import_preserves_environment_without_reusing_credentials() {
             protect_production: true,
             sysdba: true,
             environment: ConnectionEnvironment::Production,
+            ..Default::default()
         },
         save_password: true,
     };
@@ -356,4 +357,143 @@ fn update_prefs_roundtrip_keeps_theme() {
     save_update_prefs_in(&dir, &prefs).unwrap();
     assert_eq!(load_update_prefs_in(&dir), prefs);
     assert_eq!(load_theme_preference_in(&dir), ThemePreference::Dark);
+}
+
+fn write_settings(dir: &Path, proxy: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("settings.json"),
+        format!("{{\"theme\":\"x\",\"network_proxy\":\"{proxy}\"}}"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn legacy_plaintext_proxy_password_moves_to_the_keychain() {
+    use crate::credentials::{CredentialStore, ExposeSecret as _, MemoryCredentialStore};
+    let dir = scratch("proxy-legacy");
+    write_settings(&dir, "http://bob:s3cret@proxy:8080");
+    let keychain = MemoryCredentialStore::default();
+    let resolved = resolve_proxy_in(&dir, &keychain);
+    assert_eq!(
+        resolved.url.as_deref(),
+        Some("http://bob:s3cret@proxy:8080")
+    );
+    assert_eq!(resolved.warning, None);
+    let text = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+    assert!(!text.contains("s3cret"), "{text}");
+    assert!(text.contains("http://bob@proxy:8080") && text.contains("\"theme\""));
+    let saved = keychain.get(PROXY_CREDENTIAL_ACCOUNT).unwrap().unwrap();
+    assert_eq!(saved.expose_secret(), "s3cret");
+    // Second start: password comes from the keychain, file stays clean.
+    let again = resolve_proxy_in(&dir, &keychain);
+    assert_eq!(again.url.as_deref(), Some("http://bob:s3cret@proxy:8080"));
+    assert_eq!(
+        load_update_prefs_in(&dir).proxy.as_deref(),
+        Some("http://bob@proxy:8080")
+    );
+}
+
+#[test]
+fn failed_keychain_keeps_the_legacy_password_and_warns_without_leaking() {
+    use crate::credentials::{CredentialError, CredentialStore, SecretString};
+    struct Broken;
+    impl CredentialStore for Broken {
+        fn get(&self, _: &str) -> Result<Option<SecretString>, CredentialError> {
+            Err(CredentialError("locked".into()))
+        }
+        fn set(&self, _: &str, _: &SecretString) -> Result<(), CredentialError> {
+            Err(CredentialError("locked s3cret".into()))
+        }
+        fn delete(&self, _: &str) -> Result<(), CredentialError> {
+            Ok(())
+        }
+    }
+    let dir = scratch("proxy-broken");
+    write_settings(&dir, "http://bob:s3cret@proxy:8080");
+    let resolved = resolve_proxy_in(&dir, &Broken);
+    assert_eq!(
+        resolved.url.as_deref(),
+        Some("http://bob:s3cret@proxy:8080")
+    );
+    let warning = resolved.warning.unwrap();
+    assert!(
+        warning.contains("still stored") && !warning.contains("s3cret"),
+        "{warning}"
+    );
+    // Nothing lost: the file still has it, and saving prefs never rewrites it back.
+    assert!(std::fs::read_to_string(dir.join("settings.json"))
+        .unwrap()
+        .contains("s3cret"));
+    let prefs = load_update_prefs_in(&dir);
+    assert_eq!(prefs.proxy.as_deref(), Some("http://bob@proxy:8080"));
+}
+
+#[test]
+fn settings_proxy_without_user_never_touches_the_keychain() {
+    use crate::credentials::MemoryCredentialStore;
+    let dir = scratch("proxy-nouser");
+    write_settings(&dir, "http://proxy:8080");
+    let keychain = MemoryCredentialStore::default();
+    let resolved = resolve_proxy_in(&dir, &keychain);
+    assert_eq!(resolved.url.as_deref(), Some("http://proxy:8080"));
+    assert!(keychain.is_empty());
+}
+
+#[test]
+fn saving_a_proxy_keeps_the_password_out_of_settings() {
+    use crate::credentials::{CredentialStore, ExposeSecret as _, MemoryCredentialStore};
+    let dir = scratch("proxy-save");
+    let keychain = MemoryCredentialStore::default();
+    let out = save_proxy_in(&dir, &keychain, Some("http://bob:pw1@proxy:3128")).unwrap();
+    assert_eq!(out.url.as_deref(), Some("http://bob:pw1@proxy:3128"));
+    let text = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+    assert!(!text.contains("pw1"), "{text}");
+    assert_eq!(
+        keychain
+            .get(PROXY_CREDENTIAL_ACCOUNT)
+            .unwrap()
+            .unwrap()
+            .expose_secret(),
+        "pw1"
+    );
+    // Changing to a URL without a password drops the old one.
+    let out = save_proxy_in(&dir, &keychain, Some("http://bob@other:3128")).unwrap();
+    assert_eq!(out.url.as_deref(), Some("http://bob@other:3128"));
+    assert!(keychain.get(PROXY_CREDENTIAL_ACCOUNT).unwrap().is_none());
+    // Clearing the field removes the setting.
+    save_proxy_in(&dir, &keychain, None).unwrap();
+    assert_eq!(load_update_prefs_in(&dir).proxy, None);
+}
+
+#[test]
+fn history_option_roundtrips_and_defaults_to_recording() {
+    let dir = scratch("history-opt");
+    let mut profile = SavedProfile {
+        id: "p1".into(),
+        name: "n".into(),
+        kind: Default::default(),
+        username: "u".into(),
+        connect_string: "h:1521/s".into(),
+        folder: String::new(),
+        access: ConnectionAccess::default(),
+        save_password: false,
+    };
+    assert!(!profile.access.skip_history);
+    let mut off = profile.clone();
+    off.id = "p2".into();
+    off.access.skip_history = true;
+    save_profiles_in(&dir, &[profile.clone(), off]).unwrap();
+    let loaded = load_profiles_in(&dir);
+    assert!(!loaded[0].access.skip_history);
+    assert!(loaded[1].access.skip_history);
+    // A file from before the option has no key and keeps recording.
+    profile.id = "p3".into();
+    let text = std::fs::read_to_string(dir.join("connections.json")).unwrap();
+    assert!(text.contains("record_history"));
+    let legacy = text.replace("\"record_history\"", "\"x\"");
+    std::fs::write(dir.join("connections.json"), legacy).unwrap();
+    assert!(load_profiles_in(&dir)
+        .iter()
+        .all(|p| !p.access.skip_history));
 }

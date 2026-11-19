@@ -82,6 +82,10 @@ impl Workbench {
     }
 
     pub(super) fn record_run(&mut self, sql: &str) {
+        // The connection's "Record query history" option is off.
+        if self.conn.access().skip_history {
+            return;
+        }
         store::record_history(&mut self.history, sql, store::now_unix_secs());
         if let Err(err) = store::save_history(&self.history) {
             self.push_message(format!("Failed to save query history: {err}"));
