@@ -189,10 +189,14 @@ impl DbClient for ThinClient {
         {
             return Err(DbError::new("Read Only requires a non-SYS connection."));
         }
+        // No client-side statement cache: after one failed statement a cached
+        // cursor could keep failing with ORA-01008 / ORA-01002 for every later
+        // query of the session until reconnect.
         let mut config = oracledb::Config::default()
             .set_credentials(&profile.username, password)
             .set_connect_string(&profile.connect_string)
-            .map_err(db_err)?;
+            .map_err(db_err)?
+            .set_stmtcachesize(0);
         if profile.access.sysdba {
             config = config.set_auth_mode(oracledb::AUTH_MODE_SYSDBA);
         }
