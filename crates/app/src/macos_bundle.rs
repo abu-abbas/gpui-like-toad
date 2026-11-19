@@ -1,8 +1,8 @@
-use std::ffi::CString;
 use std::io;
-use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use rustix::fs::{renameat_with, RenameFlags, CWD};
 
 /// Older updaters replace the bundle contents at the original path.
 pub(crate) fn relaunch_from_renamed_bundle() -> bool {
@@ -49,15 +49,7 @@ fn rename_legacy_bundle(original: &Path) -> io::Result<Option<PathBuf>> {
 }
 
 fn rename_exclusively(source: &Path, target: &Path) -> io::Result<()> {
-    let source = CString::new(source.as_os_str().as_bytes()).map_err(io::Error::other)?;
-    let target = CString::new(target.as_os_str().as_bytes()).map_err(io::Error::other)?;
-    // Both pointers refer to live, NUL-terminated paths for the entire call.
-    let result = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    renameat_with(CWD, source, CWD, target, RenameFlags::NOREPLACE).map_err(Into::into)
 }
 
 #[cfg(test)]
