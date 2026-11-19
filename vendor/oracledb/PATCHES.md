@@ -16,7 +16,9 @@ examples, tests and dev-dependencies were dropped.
    The patch adds `VERIFIER_TYPE_10G`, the DES-based hash
    (`password_hash_10g`, checked against published SCOTT/TIGER,
    SYSTEM/MANAGER and SYS/CHANGE_ON_INSTALL values) and an AES-128 O5LOGON
-   path (`generate_verifier_10g`). The 10G hash is case-insensitive, so the
+   path (`generate_verifier_10g`; combo key via PBKDF2 when the server sends
+   `AUTH_PBKDF2_CSK_SALT`, as 12c+ servers do, else MD5). The 10G hash is
+   case-insensitive, so the
    user name and password are upper-cased.
 
 When moving to a newer upstream revision, re-apply these patches (search for
