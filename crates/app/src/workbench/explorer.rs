@@ -442,8 +442,12 @@ impl Workbench {
                     let _ =
                         edit_view.update(cx, |this, cx| this.open_cell_editor(request, window, cx));
                 }));
+                let delete_view = paste_view.clone();
                 delegate = delegate.with_cell_paste(Rc::new(move |_, cx| {
                     let _ = paste_view.update(cx, |this, cx| this.paste_into_cells(cx));
+                }));
+                delegate = delegate.with_delete_rows(Rc::new(move |rowids, _, cx| {
+                    let _ = delete_view.update(cx, |this, cx| this.stage_row_deletes(rowids, cx));
                 }));
             }
             delegate.set_table_name(Some(table_name));
@@ -536,6 +540,9 @@ impl Workbench {
     /// columns; rows are inserted without commit.
     pub(super) fn import_table(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
         if self.conn.busy || self.conn.session.is_none() {
+            return;
+        }
+        if self.blocked_by_read_only("import tidak bisa dijalankan", cx) {
             return;
         }
         let conn_id = self.conn.id;

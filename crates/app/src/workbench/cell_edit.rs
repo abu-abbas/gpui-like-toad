@@ -44,6 +44,18 @@ pub(super) struct CellEditor {
 }
 
 impl Workbench {
+    /// True (with a status message) when the active connection is Read
+    /// Only, so edits are refused before anything is staged. The worker
+    /// refuses the write too; this just keeps the UI from queuing it.
+    pub(super) fn blocked_by_read_only(&mut self, what: &str, cx: &mut Context<Self>) -> bool {
+        if !self.conn.access().read_only {
+            return false;
+        }
+        self.conn.status = format!("Koneksi ini read only: {what}.");
+        cx.notify();
+        true
+    }
+
     /// Any data tab of the active connection with edits that were not
     /// sent yet.
     pub(super) fn has_staged_edits(&self) -> bool {
@@ -65,6 +77,9 @@ impl Workbench {
         if self.conn.busy {
             self.conn.status = "Masih ada operasi berjalan.".to_string();
             cx.notify();
+            return;
+        }
+        if self.blocked_by_read_only("cell tidak bisa diubah", cx) {
             return;
         }
         let initial = if request.value.is_null() {
