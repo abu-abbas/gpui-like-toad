@@ -4,8 +4,10 @@
 //! release page in the browser (the banner is one minimal line; a
 //! "What's new" tab next to Home lists the full release notes). The tab
 //! also has "Update Now": gpui-updater-core downloads the asset for
-//! this OS, checks SHA256SUMS and the minisign signature (key in
-//! release-key.pub), swaps the app in, then "Restart" relaunches.
+//! this OS, swaps the app in, then "Restart" relaunches. "Download" and
+//! "Update Now" both check the file with `release_verify` (signed
+//! SHA256SUMS + minisign signature, key in release-key.pub) while it is
+//! still in a private temp directory; only a verified file is handed on.
 //! The request is one anonymous GET of the public API: no identifiers.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -14,6 +16,8 @@ use gpui_kit::component::progress::Progress;
 use gpui_kit::component::spinner::Spinner;
 use ora_core::store::{self, UpdatePrefs};
 use ora_core::update::{self, ReleaseInfo};
+
+use crate::release_verify::{self, ReleaseProof};
 
 use super::*;
 
@@ -146,17 +150,16 @@ fn download_dir() -> std::path::PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
-/// Blocking download of one release asset; returns the saved path. The
-/// file is written under a `.part` name and renamed when complete.
-fn download_asset(asset: &update::Asset) -> Result<std::path::PathBuf, String> {
-    use std::io::Write as _;
-    const MAX_BYTES: u64 = 400 * 1024 * 1024;
+/// Largest release file the app downloads.
+const MAX_DOWNLOAD_BYTES: u64 = 400 * 1024 * 1024;
+
+fn download_agent() -> Result<ureq::Agent, String> {
     let proxy = configured_proxy()?;
     let mut builder = ureq::Agent::config_builder();
     if proxy.is_some() {
         builder = builder.proxy(proxy);
     }
-    let agent: ureq::Agent = builder
+    Ok(builder
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_recv_body(Some(Duration::from_secs(60)))
         .tls_config(
@@ -166,102 +169,139 @@ fn download_asset(asset: &update::Asset) -> Result<std::path::PathBuf, String> {
         )
         .user_agent(concat!("gpui-like-toad/", env!("CARGO_PKG_VERSION")))
         .build()
-        .into();
-    let mut resp = agent.get(&asset.url).call().map_err(|e| e.to_string())?;
-    let dir = download_dir();
-    let target = dir.join(&asset.name);
-    let part = dir.join(format!("{}.part", asset.name));
-    let mut file = std::fs::File::create(&part).map_err(|e| e.to_string())?;
-    let mut reader = resp.body_mut().with_config().limit(MAX_BYTES).reader();
-    let copied = std::io::copy(&mut reader, &mut file).map_err(|e| e.to_string());
-    let finish = copied.and_then(|_| file.flush().map_err(|e| e.to_string()));
-    drop(file);
-    if let Err(err) = finish {
-        let _ = std::fs::remove_file(&part);
-        return Err(err);
-    }
-    std::fs::rename(&part, &target).map_err(|e| e.to_string())?;
-    Ok(target)
+        .into())
 }
 
-/// Base64 minisign public key (last line of `release-key.pub`).
-fn release_public_key() -> &'static str {
-    include_str!("../../../../release-key.pub")
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("")
-        .trim()
+/// Blocking GET of a small text asset (checksum list, signature).
+fn fetch_text(agent: &ureq::Agent, asset: &update::Asset) -> Result<String, String> {
+    let mut resp = agent.get(&asset.url).call().map_err(|e| e.to_string())?;
+    resp.body_mut()
+        .with_config()
+        .limit(1024 * 1024)
+        .read_to_string()
+        .map_err(|e| format!("{}: {e}", asset.name))
+}
+
+/// Fetch and check the signed `SHA256SUMS` and `<asset>.minisig` of
+/// `asset`. A release without them is refused here, before the file
+/// itself is downloaded.
+fn fetch_proof(info: &ReleaseInfo, asset: &update::Asset) -> Result<ReleaseProof, String> {
+    let find = |name: &str| {
+        info.assets.iter().find(|a| a.name == name).ok_or_else(|| {
+            format!("this release is not signed ({name} is missing), so it was not downloaded")
+        })
+    };
+    let sums = find(release_verify::SUMS_NAME)?;
+    let sums_sig = find(&release_verify::signature_name(release_verify::SUMS_NAME))?;
+    let asset_sig = find(&release_verify::signature_name(&asset.name))?;
+    let agent = http_agent()?;
+    ReleaseProof::new(
+        &asset.name,
+        &info.version.to_string(),
+        &fetch_text(&agent, sums)?,
+        &fetch_text(&agent, sums_sig)?,
+        &fetch_text(&agent, asset_sig)?,
+        release_verify::release_public_key(),
+    )
+}
+
+/// Blocking: download `asset` into a fresh owner-only temp directory,
+/// verify it, and only then copy it into the Downloads folder. A file that
+/// fails any check is deleted with the temp directory and never reaches
+/// Downloads.
+fn download_asset(info: &ReleaseInfo, asset: &update::Asset) -> Result<std::path::PathBuf, String> {
+    use std::io::Write as _;
+    let proof = fetch_proof(info, asset)?;
+    if asset.size > MAX_DOWNLOAD_BYTES {
+        return Err(format!("{} is larger than the download limit", asset.name));
+    }
+    let staging = tempfile::Builder::new()
+        .prefix("kilat-download-")
+        .tempdir()
+        .map_err(|e| e.to_string())?;
+    let temp = staging.path().join(&asset.name);
+    {
+        let limit = if asset.size > 0 {
+            asset.size
+        } else {
+            MAX_DOWNLOAD_BYTES
+        };
+        let mut resp = download_agent()?
+            .get(&asset.url)
+            .call()
+            .map_err(|e| e.to_string())?;
+        let mut file = std::fs::File::create(&temp).map_err(|e| e.to_string())?;
+        let mut reader = resp.body_mut().with_config().limit(limit).reader();
+        let copied = std::io::copy(&mut reader, &mut file).map_err(|e| e.to_string())?;
+        file.flush().map_err(|e| e.to_string())?;
+        if asset.size > 0 && copied != asset.size {
+            return Err(format!(
+                "{} is incomplete ({copied} of {} bytes)",
+                asset.name, asset.size
+            ));
+        }
+    }
+    proof.verify_and_deliver(&temp, &download_dir(), release_verify::release_public_key())
 }
 
 /// The release the app already fetched, shaped for gpui-updater-core: the
-/// asset for this OS, its `.minisig`, and its hash from `SHA256SUMS`.
+/// asset for this OS with the checksum and signature from its
+/// [`ReleaseProof`] (already checked against the signed `SHA256SUMS`).
 struct ReleaseSource {
     info: ReleaseInfo,
+    asset: update::Asset,
+    proof: ReleaseProof,
 }
 
 impl gpui_updater_core::UpdateSource for ReleaseSource {
     fn fetch_latest(&self) -> gpui_updater_core::Result<gpui_updater_core::Release> {
         use gpui_updater_core as up;
-        let info = &self.info;
-        let asset = update::pick_installable(&info.assets, std::env::consts::OS).ok_or(
-            up::Error::NoMatchingAsset {
-                target_os: std::env::consts::OS,
-                target_arch: std::env::consts::ARCH,
-            },
-        )?;
-        let version = up::Version::parse(&info.version.to_string())
+        let version = up::Version::parse(&self.info.version.to_string())
             .map_err(|e| up::Error::Parse(e.to_string()))?;
-        let mut release = up::Release::new(
+        let asset = &self.asset;
+        Ok(up::Release::new(
             version,
             up::Asset::new(asset.name.clone(), asset.url.clone(), asset.size),
-        );
-        let sig_name = format!("{}.minisig", asset.name);
-        if let Some(sig) = info.assets.iter().find(|a| a.name == sig_name) {
-            release = release.with_minisign_signature_url(sig.url.clone());
-        }
-        if let Some(sums) = info.assets.iter().find(|a| a.name == "SHA256SUMS") {
-            let mut resp = http_agent()
-                .map_err(up::Error::Http)?
-                .get(&sums.url)
-                .call()
-                .map_err(|e| up::Error::Http(e.to_string()))?;
-            let text = resp
-                .body_mut()
-                .with_config()
-                .limit(1024 * 1024)
-                .read_to_string()
-                .map_err(|e| up::Error::Http(e.to_string()))?;
-            if let Some(hash) = update::sha256_from_sums(&text, &asset.name) {
-                release = release.with_sha256(hash);
-            }
-        }
-        Ok(release)
+        )
+        .with_sha256(self.proof.sha256.clone())
+        .with_minisign_signature(self.proof.signature.clone()))
     }
-}
-
-fn update_engine(info: &ReleaseInfo) -> gpui_updater_core::UpdateEngine<ReleaseSource> {
-    use gpui_updater_core as up;
-    let current =
-        up::Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| up::Version::new(0, 0, 0));
-    up::UpdateEngine::new(
-        ReleaseSource { info: info.clone() },
-        up::EngineConfig::new(current)
-            .minisign_public_key(release_public_key())
-            // Signature and checksum are both required: a release that
-            // lacks either is refused, never installed unchecked.
-            .verification(up::Verification::Strict),
-    )
 }
 
 /// Blocking: check, download, verify, install. Returns the relaunch path.
+/// The engine checks the file under `Strict` (checksum and signature both
+/// required), then the same [`ReleaseProof::verify_file`] as the Download
+/// button runs on it before it is installed.
 fn install_release(info: &ReleaseInfo) -> Result<Option<std::path::PathBuf>, String> {
-    let engine = update_engine(info);
-    match engine.update_now(|_, _| {}) {
-        Ok(Some(installed)) => Ok(installed.restart_path),
-        Ok(None) => Err("You're up to date.".to_string()),
-        Err(e) => Err(e.to_string()),
-    }
+    use gpui_updater_core as up;
+    let asset = update::pick_installable(&info.assets, std::env::consts::OS)
+        .cloned()
+        .ok_or_else(|| "No update file for this operating system.".to_string())?;
+    let proof = fetch_proof(info, &asset)?;
+    let current =
+        up::Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| up::Version::new(0, 0, 0));
+    let engine = up::UpdateEngine::new(
+        ReleaseSource {
+            info: info.clone(),
+            asset,
+            proof: proof.clone(),
+        },
+        up::EngineConfig::new(current)
+            .minisign_public_key(release_verify::release_public_key())
+            .verification(up::Verification::Strict)
+            .version_binding(up::VersionBinding::Required)
+            .max_download_size(MAX_DOWNLOAD_BYTES),
+    );
+    let release = engine
+        .check()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "You're up to date.".to_string())?;
+    let artifact = engine
+        .download(&release, |_, _| {})
+        .map_err(|e| e.to_string())?;
+    proof.verify_file(artifact.path(), release_verify::release_public_key())?;
+    let installed = engine.install(&artifact).map_err(|e| e.to_string())?;
+    Ok(installed.restart_path)
 }
 
 impl Workbench {
@@ -271,12 +311,9 @@ impl Workbench {
         if u.downloading {
             return;
         }
-        let Some(asset) = u
-            .available
-            .as_ref()
-            .and_then(|r| update::pick_asset(&r.assets, std::env::consts::OS))
-            .cloned()
-        else {
+        let Some((info, asset)) = u.available.as_ref().and_then(|r| {
+            update::pick_asset(&r.assets, std::env::consts::OS).map(|a| (r.clone(), a.clone()))
+        }) else {
             u.download_note = Some((
                 true,
                 "No download is available for this operating system. Open the release page for details.".into(),
@@ -285,10 +322,10 @@ impl Workbench {
             return;
         };
         u.downloading = true;
-        u.download_note = Some((false, format!("Downloading {}…", asset.name)));
+        u.download_note = Some((false, format!("Downloading and verifying {}…", asset.name)));
         let task = cx
             .background_executor()
-            .spawn(async move { download_asset(&asset) });
+            .spawn(async move { download_asset(&info, &asset) });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |this, cx| {
@@ -296,7 +333,7 @@ impl Workbench {
                 this.updates.download_note = Some(match result {
                     Ok(path) => {
                         cx.reveal_path(&path);
-                        (false, format!("Saved to {}", path.display()))
+                        (false, format!("Verified and saved to {}", path.display()))
                     }
                     Err(err) => (true, format!("Download failed: {err}")),
                 });

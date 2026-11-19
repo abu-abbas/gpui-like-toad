@@ -27,6 +27,7 @@ mod macos_bundle;
 #[cfg(target_os = "macos")]
 mod macos_dock;
 mod plan;
+mod release_verify;
 mod results;
 mod schema;
 mod splash;

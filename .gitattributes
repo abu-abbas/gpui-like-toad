@@ -1,0 +1,3 @@
+# Signed release files used as test fixtures: keep their bytes exact
+# (a CRLF checkout on Windows would break the signatures).
+crates/app/tests/fixtures/** -text
