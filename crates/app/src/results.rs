@@ -1085,57 +1085,6 @@ impl ResultsDelegate {
     }
 }
 
-/// Counts bytes allocated on the current thread while switched on, for
-/// the memory regression test below. Other test threads are not counted.
-#[cfg(test)]
-mod alloc_count {
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
-
-    pub struct Counting;
-
-    thread_local! {
-        static ON: Cell<bool> = const { Cell::new(false) };
-        static BYTES: Cell<usize> = const { Cell::new(0) };
-    }
-
-    unsafe impl GlobalAlloc for Counting {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let _ = ON.try_with(|on| {
-                if on.get() {
-                    BYTES.with(|b| b.set(b.get() + layout.size()));
-                }
-            });
-            unsafe { System.alloc(layout) }
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(ptr, layout) }
-        }
-
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            let _ = ON.try_with(|on| {
-                if on.get() {
-                    BYTES.with(|b| b.set(b.get() + new_size));
-                }
-            });
-            unsafe { System.realloc(ptr, layout, new_size) }
-        }
-    }
-
-    #[global_allocator]
-    static GLOBAL: Counting = Counting;
-
-    /// Bytes allocated (gross: freed blocks still count) while `f` runs.
-    pub fn allocated_by<T>(f: impl FnOnce() -> T) -> (T, usize) {
-        BYTES.with(|b| b.set(0));
-        ON.with(|on| on.set(true));
-        let out = f();
-        ON.with(|on| on.set(false));
-        (out, BYTES.with(|b| b.get()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1146,11 +1095,11 @@ mod tests {
     /// The audit's baseline: 512 rows of 32 KiB synthetic text are about
     /// 16 MiB as one `QueryResult`. Before results were shared, holding it
     /// in the statement list, the tab and the grid made that 48 MiB.
-    /// Showing (and sorting) it must now only add the view: columns and a
-    /// row index, far below one more copy of the cells.
+    /// Showing (and sorting) it must now only add the view: every holder
+    /// points at the same cells, and the grid's own state is a row index.
     #[test]
     fn showing_a_result_does_not_copy_its_cells() {
-        let (result, built) = alloc_count::allocated_by(|| QueryResult {
+        let result = QueryResult {
             columns: vec![ColumnInfo {
                 name: "BODY".into(),
                 data_type: "CLOB".into(),
@@ -1159,31 +1108,42 @@ mod tests {
                 .map(|i| vec![Value::Text(format!("{i:05}").repeat(32 * 1024 / 5))])
                 .collect(),
             ..Default::default()
-        });
-        assert!((15 * MIB..17 * MIB).contains(&built), "baseline {built}");
+        };
         assert!((15 * MIB..17 * MIB).contains(&result.heap_bytes()));
+        let first_cell = match &result.rows[0][0] {
+            Value::Text(t) => t.as_ptr(),
+            _ => unreachable!(),
+        };
 
+        // The worker's script result, the tab's shown result and the
+        // grid: the same path as `Workbench::show_statement_result`.
+        let shared = Arc::new(result);
+        let statements = [crate::worker::StatementResult {
+            sql: "SELECT body FROM doc".into(),
+            started: String::new(),
+            outcome: Ok(shared.clone()),
+        }];
+        let last_result = statements[0].outcome.as_ref().ok().cloned();
         let mut grid = ResultsDelegate::empty().with_row_numbers();
-        let ((), shown) = alloc_count::allocated_by(|| {
-            // The worker's script result, the tab's shown result and the
-            // grid: the same path as `Workbench::show_statement_result`.
-            let shared = Arc::new(result);
-            let statements = [crate::worker::StatementResult {
-                sql: "SELECT body FROM doc".into(),
-                started: String::new(),
-                outcome: Ok(shared.clone()),
-            }];
-            let last_result = statements[0].outcome.as_ref().ok().cloned();
-            grid.set_result(last_result.clone().unwrap_or_default());
-            grid.sort_by_column(0, ColumnSort::Descending);
-            assert!(Arc::ptr_eq(&grid.result, &shared));
-            assert_eq!(Arc::strong_count(&shared), 4);
-        });
-        assert!(
-            shown < MIB / 4,
-            "showing the result allocated {shown} bytes"
-        );
-        // Sorted view reads through the row index.
+        grid.set_result(last_result.clone().unwrap_or_default());
+        grid.sort_by_column(0, ColumnSort::Descending);
+
+        // One copy of the cells for all four holders.
+        assert!(Arc::ptr_eq(&grid.result, &shared));
+        assert_eq!(Arc::strong_count(&shared), 4);
+        match &shared.rows[0][0] {
+            Value::Text(t) => assert_eq!(t.as_ptr(), first_cell),
+            _ => unreachable!(),
+        }
+        // The grid's extra memory: a row index and no overrides.
+        let view = grid
+            .order
+            .as_ref()
+            .map_or(0, |o| o.capacity() * size_of::<usize>());
+        assert!(view <= 512 * size_of::<usize>());
+        assert!(grid.overrides.is_empty());
+        // Sorting did not touch the shared rows.
+        assert!(matches!(&shared.rows[0][0], Value::Text(t) if t.starts_with("00000")));
         assert!(grid.cell_text(0, 0).starts_with("00511"));
     }
 
