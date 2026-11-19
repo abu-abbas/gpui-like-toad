@@ -865,7 +865,7 @@ impl Workbench {
         let view = cx.entity();
         let join_button = Button::new("filter-join")
             .small()
-            .child(select_trigger(format!("Gabung: {}", join.keyword()), theme))
+            .child(select_trigger(format!("Combine: {}", join.keyword()), theme))
             .tooltip("Choose how to combine checked filters")
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.min_w(px(260.));
