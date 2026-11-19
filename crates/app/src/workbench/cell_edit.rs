@@ -508,7 +508,7 @@ impl Workbench {
             .flex_col()
             .items_center()
             .pt(px(120.))
-            .bg(gpui_kit::hsla(0., 0., 0., 0.35))
+            .bg(crate::theme::modal_scrim(theme))
             .occlude()
             .child(card)
             .into_any_element()

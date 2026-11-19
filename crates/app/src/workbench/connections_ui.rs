@@ -525,7 +525,7 @@ impl Workbench {
             .items_center()
             .justify_center()
             .p(px(SPACE_4))
-            .bg(gpui_kit::hsla(0., 0., 0., 0.45))
+            .bg(crate::theme::modal_scrim(theme))
             // Swallow clicks so nothing under the modal reacts.
             .occlude()
             .child(card)
