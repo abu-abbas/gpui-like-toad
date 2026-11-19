@@ -14,8 +14,7 @@ use std::time::{Duration, Instant};
 use ora_core::completion::CatalogObject;
 use ora_core::credentials::{CredentialStore as _, ExposeSecret as _, SecretString};
 use ora_core::demo::DemoClient;
-use ora_core::export::{to_csv, to_xlsx};
-use ora_core::import::{map_columns, parse_csv};
+use ora_core::import::{map_columns, CsvReader};
 use ora_core::sql::statement_kind;
 use ora_core::{
     ColumnDef, ConnectionAccess, ConnectionProfile, DbClient, DbError, DbInfo, DbKind, FetchLimits,
@@ -30,14 +29,17 @@ pub const SCRIPT_MAX_RESULT_BYTES: usize = 2 * ora_core::fetch::MAX_RESULT_BYTES
 /// File format for "Export Data" on a whole table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportFormat {
+    /// Exact values, for data interchange.
     Csv,
+    /// CSV for Excel / LibreOffice: formula-like text stays text.
+    CsvSpreadsheetSafe,
     Xlsx,
 }
 
 impl ExportFormat {
     pub fn extension(self) -> &'static str {
         match self {
-            ExportFormat::Csv => "csv",
+            ExportFormat::Csv | ExportFormat::CsvSpreadsheetSafe => "csv",
             ExportFormat::Xlsx => "xlsx",
         }
     }
@@ -722,12 +724,22 @@ fn export_table(
 ) -> Result<(usize, bool, usize), DbError> {
     let sql = format!("SELECT * FROM {}", client.dialect().table_ref(owner, name));
     let result = client.query(&sql, FetchLimits::export())?;
-    let bytes = match format {
-        ExportFormat::Csv => to_csv(&result).into_bytes(),
-        ExportFormat::Xlsx => to_xlsx(&result).map_err(DbError::new)?,
+    let written = match format {
+        ExportFormat::Csv => ora_core::export::write_csv_file(
+            &result,
+            ora_core::export::CsvMode::Raw,
+            path,
+            &mut |_| true,
+        ),
+        ExportFormat::CsvSpreadsheetSafe => ora_core::export::write_csv_file(
+            &result,
+            ora_core::export::CsvMode::SpreadsheetSafe,
+            path,
+            &mut |_| true,
+        ),
+        ExportFormat::Xlsx => ora_core::export::write_xlsx_file(&result, path, &mut |_| true),
     };
-    std::fs::write(path, bytes)
-        .map_err(|e| DbError::new(format!("Failed to write {}: {e}", path.display())))?;
+    written.map_err(|e| DbError::new(e.to_string()))?;
     Ok((result.row_count(), result.truncated, result.clipped_cells()))
 }
 
@@ -745,12 +757,37 @@ fn import_csv(
     name: &str,
     path: &std::path::Path,
 ) -> Result<u64, DbError> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| DbError::new(format!("Failed to read {}: {e}", path.display())))?;
-    let csv = parse_csv(&text).map_err(DbError::new)?;
+    // The file is read as a stream, twice: a first pass checks every row
+    // (so a bad line near the end inserts nothing), a second pass inserts
+    // in bounded batches. Neither holds the whole file in memory.
+    let open = || {
+        std::fs::File::open(path)
+            .map(std::io::BufReader::new)
+            .map(CsvReader::new)
+            .map_err(|e| DbError::new(format!("Failed to read {}: {e}", path.display())))
+    };
+    let mut check = open()?;
+    let headers = check.read_header().map_err(DbError::new)?.to_vec();
     let table_columns = client.describe_table(owner, name)?;
-    let columns = map_columns(&csv.headers, &table_columns).map_err(DbError::new)?;
-    client.insert_rows(owner, name, &columns, &csv.rows)
+    let columns = map_columns(&headers, &table_columns).map_err(DbError::new)?;
+    while check.next_row().map_err(DbError::new)?.is_some() {}
+    drop(check);
+
+    let mut reader = open()?;
+    reader.read_header().map_err(DbError::new)?;
+    let mut inserted = 0u64;
+    ora_core::import::for_each_batch(&mut reader, |rows, first_row| {
+        match client.insert_rows(owner, name, &columns, rows) {
+            Ok(n) => {
+                inserted += n;
+                Ok(n)
+            }
+            Err(e) => Err(format!(
+                "{e} (batch starting at data row {first_row}; {inserted} earlier rows stay inserted, uncommitted: roll back to undo)"
+            )),
+        }
+    })
+    .map_err(DbError::new)
 }
 
 #[cfg(test)]
@@ -899,6 +936,51 @@ mod tests {
         std::fs::write(&path, "DEPARTMENT_ID,NOPE\n1,2\n").unwrap();
         let err = import_csv(&mut demo(), "HR", "DEPARTMENTS", &path).unwrap_err();
         assert!(err.to_string().contains("NOPE"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn import_streams_many_rows_in_batches_and_checks_the_whole_file_first() {
+        // Test-only scratch dir, removed at the end; no security decision
+        // depends on it.
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let dir = std::env::temp_dir().join(format!("gpui-like-toad-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.csv");
+        let mut text = String::from("DEPARTMENT_ID,DEPARTMENT_NAME\n");
+        for n in 0..1300 {
+            text.push_str(&format!("{n},\"Dept {n}\"\n"));
+        }
+        std::fs::write(&path, &text).unwrap();
+        let inserted = import_csv(&mut demo(), "HR", "DEPARTMENTS", &path).unwrap();
+        assert_eq!(inserted, 1300);
+        // A bad row at the very end is found before anything is inserted.
+        text.push_str("only-one-field\n");
+        std::fs::write(&path, &text).unwrap();
+        let err = import_csv(&mut demo(), "HR", "DEPARTMENTS", &path).unwrap_err();
+        assert!(err.to_string().contains("Line 1302"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn table_export_can_write_spreadsheet_safe_csv() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let dir = std::env::temp_dir().join(format!("gpui-like-toad-safe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("departments.csv");
+        let mut client = demo();
+        export_table(
+            &mut client,
+            "HR",
+            "DEPARTMENTS",
+            &path,
+            ExportFormat::CsvSpreadsheetSafe,
+        )
+        .unwrap();
+        assert!(!dir.join("departments.csv.part").exists());
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("DEPARTMENT_ID"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

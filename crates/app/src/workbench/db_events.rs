@@ -124,24 +124,26 @@ impl Workbench {
                 Err(_) => false,
             };
             let _ = view.update(cx, |this, cx| {
-                this.with_conn(conn_id, cx, |this, background, cx| {
-                    if this.conn.op_generation != generation {
-                        return;
-                    }
+                if !this.op_is_current(conn_id, generation) {
+                    return;
+                }
+                // Only the user's active connection may continue; for any
+                // other one the operation is cancelled in place, without
+                // making it active.
+                let proceed = confirmed
+                    && this.conn.id == conn_id
+                    && this.tabs.get(this.active_tab).map(|t| t.id) == tab_id
+                    && this.conn.session.is_some();
+                if proceed {
                     this.conn.busy = false;
-                    if confirmed
-                        && !background
-                        && this.tabs.get(this.active_tab).map(|t| t.id) == tab_id
-                        && this.conn.session.is_some()
-                    {
-                        this.dispatch_db(job, op, true, cx);
-                    } else {
-                        this.conn.pending_sql = None;
-                        this.conn.cancel_script = None;
-                        this.conn.status = "Production operation cancelled.".to_string();
-                        cx.notify();
-                    }
-                });
+                    this.dispatch_db(job, op, true, cx);
+                } else if let Some(conn) = this.conn_mut(conn_id) {
+                    conn.busy = false;
+                    conn.pending_sql = None;
+                    conn.cancel_script = None;
+                    conn.status = "Production operation cancelled.".to_string();
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -173,6 +175,11 @@ impl Workbench {
             // editor text from a response.
             let _ = cx.update_window(handle, |_, window, cx| {
                 view.update(cx, |this, cx| {
+                    // A superseded operation (after Stop, or a newer op)
+                    // is dropped without touching any connection.
+                    if !this.op_is_current(conn_id, generation) {
+                        return;
+                    }
                     this.with_conn(conn_id, cx, |this, background, cx| {
                         this.on_db_response(generation, resp, background, window, cx)
                     })
@@ -209,11 +216,11 @@ impl Workbench {
                     .await;
                 if let Ok(Response::ConnectionLost(reason)) = result {
                     let _ = view.update(cx, |this, cx| {
-                        this.with_conn(id, cx, |this, _, cx| {
-                            if this.conn.op_generation == generation {
-                                this.connection_was_lost(reason, cx);
-                            }
-                        })
+                        if this.op_is_current(id, generation) {
+                            this.with_conn(id, cx, |this, _, cx| {
+                                this.connection_was_lost(reason, cx)
+                            });
+                        }
                     });
                 }
             }
@@ -240,6 +247,7 @@ impl Workbench {
         self.conn.connection_lost = true;
         self.conn.db = None;
         self.conn.busy = false;
+        self.conn.abandoned = false;
         self.conn.pending_op = None;
         self.conn.pending_tab = None;
         self.conn.pending_sql = None;
@@ -270,6 +278,32 @@ impl Workbench {
         cx.notify();
     }
 
+    /// The worker finally answered an operation the user stopped waiting
+    /// for: free the connection, ignore the data, but remember a write may
+    /// have happened.
+    fn on_abandoned_response(&mut self, resp: Result<Response, RecvError>, cx: &mut Context<Self>) {
+        if let Ok(Response::ConnectionLost(error)) = resp {
+            self.connection_was_lost(error, cx);
+            return;
+        }
+        let pending = self.conn.pending_op.take();
+        self.conn.pending_tab = None;
+        self.conn.busy = false;
+        if matches!(
+            (&pending, &resp),
+            (Some(PendingOp::Run), Ok(Response::Executed(_)))
+                | (Some(PendingOp::ImportCsv { .. }), Ok(Response::Imported(_)))
+        ) {
+            self.conn.uncommitted = true;
+        }
+        self.conn.status = "The stopped operation finished; its result was ignored.".to_string();
+        self.push_message(
+            "The operation you stopped has finished on the server. Its result was ignored."
+                .to_string(),
+        );
+        cx.notify();
+    }
+
     fn on_db_response(
         &mut self,
         generation: u64,
@@ -284,6 +318,9 @@ impl Workbench {
             return;
         }
         self.conn.cancel_script = None;
+        if std::mem::take(&mut self.conn.abandoned) {
+            return self.on_abandoned_response(resp, cx);
+        }
         if let Ok(Response::ConnectionLost(error)) = resp {
             self.connection_was_lost(error, cx);
             return;

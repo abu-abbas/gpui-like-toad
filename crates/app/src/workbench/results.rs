@@ -546,10 +546,42 @@ impl Workbench {
         )
     }
 
-    /// One Export dropdown (CSV/XLSX) via the component `DropdownMenu`
-    /// API. The trigger shows no chevron glyph: `Button` renders none
-    /// automatically and a unicode chevron is not allowed in this UI.
+    /// One Export dropdown (CSV / spreadsheet-safe CSV / XLSX) via the
+    /// component `DropdownMenu` API; while an export runs it shows its
+    /// progress and a Cancel button instead. The trigger shows no chevron
+    /// glyph: `Button` renders none automatically and a unicode chevron is
+    /// not allowed in this UI.
     fn render_export_dropdown(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(export) = &self.result_export {
+            return div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(SPACE_2))
+                .child(
+                    gpui_kit::component::spinner::Spinner::new()
+                        .small()
+                        .color(cx.theme().primary),
+                )
+                .child(caption_text(
+                    format!("Exporting {}", export.progress_text()),
+                    cx.theme(),
+                ))
+                .child(
+                    Button::new("export-cancel")
+                        .ghost()
+                        .small()
+                        .icon(IconName::X)
+                        .tooltip("Cancel export")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(export) = &this.result_export {
+                                export.request_cancel();
+                            }
+                            cx.notify();
+                        })),
+                )
+                .into_any_element();
+        }
         let has_result = self.active_tab().last_result.is_some();
         let view = cx.entity();
         Button::new("export")
@@ -559,23 +591,23 @@ impl Workbench {
             .icon(IconName::Download)
             .disabled(!has_result)
             .dropdown_menu(move |menu, _, _| {
-                let csv_view = view.clone();
-                let xlsx_view = view.clone();
-                menu.item(
-                    PopupMenuItem::new("Export CSV")
-                        .disabled(!has_result)
-                        .on_click(move |_, _, cx: &mut App| {
-                            csv_view.update(cx, |this, cx| this.export_csv(cx));
-                        }),
-                )
-                .item(
-                    PopupMenuItem::new("Export XLSX")
-                        .disabled(!has_result)
-                        .on_click(move |_, _, cx: &mut App| {
-                            xlsx_view.update(cx, |this, cx| this.export_xlsx(cx));
-                        }),
-                )
+                use super::result_export::ResultExportKind as Kind;
+                let mut menu = menu;
+                for (label, kind) in [
+                    ("Export CSV", Kind::Csv),
+                    ("Export CSV (spreadsheet-safe)", Kind::CsvSpreadsheetSafe),
+                    ("Export XLSX", Kind::Xlsx),
+                ] {
+                    let view = view.clone();
+                    menu = menu.item(PopupMenuItem::new(label).disabled(!has_result).on_click(
+                        move |_, _, cx: &mut App| {
+                            view.update(cx, |this, cx| this.export_result(kind, cx));
+                        },
+                    ));
+                }
+                menu
             })
+            .into_any_element()
     }
 
     fn render_results_content(
@@ -1050,16 +1082,6 @@ fn page_items(current: usize, total: usize) -> Vec<PageItem> {
     items
 }
 
-/// CSV export filename for a unix timestamp. Split out for tests.
-fn export_filename(stamp: u64) -> String {
-    format!("Kilat-export-{stamp}.csv")
-}
-
-/// XLSX export filename for a unix timestamp. Split out for tests.
-fn export_xlsx_filename(stamp: u64) -> String {
-    format!("Kilat-export-{stamp}.xlsx")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1119,19 +1141,6 @@ mod tests {
             ]
         );
     }
-
-    #[test]
-    fn export_filename_is_stable_and_suffixed() {
-        assert_eq!(export_filename(0), "Kilat-export-0.csv");
-        assert_eq!(
-            export_filename(1_700_000_000),
-            "Kilat-export-1700000000.csv"
-        );
-        assert_eq!(
-            export_xlsx_filename(1_700_000_000),
-            "Kilat-export-1700000000.xlsx"
-        );
-    }
 }
 
 impl Workbench {
@@ -1146,70 +1155,6 @@ impl Workbench {
             state.refresh(cx);
         });
         self.enforce_result_budget(cx);
-    }
-
-    fn export_csv(&mut self, cx: &mut Context<Self>) {
-        let Some(result) = self.active_tab().last_result.clone() else {
-            self.push_message("There are no query results to export.".to_string());
-            self.active_tab_mut().results_tab = ResultsTab::Messages;
-            cx.notify();
-            return;
-        };
-        let csv = to_csv(&result);
-        let filename = export_filename(unix_stamp());
-        let path = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join(&filename);
-        match std::fs::write(&path, csv) {
-            Ok(()) => {
-                self.push_message(format!(
-                    "CSV saved: {} ({} rows)",
-                    path.display(),
-                    result.row_count()
-                ));
-                self.conn.status = format!("Exported {filename}");
-            }
-            Err(err) => {
-                self.push_message(format!("Failed to write CSV: {err}"));
-            }
-        }
-        self.active_tab_mut().results_tab = ResultsTab::Messages;
-        cx.notify();
-    }
-
-    fn export_xlsx(&mut self, cx: &mut Context<Self>) {
-        let Some(result) = self.active_tab().last_result.clone() else {
-            self.push_message("There are no query results to export.".to_string());
-            self.active_tab_mut().results_tab = ResultsTab::Messages;
-            cx.notify();
-            return;
-        };
-        match to_xlsx(&result) {
-            Ok(bytes) => {
-                let filename = export_xlsx_filename(unix_stamp());
-                let path = std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .join(&filename);
-                match std::fs::write(&path, bytes) {
-                    Ok(()) => {
-                        self.push_message(format!(
-                            "XLSX saved: {} ({} rows)",
-                            path.display(),
-                            result.row_count()
-                        ));
-                        self.conn.status = format!("Exported {filename}");
-                    }
-                    Err(err) => {
-                        self.push_message(format!("Failed to write XLSX: {err}"));
-                    }
-                }
-            }
-            Err(err) => {
-                self.push_message(format!("Failed to create XLSX: {err}"));
-            }
-        }
-        self.active_tab_mut().results_tab = ResultsTab::Messages;
-        cx.notify();
     }
 
     pub(crate) fn toggle_plan_node(&mut self, id: i64) {

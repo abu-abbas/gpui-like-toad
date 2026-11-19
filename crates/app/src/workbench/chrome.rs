@@ -291,6 +291,7 @@ impl Workbench {
         let tab = self.active_tab();
         let is_data_tab = !no_active_tab && tab.kind == TabKind::Data;
         let busy = self.conn.busy;
+        let stopped = self.conn.abandoned;
         let mut bar = div()
             .id("toolbar-actions")
             .flex()
@@ -400,8 +401,10 @@ impl Workbench {
                         let view = cx.entity();
                         move |menu, _, _| {
                             let csv_view = view.clone();
+                            let safe_view = view.clone();
                             let xlsx_view = view.clone();
                             let csv_object = object.clone();
+                            let safe_object = object.clone();
                             let xlsx_object = object.clone();
                             menu.item(PopupMenuItem::new("Export CSV").on_click(
                                 move |_, _, cx: &mut App| {
@@ -410,6 +413,19 @@ impl Workbench {
                                     });
                                 },
                             ))
+                            .item(
+                                PopupMenuItem::new("Export CSV (spreadsheet-safe)").on_click(
+                                    move |_, _, cx: &mut App| {
+                                        safe_view.update(cx, |this, cx| {
+                                            this.export_table(
+                                                safe_object.clone(),
+                                                ExportFormat::CsvSpreadsheetSafe,
+                                                cx,
+                                            )
+                                        });
+                                    },
+                                ),
+                            )
                             .item(
                                 PopupMenuItem::new("Export XLSX").on_click(
                                     move |_, _, cx: &mut App| {
@@ -474,8 +490,8 @@ impl Workbench {
                 .small()
                 .ghost()
                 .icon(IconName::Square)
-                .disabled(!busy)
-                .tooltip("Stop (ignore the current operation’s response)")
+                .disabled(!busy || stopped)
+                .tooltip("Stop waiting (the operation keeps running; busy until it finishes)")
                 .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
         );
         if !no_active_tab && !is_data_tab {

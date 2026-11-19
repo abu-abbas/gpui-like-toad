@@ -82,6 +82,10 @@ impl Workbench {
     }
 
     pub(super) fn record_run(&mut self, sql: &str) {
+        // The connection's "Record query history" option is off.
+        if self.conn.access().skip_history {
+            return;
+        }
         store::record_history(&mut self.history, sql, store::now_unix_secs());
         if let Err(err) = store::save_history(&self.history) {
             self.push_message(format!("Failed to save query history: {err}"));
@@ -185,26 +189,37 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Soft-cancel only: bump the generation so the in-flight response is
-    /// dropped when it arrives, and clear the busy state immediately. The
-    /// worker thread itself stays blocked until Oracle returns, and a job
-    /// sent afterwards queues behind it in the worker channel. This is NOT
-    /// true cancellation — Oracle offers no cancel handle through the thin
-    /// driver call in use — and the UI must never claim otherwise.
+    /// Soft-cancel only: Oracle offers no cancel handle through the thin
+    /// driver call in use, so the worker keeps running the operation until
+    /// the database answers. Stop therefore stops *waiting*: the response is
+    /// ignored when it arrives, but the connection stays busy until then so
+    /// the user cannot start another operation (a second write) while the
+    /// first may still complete. The UI must never claim a real cancel.
     pub(super) fn stop(&mut self, cx: &mut Context<Self>) {
-        if !self.conn.busy || matches!(self.conn.pending_op, Some(PendingOp::ApplyEdits)) {
+        if !self.conn.busy
+            || self.conn.abandoned
+            || matches!(self.conn.pending_op, Some(PendingOp::ApplyEdits))
+        {
             return;
         }
         if let Some(cancelled) = self.conn.cancel_script.take() {
             cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        self.conn.op_generation += 1;
-        self.conn.pending_op = None;
         self.conn.pending_sql = None;
-        self.conn.busy = false;
-        self.conn.status = "Stopped waiting for the database.".to_string();
+        if self.conn.pending_op.is_none() {
+            // Nothing reached the worker yet (waiting for the production
+            // confirmation): drop the pending dispatch and free the UI.
+            self.conn.op_generation += 1;
+            self.conn.busy = false;
+            self.conn.status = "Stopped.".to_string();
+            cx.notify();
+            return;
+        }
+        self.conn.abandoned = true;
+        self.conn.status =
+            "Stopped waiting. The database is still working; busy until it answers.".to_string();
         self.push_message(
-            "Stopped waiting for the database. The operation is still running and its response will be ignored.".to_string(),
+            "Stopped waiting for the database. The operation is still running on the server and its response will be ignored. You can run something new once it finishes.".to_string(),
         );
         cx.notify();
     }

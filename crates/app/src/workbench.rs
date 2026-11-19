@@ -38,7 +38,6 @@ use gpui_kit::{
 };
 use ora_core::completion::Catalog;
 use ora_core::credentials::{PasswordAction, SecretString};
-use ora_core::export::{to_csv, to_xlsx};
 use ora_core::sql::{clean_statement, format_sql, statement_at};
 use ora_core::store::{self, HistoryEntry, SavedProfile, ThemePreference};
 use ora_core::{
@@ -73,6 +72,7 @@ mod grid_clipboard;
 mod profiles;
 mod query;
 mod quick_open;
+mod result_export;
 mod results;
 mod results_grid;
 mod settings;
@@ -214,6 +214,11 @@ struct ConnState {
     pending_op: Option<PendingOp>,
     pending_sql: Option<String>,
     op_generation: u64,
+    /// Stop was pressed while the worker is still running the operation.
+    /// `busy` stays set until the worker answers, so the user cannot send a
+    /// second (possibly write) operation on top of one that may still
+    /// complete; the response itself is ignored.
+    abandoned: bool,
     connect_error: Option<String>,
     connection_lost: bool,
     last_connection: Option<LastConnection>,
@@ -253,6 +258,7 @@ impl ConnState {
             pending_op: None,
             pending_sql: None,
             op_generation: 0,
+            abandoned: false,
             connect_error: None,
             connection_lost: false,
             last_connection: None,
@@ -405,6 +411,8 @@ pub struct Workbench {
     /// Messages tab scroll; follows the newest message.
     messages_scroll: ScrollHandle,
     show_empty_workspace: bool,
+    /// SQL result export running in the background, if any.
+    result_export: Option<result_export::ResultExport>,
     /// Demo database is offered in the UI only with ORA_DEMO set (kept for
     /// screenshots and tests; real use connects to Oracle).
     show_demo: bool,
@@ -474,7 +482,7 @@ impl Workbench {
             |this, input, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
                     let text = input.read(cx).value().to_string();
-                    this.set_proxy(&text);
+                    this.set_proxy(&text, cx);
                     cx.notify();
                 }
             },
@@ -511,6 +519,7 @@ impl Workbench {
             plan_collapsed: layout.plan_collapsed,
             messages_scroll: ScrollHandle::new(),
             show_empty_workspace: true,
+            result_export: None,
             show_demo: std::env::var_os("ORA_DEMO").is_some(),
             next_tab_id: 0,
             conn: ConnState::new(1),
@@ -540,13 +549,23 @@ impl Workbench {
     }
 
     pub(crate) fn push_message(&mut self, message: String) {
+        self.push_message_with(message, false);
+    }
+
+    /// A message that quotes user data (cell values): shown in the Info
+    /// panel, never written to `errors.log`.
+    pub(crate) fn push_private_message(&mut self, message: String) {
+        self.push_message_with(message, true);
+    }
+
+    fn push_message_with(&mut self, message: String, private: bool) {
         // With several connections open, say which one a message is from.
         let message = if self.open_conn_count() > 1 {
             format!("[{}] {message}", self.conn.label())
         } else {
             message
         };
-        if crate::error_log::is_error_message(&message) {
+        if crate::error_log::should_log(&message, private) {
             crate::error_log::append(&message);
         }
         self.messages.push(message);
