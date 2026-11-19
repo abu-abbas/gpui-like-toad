@@ -137,7 +137,9 @@ impl Workbench {
                         .icon(IconName::Play)
                         .label("Demo")
                         .disabled(self.conn.busy)
-                        .on_click(cx.listener(|this, _, _, cx| this.connect(true, cx))),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.connect(true, window, cx)),
+                        ),
                 )
             })
             .into_any_element()
