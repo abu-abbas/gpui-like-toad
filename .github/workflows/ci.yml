@@ -77,8 +77,8 @@ jobs:
           key: cargo-ci-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-ci-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.version }}-
       - run: cargo fmt --check
-      - run: cargo clippy -p ora-core -p ora-driver --all-targets --locked -- -D warnings
-      - run: cargo test -p ora-core -p ora-driver --locked
+      - run: cargo clippy -p ora-core -p ora-driver -p sqlite-driver --all-targets --locked -- -D warnings
+      - run: cargo test -p ora-core -p ora-driver -p sqlite-driver --locked
 
   # Kompilasi GUI pertama dan satu-satunya yang terpercaya: VM dev tidak
   # cukup RAM untuk gpui-kit. Job ini juga menjalankan unit test app crate.
