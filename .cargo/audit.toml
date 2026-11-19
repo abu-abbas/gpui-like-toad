@@ -1,0 +1,12 @@
+# Konfigurasi `cargo audit` (dipakai CI di .github/workflows/audit.yml).
+#
+# Tidak ada pengecualian advisory saat ini: advisory zip (rust_xlsxwriter) dan
+# heapless sudah diselesaikan lewat upgrade. Kalau suatu saat perlu `ignore`,
+# tulis per advisory dengan komentar: alasan, pemilik tindak lanjut, tanggal
+# tinjau ulang, mis.
+#
+#   # RUSTSEC-XXXX-NNNN: <alasan jalur kode tidak terpakai>
+#   # pemilik: @abu-abbas, tinjau ulang: 2027-01-31
+#   ignore = ["RUSTSEC-XXXX-NNNN"]
+[advisories]
+ignore = []

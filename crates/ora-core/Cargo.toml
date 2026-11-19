@@ -10,7 +10,7 @@ rust-version.workspace = true
 # XLSX export and `secrecy` only; everything else stays dependency-free so
 # it remains fast to check and test on any machine, including CI and
 # low-memory VMs.
-rust_xlsxwriter = "0.90"
+rust_xlsxwriter = "0.103"
 # Saved passwords travel as `SecretString`: redacted `Debug`, zeroed on
 # drop. Tiny (only depends on `zeroize`).
 secrecy = "0.10"
