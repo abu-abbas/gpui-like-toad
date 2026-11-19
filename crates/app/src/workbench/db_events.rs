@@ -576,3 +576,6 @@ impl Workbench {
         cx.notify();
     }
 }
+
+#[cfg(test)]
+mod tests;
