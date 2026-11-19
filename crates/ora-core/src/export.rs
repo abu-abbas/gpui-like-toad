@@ -460,9 +460,9 @@ mod tests {
         assert_eq!(err, ExportError::Cancelled);
     }
 
-    // Test-only scratch directory; no secrets involved.
-    // nosemgrep: rust.lang.security.temp-dir.temp-dir
     fn scratch(name: &str) -> std::path::PathBuf {
+        // Test-only scratch directory, unique per process; no secrets involved.
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join(format!(
             "gpui-like-toad-export-{}-{name}",
             std::process::id()
