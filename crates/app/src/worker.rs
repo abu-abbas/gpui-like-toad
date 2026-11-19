@@ -39,6 +39,7 @@ impl ExportFormat {
     }
 }
 use ora_driver::ThinClient;
+use sqlite_driver::SqliteClient;
 
 /// Where a connect gets its password. `Saved` is read from the OS keychain
 /// here on the worker thread, so a keychain prompt never blocks the UI and
@@ -386,13 +387,13 @@ fn handle_guarded_job(
 
 /// A fresh, unconnected client for `kind`. Each database engine gets its
 /// own driver crate; this is the only place that picks one.
-fn new_client(kind: DbKind, demo: bool) -> Result<Box<dyn DbClient>, String> {
+fn new_client(kind: DbKind, demo: bool) -> Box<dyn DbClient> {
     if demo {
-        return Ok(Box::new(DemoClient::new()));
+        return Box::new(DemoClient::new());
     }
     match kind {
-        DbKind::Oracle => Ok(Box::new(ThinClient::new())),
-        other => Err(format!("{} belum didukung.", other.label())),
+        DbKind::Oracle => Box::new(ThinClient::new()),
+        DbKind::Sqlite => Box::new(SqliteClient::new()),
     }
 }
 
@@ -408,10 +409,7 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                 Ok(pw) => pw,
                 Err(message) => return Response::Failed(message),
             };
-            let mut new_client = match new_client(profile.kind, demo) {
-                Ok(c) => c,
-                Err(message) => return Response::Failed(message),
-            };
+            let mut new_client = new_client(profile.kind, demo);
             // `password` is zeroed when it drops at the end of this arm.
             match new_client.connect(&profile, password.expose_secret()) {
                 Ok(info) => {
@@ -436,10 +434,7 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                 Ok(pw) => pw,
                 Err(message) => return Response::Tested(Err(message)),
             };
-            let mut probe = match new_client(profile.kind, false) {
-                Ok(c) => c,
-                Err(message) => return Response::Tested(Err(message)),
-            };
+            let mut probe = new_client(profile.kind, false);
             let outcome = probe
                 .connect(&profile, password.expose_secret())
                 .map_err(|e| e.to_string());

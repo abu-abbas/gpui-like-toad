@@ -989,12 +989,13 @@ impl Workbench {
     }
 }
 
-/// Messages are plain strings; ORA-/driver errors and Indonesian failure
+/// Messages are plain strings; ORA-/SQLite driver errors and Indonesian failure
 /// texts ("gagal") are shown in the danger color in the Info strip.
 fn is_error_message(message: &str) -> bool {
     let lower = message.to_lowercase();
     message.contains("ORA-")
         || message.contains("DPY-")
+        || message.starts_with("SQLite:")
         || lower.contains("error")
         || lower.contains("gagal")
         || lower.starts_with("demo:")

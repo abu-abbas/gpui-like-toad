@@ -41,9 +41,9 @@ use ora_core::export::{to_csv, to_xlsx};
 use ora_core::sql::{clean_statement, format_sql, statement_at};
 use ora_core::store::{self, HistoryEntry, SavedProfile, ThemePreference};
 use ora_core::{
-    compose_easy_connect, parse_easy_connect, ConnectionAccess, ConnectionEnvironment,
-    ConnectionProfile, DbInfo, DbKind, Dialect, ObjectKind, PlanNode, QueryResult, SchemaObject,
-    DEFAULT_MAX_ROWS, MAX_PAGE_LIMIT,
+    compose_easy_connect, default_profile_name, parse_easy_connect, ConnectionAccess,
+    ConnectionEnvironment, ConnectionProfile, DbInfo, DbKind, Dialect, ObjectKind, PlanNode,
+    QueryResult, SchemaObject, DEFAULT_MAX_ROWS, MAX_PAGE_LIMIT,
 };
 
 use crate::completion::SqlCompletionProvider;
@@ -76,6 +76,7 @@ mod results;
 mod results_grid;
 mod settings;
 mod sidebar;
+mod sqlite_form;
 mod tabs;
 mod ui_helpers;
 mod updates;

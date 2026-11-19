@@ -164,13 +164,20 @@ impl Workbench {
             .flex_col()
             .gap(px(6.))
             .pt(px(8.))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .px(px(SPACE_2))
-                    .flex_none()
-                    .child(self.schema_picker("schema-select", theme, cx)),
+            // SQLite has one database per file, so there is nothing to pick
+            // unless another file was ATTACHed.
+            .when(
+                self.active_kind().capabilities().schemas || self.conn.schemas.len() > 1,
+                |panel| {
+                    panel.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .px(px(SPACE_2))
+                            .flex_none()
+                            .child(self.schema_picker("schema-select", theme, cx)),
+                    )
+                },
             )
             .child(
                 div()

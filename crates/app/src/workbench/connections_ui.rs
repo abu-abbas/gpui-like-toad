@@ -1,3 +1,4 @@
+use super::sqlite_form::ConnectionType;
 use super::*;
 
 impl Workbench {
@@ -191,7 +192,7 @@ impl Workbench {
             .py(px(SPACE_3));
 
         if !form.show_advanced {
-            let use_tns = form.use_tns;
+            let current = ConnectionType::of(form.kind, form.use_tns);
             let view = cx.entity();
             let connection_type = Button::new("connection-type")
                 .small()
@@ -199,86 +200,93 @@ impl Workbench {
                 .bg(theme.secondary)
                 .h(px(24.))
                 .w_full()
-                .child(select_trigger(
-                    if use_tns { "TNS" } else { "Basic" }.into(),
-                    theme,
-                ))
+                .child(select_trigger(current.label().into(), theme))
                 .dropdown_menu(move |menu, _, _| {
-                    [("Basic", false), ("TNS", true)].into_iter().fold(
-                        menu,
-                        |menu, (label, tns)| {
-                            let view = view.clone();
-                            menu.item(PopupMenuItem::new(label).checked(use_tns == tns).on_click(
-                                move |_, _, cx| {
-                                    view.update(cx, |this, cx| {
-                                        this.connection_form.use_tns = tns;
-                                        cx.notify();
-                                    })
-                                },
-                            ))
-                        },
-                    )
+                    ConnectionType::ALL.into_iter().fold(menu, |menu, option| {
+                        let view = view.clone();
+                        menu.item(
+                            PopupMenuItem::new(option.label())
+                                .checked(option == current)
+                                .on_click(move |_, _, cx| {
+                                    view.update(cx, |this, cx| this.set_connection_type(option, cx))
+                                }),
+                        )
+                    })
                 });
             body = body.child(
                 row()
                     .child(input_field("Connection name", Input::new(&form.name_input)))
                     .child(
                         field("Connection type")
-                            .w(px(130.))
+                            .w(px(150.))
                             .flex_none()
                             .child(connection_type),
                     ),
             );
-            if form.use_tns {
-                body = body.child(
-                    input_field(
-                        "TNS alias / connect descriptor",
-                        Input::new(&form.tns_input),
-                    )
-                    .flex_none(),
-                );
-            } else {
-                body = body.child(
-                    row()
-                        .child(input_field("Host", Input::new(&form.host_input)))
-                        .child(
-                            div()
-                                .flex()
-                                .w(px(72.))
-                                .flex_none()
-                                .child(input_field("Port", Input::new(&form.port_input))),
+            match current {
+                ConnectionType::SqliteFile => {
+                    body = body.child(
+                        row()
+                            .items_end()
+                            .child(input_field("Database file", Input::new(&form.file_input)))
+                            .child(
+                                Button::new("sqlite-browse")
+                                    .small()
+                                    .label("Browse…")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.browse_sqlite_file(window, cx)
+                                    })),
+                            ),
+                    );
+                }
+                ConnectionType::OracleTns => {
+                    body = body.child(
+                        input_field(
+                            "TNS alias / connect descriptor",
+                            Input::new(&form.tns_input),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .w(relative(0.31))
-                                .flex_none()
-                                .child(input_field(
-                                    "Service name",
-                                    Input::new(&form.service_input),
+                        .flex_none(),
+                    );
+                }
+                ConnectionType::OracleBasic => {
+                    body =
+                        body.child(
+                            row()
+                                .child(input_field("Host", Input::new(&form.host_input)))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .w(px(72.))
+                                        .flex_none()
+                                        .child(input_field("Port", Input::new(&form.port_input))),
+                                )
+                                .child(div().flex().w(relative(0.31)).flex_none().child(
+                                    input_field("Service name", Input::new(&form.service_input)),
                                 )),
-                        ),
-                );
+                        );
+                }
             }
-            body = body
-                .child(
-                    row()
-                        .child(input_field("Username", Input::new(&form.user_input)))
-                        .child(input_field(
-                            "Password",
-                            Input::new(&form.password_input).mask_toggle(),
-                        )),
-                )
-                .child(
-                    Checkbox::new("save-password")
-                        .small()
-                        .label("Save password")
-                        .checked(form.save_password)
-                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                            this.connection_form.save_password = *checked;
-                            cx.notify();
-                        })),
-                );
+            if form.kind.capabilities().password {
+                body = body
+                    .child(
+                        row()
+                            .child(input_field("Username", Input::new(&form.user_input)))
+                            .child(input_field(
+                                "Password",
+                                Input::new(&form.password_input).mask_toggle(),
+                            )),
+                    )
+                    .child(
+                        Checkbox::new("save-password")
+                            .small()
+                            .label("Save password")
+                            .checked(form.save_password)
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.connection_form.save_password = *checked;
+                                cx.notify();
+                            })),
+                    );
+            }
         } else {
             body = body.child(
                 div()
@@ -360,7 +368,12 @@ impl Workbench {
                 })
                 .when(access.read_only, |section| {
                     section.child(caption_text(
-                        "Use an Oracle account with read-only grants for database-enforced permissions.".into(),
+                        if caps.password {
+                            "Use an Oracle account with read-only grants for database-enforced permissions."
+                        } else {
+                            "The database file is opened read-only."
+                        }
+                        .into(),
                         theme,
                     ))
                 });
