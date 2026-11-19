@@ -526,6 +526,12 @@ impl Workbench {
         }
     }
 
+    /// Empty the Info / Messages log ("Clear messages").
+    pub(crate) fn clear_messages(&mut self, cx: &mut Context<Self>) {
+        self.messages.clear();
+        cx.notify();
+    }
+
     pub(crate) fn push_message(&mut self, message: String) {
         // With several connections open, say which one a message is from.
         let message = if self.open_conn_count() > 1 {

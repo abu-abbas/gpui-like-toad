@@ -266,6 +266,15 @@ impl Workbench {
                     .child(caption_text(summary, theme))
                     .child(div().flex_1())
                     .child(
+                        Button::new("info-clear")
+                            .small()
+                            .ghost()
+                            .icon(IconName::Trash)
+                            .tooltip("Clear messages")
+                            .disabled(self.messages.is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_messages(cx))),
+                    )
+                    .child(
                         Button::new("info-toggle")
                             .small()
                             .ghost()
