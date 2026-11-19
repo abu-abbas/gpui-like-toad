@@ -124,24 +124,26 @@ impl Workbench {
                 Err(_) => false,
             };
             let _ = view.update(cx, |this, cx| {
-                this.with_conn(conn_id, cx, |this, background, cx| {
-                    if this.conn.op_generation != generation {
-                        return;
-                    }
+                if !this.op_is_current(conn_id, generation) {
+                    return;
+                }
+                // Only the user's active connection may continue; for any
+                // other one the operation is cancelled in place, without
+                // making it active.
+                let proceed = confirmed
+                    && this.conn.id == conn_id
+                    && this.tabs.get(this.active_tab).map(|t| t.id) == tab_id
+                    && this.conn.session.is_some();
+                if proceed {
                     this.conn.busy = false;
-                    if confirmed
-                        && !background
-                        && this.tabs.get(this.active_tab).map(|t| t.id) == tab_id
-                        && this.conn.session.is_some()
-                    {
-                        this.dispatch_db(job, op, true, cx);
-                    } else {
-                        this.conn.pending_sql = None;
-                        this.conn.cancel_script = None;
-                        this.conn.status = "Production operation cancelled.".to_string();
-                        cx.notify();
-                    }
-                });
+                    this.dispatch_db(job, op, true, cx);
+                } else if let Some(conn) = this.conn_mut(conn_id) {
+                    conn.busy = false;
+                    conn.pending_sql = None;
+                    conn.cancel_script = None;
+                    conn.status = "Production operation cancelled.".to_string();
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -173,6 +175,11 @@ impl Workbench {
             // editor text from a response.
             let _ = cx.update_window(handle, |_, window, cx| {
                 view.update(cx, |this, cx| {
+                    // A superseded operation (after Stop, or a newer op)
+                    // is dropped without touching any connection.
+                    if !this.op_is_current(conn_id, generation) {
+                        return;
+                    }
                     this.with_conn(conn_id, cx, |this, background, cx| {
                         this.on_db_response(generation, resp, background, window, cx)
                     })
@@ -209,11 +216,11 @@ impl Workbench {
                     .await;
                 if let Ok(Response::ConnectionLost(reason)) = result {
                     let _ = view.update(cx, |this, cx| {
-                        this.with_conn(id, cx, |this, _, cx| {
-                            if this.conn.op_generation == generation {
-                                this.connection_was_lost(reason, cx);
-                            }
-                        })
+                        if this.op_is_current(id, generation) {
+                            this.with_conn(id, cx, |this, _, cx| {
+                                this.connection_was_lost(reason, cx)
+                            });
+                        }
                     });
                 }
             }

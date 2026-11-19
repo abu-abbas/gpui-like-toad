@@ -136,3 +136,30 @@ fn stop_before_dispatch_frees_connection(cx: &mut TestAppContext) {
         })
         .unwrap();
 }
+
+/// Looking up a parked connection (its generation, its state) never makes
+/// it the active one, and a stale or unknown operation is not current.
+#[gpui_kit::test]
+fn parked_connection_is_reached_without_activating_it(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let window = cx.add_window(Workbench::new);
+    window
+        .update(cx, |this, _window, _cx| {
+            this.conn.op_generation = 4;
+            let mut b = ConnState::new(2);
+            b.op_generation = 9;
+            let a = std::mem::replace(&mut this.conn, b);
+            this.parked.push(a);
+
+            assert!(this.op_is_current(2, 9));
+            assert!(this.op_is_current(1, 4));
+            assert!(!this.op_is_current(1, 5), "superseded operation");
+            assert!(!this.op_is_current(3, 0), "unknown connection");
+
+            this.conn_mut(1).expect("A is parked").status = "touched".to_string();
+            assert_eq!(this.conn.id, 2, "B stays active");
+            assert_eq!(this.conn_by_id(1).unwrap().status, "touched");
+            assert!(this.conn_mut(7).is_none());
+        })
+        .unwrap();
+}
