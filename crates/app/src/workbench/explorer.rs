@@ -256,6 +256,7 @@ fn render_object_row(
 fn object_menu(menu: PopupMenu, view: &Entity<Workbench>, object: &ObjectRef) -> PopupMenu {
     let has_data = schema::has_data(&object.kind);
     let is_table = object.kind == ObjectKind::Table;
+    let is_mview = object.kind == ObjectKind::MaterializedView;
     let item =
         |label: &str,
          icon_name: IconName,
@@ -305,6 +306,14 @@ fn object_menu(menu: PopupMenu, view: &Entity<Workbench>, object: &ObjectRef) ->
             has_data,
             |this, o, _, cx| this.export_table(o, ExportFormat::Xlsx, cx),
         ))
+        .when(is_mview, |menu| {
+            menu.separator().item(item(
+                "Refresh Materialized View",
+                IconName::RefreshCw,
+                true,
+                |this, o, _, cx| this.refresh_materialized_view(o, cx),
+            ))
+        })
         .item(item(
             "Import Data (CSV)",
             IconName::Upload,
@@ -538,6 +547,30 @@ impl Workbench {
 
     /// "Import Data": pick a CSV file whose header names match the table's
     /// columns; rows are inserted without commit.
+    /// `DBMS_MVIEW.REFRESH` for one materialized view. Oracle commits the
+    /// refresh itself. Read Only and production confirmation are applied by
+    /// the worker like for any other write.
+    pub(super) fn refresh_materialized_view(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
+        if self.conn.busy || self.conn.session.is_none() {
+            return;
+        }
+        if self.blocked_by_read_only("materialized view tidak bisa di-refresh", cx) {
+            return;
+        }
+        self.conn.status = format!("Refresh {}.{}...", object.owner, object.name);
+        self.spawn_db(
+            Job::RefreshMaterializedView {
+                owner: object.owner.clone(),
+                name: object.name.clone(),
+            },
+            PendingOp::RefreshMaterializedView {
+                owner: object.owner,
+                name: object.name,
+            },
+            cx,
+        );
+    }
+
     pub(super) fn import_table(&mut self, object: ObjectRef, cx: &mut Context<Self>) {
         if self.conn.busy || self.conn.session.is_none() {
             return;

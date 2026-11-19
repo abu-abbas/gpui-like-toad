@@ -161,6 +161,10 @@ enum PendingOp {
         owner: String,
         name: String,
     },
+    RefreshMaterializedView {
+        owner: String,
+        name: String,
+    },
     Commit,
     Rollback,
 }

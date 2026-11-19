@@ -133,6 +133,32 @@ pub fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
+/// `OWNER.NAME` for DBMS_MVIEW calls: plain upper-case identifiers stay
+/// unquoted (the form every Oracle version accepts), anything else is
+/// quoted to keep its exact case.
+pub fn mview_list_name(owner: &str, name: &str) -> String {
+    let plain = |ident: &str| {
+        !ident.is_empty()
+            && ident.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            && ident.chars().all(|c| {
+                c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '_' | '$' | '#')
+            })
+    };
+    let part = |ident: &str| {
+        if plain(ident) {
+            ident.to_string()
+        } else {
+            quote_ident(ident)
+        }
+    };
+    format!("{}.{}", part(owner), part(name))
+}
+
+/// The statement that refreshes one materialized view; bind `:1` is
+/// [`mview_list_name`]. With no method given Oracle uses the refresh
+/// method the view was defined with.
+pub const REFRESH_MVIEW_SQL: &str = "BEGIN DBMS_MVIEW.REFRESH(:1); END;";
+
 /// Quote a string literal, doubling embedded single quotes.
 fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
@@ -167,6 +193,13 @@ pub fn insert_statement(owner: &str, table: &str, columns: &[String], row: &[Str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mview_names_are_quoted_only_when_needed() {
+        assert_eq!(mview_list_name("HR", "MV_PEGAWAI"), "HR.MV_PEGAWAI");
+        assert_eq!(mview_list_name("hr", "Mv One"), "\"hr\".\"Mv One\"");
+        assert_eq!(mview_list_name("A1", "9X"), "A1.\"9X\"");
+    }
+
     use super::*;
 
     #[test]

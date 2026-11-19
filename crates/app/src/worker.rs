@@ -114,6 +114,11 @@ pub enum Job {
         deletes: Vec<String>,
         inserts: Vec<Vec<(String, String)>>,
     },
+    /// Explorer "Refresh Materialized View": `DBMS_MVIEW.REFRESH`.
+    RefreshMaterializedView {
+        owner: String,
+        name: String,
+    },
     Commit,
     Rollback,
     ListSchemas,
@@ -174,6 +179,7 @@ impl Job {
             Self::UpdateCells { .. } => Some("Apply table changes"),
             Self::ImportCsv { .. } => Some("Import CSV rows"),
             Self::Explain { .. } => Some("Write to the Oracle plan table"),
+            Self::RefreshMaterializedView { .. } => Some("Refresh materialized view"),
             Self::Commit => Some("Commit changes"),
             Self::Rollback => Some("Roll back changes"),
             _ => None,
@@ -580,6 +586,16 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             },
             None => Response::Failed("not connected".to_string()),
         },
+        Job::RefreshMaterializedView { owner, name } => match client.as_mut() {
+            Some(client) => match client.execute_binds(
+                ora_core::import::REFRESH_MVIEW_SQL,
+                &[ora_core::import::mview_list_name(&owner, &name)],
+            ) {
+                Ok(_) => Response::Executed(0),
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
         Job::ImportCsv { owner, name, path } => match client.as_mut() {
             Some(client) => match import_csv(client.as_mut(), &owner, &name, &path) {
                 Ok(rows) => Response::Imported(rows),
@@ -671,6 +687,24 @@ fn import_csv(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn refreshing_a_materialized_view_is_a_guarded_write() {
+        let job = Job::RefreshMaterializedView {
+            owner: "HR".into(),
+            name: "MV_X".into(),
+        };
+        assert_eq!(job.protected_operation(), Some("Refresh materialized view"));
+        let mut client: Option<Box<dyn DbClient>> = None;
+        let mut access = ConnectionAccess {
+            read_only: true,
+            ..ConnectionAccess::default()
+        };
+        assert!(matches!(
+            handle_guarded_job(job, false, &mut client, &mut access),
+            Response::Failed(message) if message.contains("Read Only")
+        ));
+    }
+
     use super::*;
 
     fn demo() -> DemoClient {
