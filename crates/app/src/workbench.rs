@@ -95,6 +95,8 @@ actions!(
     [
         RunQuery,
         RunCurrent,
+        ToggleComment,
+        FormatSql,
         QuickOpenTable,
         CheckForUpdates,
         OpenSettings,
@@ -330,6 +332,9 @@ struct QueryTab {
     /// connection. A tab whose connection was closed keeps the old id and
     /// refuses to run until a connection is picked for it.
     conn: Option<u64>,
+    /// Editor text as last saved to a file (or as first generated); a SQL
+    /// tab whose text differs holds unsaved work.
+    saved_text: String,
 }
 
 impl QueryTab {
@@ -375,7 +380,17 @@ impl QueryTab {
             results_tab: ResultsTab::Results,
             data: None,
             conn: None,
+            saved_text: default_sql.to_string(),
         }
+    }
+
+    /// A SQL tab with text that was never saved: closing it loses work.
+    fn has_unsaved_script(&self, cx: &App) -> bool {
+        if self.data.is_some() {
+            return false;
+        }
+        let text = self.editor.read(cx).value();
+        !text.trim().is_empty() && text.as_ref() != self.saved_text
     }
 }
 
@@ -633,6 +648,14 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &RunCurrent, _, cx| {
                 if !this.settings.open && !this.update_check_open() {
                     this.run_current(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleComment, window, cx| {
+                this.toggle_comment(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FormatSql, window, cx| {
+                if this.sql_editor_usable() {
+                    this.format_editor(window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {

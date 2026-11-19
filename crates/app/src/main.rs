@@ -117,6 +117,10 @@ fn main() {
             KeyBinding::new("cmd-enter", workbench::RunQuery, Some("Workbench")),
             KeyBinding::new("ctrl-enter", workbench::RunQuery, Some("Workbench")),
             KeyBinding::new("f5", workbench::RunQuery, Some("Workbench")),
+            KeyBinding::new("cmd-/", workbench::ToggleComment, Some("Workbench")),
+            KeyBinding::new("ctrl-/", workbench::ToggleComment, Some("Workbench")),
+            KeyBinding::new("cmd-shift-f", workbench::FormatSql, Some("Workbench")),
+            KeyBinding::new("ctrl-shift-f", workbench::FormatSql, Some("Workbench")),
             KeyBinding::new("cmd-p", workbench::QuickOpenTable, Some("Workbench")),
             KeyBinding::new("ctrl-p", workbench::QuickOpenTable, Some("Workbench")),
             // Open the SQL autocomplete popup by hand (it also opens by
@@ -179,6 +183,9 @@ fn install_menus(cx: &mut App) {
             MenuItem::os_action("Copy", Copy, OsAction::Copy),
             MenuItem::os_action("Paste", Paste, OsAction::Paste),
             MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
+            MenuItem::separator(),
+            MenuItem::action("Toggle Comment", workbench::ToggleComment),
+            MenuItem::action("Beautify SQL", workbench::FormatSql),
         ]),
         Menu::new("View").items([MenuItem::action("Toggle Full Screen", ToggleFullScreen)]),
         Menu::new("Connection").items([

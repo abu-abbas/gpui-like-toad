@@ -158,7 +158,9 @@ impl Workbench {
                 menu.min_w(px(200.))
                     .item(
                         PopupMenuItem::new("Close").on_click(move |_, _, cx: &mut App| {
-                            close.update(cx, |this, cx| this.close_tab(ix, cx));
+                            close.update(cx, |this, cx| {
+                                this.request_close_where(|i, _| i == ix, cx)
+                            });
                         }),
                     )
                     .item(
@@ -166,7 +168,7 @@ impl Workbench {
                             .disabled(tab_count < 2)
                             .on_click(move |_, _, cx: &mut App| {
                                 others.update(cx, |this, cx| {
-                                    this.close_tabs_where(|i, _, _| i != ix, cx)
+                                    this.request_close_where(|i, _| i != ix, cx)
                                 });
                             }),
                     )
@@ -175,7 +177,7 @@ impl Workbench {
                             .disabled(ix + 1 >= tab_count)
                             .on_click(move |_, _, cx: &mut App| {
                                 right.update(cx, |this, cx| {
-                                    this.close_tabs_where(|i, _, _| i > ix, cx)
+                                    this.request_close_where(|i, _| i > ix, cx)
                                 });
                             }),
                     )
@@ -188,7 +190,7 @@ impl Workbench {
                     )
                     .item(
                         PopupMenuItem::new("Close All").on_click(move |_, _, cx: &mut App| {
-                            all.update(cx, |this, cx| this.close_tabs_where(|_, _, _| true, cx));
+                            all.update(cx, |this, cx| this.request_close_where(|_, _| true, cx));
                         }),
                     )
             })
@@ -268,7 +270,9 @@ impl Workbench {
                     .mr(px(SPACE_1))
                     .rounded(px(RADIUS_SM))
                     .hover(|this| this.bg(theme.danger).text_color(theme.danger_foreground))
-                    .on_click(cx.listener(move |this, _, _, cx| this.close_tab(ix, cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.request_close_where(|i, _| i == ix, cx)
+                    }))
                     .child(icon(IconName::X, 12., theme.muted_foreground)),
             )
     }
@@ -301,22 +305,35 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Closing the last tab returns to the empty workspace.
-    fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if ix >= self.tabs.len() {
+    /// Close the tabs picked by `pick(ix, tab)`. SQL tabs with unsaved
+    /// text first raise the Save / Don't Save / Cancel dialog; closing
+    /// the last tab returns to the empty workspace.
+    pub(super) fn request_close_where(
+        &mut self,
+        pick: impl Fn(usize, &QueryTab) -> bool,
+        cx: &mut Context<Self>,
+    ) {
+        let ids: Vec<u64> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(ix, t)| pick(*ix, t))
+            .map(|(_, t)| t.id)
+            .collect();
+        if ids.is_empty() {
             return;
         }
-        self.tabs.remove(ix);
-        if self.tabs.is_empty() {
-            self.active_tab = 0;
-            self.show_empty_workspace = true;
-        } else if self.active_tab >= self.tabs.len() {
-            self.active_tab = self.tabs.len() - 1;
-        } else if ix < self.active_tab {
-            self.active_tab -= 1;
+        let scripts: Vec<(u64, String)> = self
+            .tabs
+            .iter()
+            .filter(|t| ids.contains(&t.id) && t.has_unsaved_script(cx))
+            .map(|t| (t.id, t.title.clone()))
+            .collect();
+        if scripts.is_empty() {
+            self.close_tabs_where(|_, t, _| ids.contains(&t.id), cx);
+            return;
         }
-        // The tab now showing may run on another connection.
-        self.follow_tab_conn(cx);
+        self.disconnect_prompt = Some(conns::DisconnectPrompt::close_tabs(ids, scripts));
         cx.notify();
     }
 
@@ -359,7 +376,7 @@ impl Workbench {
     fn tab_is_saved(tab: &QueryTab, cx: &App) -> bool {
         match &tab.data {
             Some(d) => d.edits.is_empty() && !d.has_staged(),
-            None => tab.editor.read(cx).value().trim().is_empty(),
+            None => !tab.has_unsaved_script(cx),
         }
     }
 
@@ -383,6 +400,45 @@ impl Workbench {
     ) {
         self.add_tab(window, cx);
         let editor = self.active_tab().editor.clone();
+        self.active_tab_mut().saved_text = sql.clone();
         editor.update(cx, |state, cx| state.set_value(sql, window, cx));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::TestAppContext;
+
+    #[gpui_kit::test]
+    fn closing_a_tab_with_unsaved_sql_asks_first(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let window = cx.add_window(Workbench::new);
+        window
+            .update(cx, |this, window, cx| {
+                this.add_tab(window, cx);
+                let id = this.active_tab().id;
+                // Empty tab: closes without a dialog.
+                this.request_close_where(|i, _| i == 0, cx);
+                assert!(this.disconnect_prompt.is_none());
+                assert!(this.tabs.is_empty());
+
+                this.add_tab(window, cx);
+                let id2 = this.active_tab().id;
+                assert_ne!(id, id2);
+                let editor = this.active_tab().editor.clone();
+                editor.update(cx, |s, cx| s.set_value("select 1 from dual", window, cx));
+                this.request_close_where(|i, _| i == 0, cx);
+                assert!(this.disconnect_prompt.is_some(), "unsaved text must prompt");
+                assert_eq!(this.tabs.len(), 1);
+
+                // Once saved, closing is silent.
+                this.disconnect_prompt = None;
+                this.tabs[0].saved_text = "select 1 from dual".to_string();
+                this.request_close_where(|i, _| i == 0, cx);
+                assert!(this.disconnect_prompt.is_none());
+                assert!(this.tabs.is_empty());
+            })
+            .unwrap();
     }
 }
