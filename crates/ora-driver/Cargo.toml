@@ -8,7 +8,8 @@ rust-version.workspace = true
 
 [dependencies]
 ora-core = { path = "../ora-core" }
-# Pinned git revision: every `oracledb` version on crates.io is yanked as of
-# 2026-11-16 (the independent crate is being handed over to Oracle), so the
-# official repo is currently the only source. Revision verified 2026-11-16.
-oracledb = { git = "https://github.com/oracle/rust-oracledb", rev = "b1adfff18b7240bfbe82b5148c0f114c6471feb6" }
+# Vendored copy of oracle/rust-oracledb at rev b1adfff (every `oracledb`
+# version on crates.io is yanked as of 2026-11-16), patched to log in to
+# accounts that only have a 10G password verifier. See
+# vendor/oracledb/PATCHES.md.
+oracledb = { path = "../../vendor/oracledb" }

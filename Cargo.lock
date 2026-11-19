@@ -1542,6 +1542,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "des"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "916a94e407b54f9034d71dd748234cd1e516ced6284009906ae246f177eafe5a"
+dependencies = [
+ "cipher 0.5.2",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5100,13 +5109,13 @@ dependencies = [
 [[package]]
 name = "oracledb"
 version = "26.0.0-beta.7"
-source = "git+https://github.com/oracle/rust-oracledb?rev=b1adfff18b7240bfbe82b5148c0f114c6471feb6#b1adfff18b7240bfbe82b5148c0f114c6471feb6"
 dependencies = [
  "aes 0.9.4",
  "base16ct",
  "base64ct",
  "cbc 0.2.1",
  "chrono",
+ "des",
  "md-5 0.11.0",
  "pbkdf2 0.13.0",
  "pkcs8",
