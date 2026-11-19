@@ -330,6 +330,7 @@ impl Workbench {
                 self.conn.current_schema = None;
                 self.conn.connect_error = None;
                 self.connection_form.show_connection_form = false;
+                self.scrub_password_input(window, cx);
                 self.conn.status = format!("Connected as {}.", info.user);
                 self.push_message(format!(
                     "Connected: {} @ {} ({})",

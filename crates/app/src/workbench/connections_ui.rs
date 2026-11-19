@@ -451,9 +451,9 @@ impl Workbench {
                     .tooltip("Remove connection")
                     .icon(IconName::Trash)
                     .danger()
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         this.remove_profile(ix, cx);
-                        this.close_connection_dialog(cx);
+                        this.close_connection_dialog(window, cx);
                     })),
             );
         }
@@ -464,7 +464,9 @@ impl Workbench {
                     .ghost()
                     .min_w(px(72.))
                     .label("Cancel")
-                    .on_click(cx.listener(|this, _, _, cx| this.close_connection_dialog(cx))),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.close_connection_dialog(window, cx)),
+                    ),
             )
             .child(
                 action("connect")
@@ -480,7 +482,7 @@ impl Workbench {
                     )
                     .primary()
                     .disabled(self.conn.busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.connect(false, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.connect(false, window, cx))),
             );
         let card = div()
             .id("connection-dialog")
@@ -524,9 +526,9 @@ impl Workbench {
                             .size(px(28.))
                             .rounded(px(RADIUS_MD))
                             .hover(|this| this.bg(theme.secondary))
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.close_connection_dialog(cx)),
-                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_connection_dialog(window, cx)
+                            }))
                             .child(icon(IconName::X, 16., theme.muted_foreground)),
                     ),
             )

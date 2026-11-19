@@ -18,7 +18,9 @@ use std::sync::Mutex;
 
 pub use secrecy::{ExposeSecret, SecretString};
 
+use crate::model::parse_easy_connect;
 use crate::store::SavedProfile;
+use crate::DbKind;
 
 /// Service name of every keychain entry this app writes.
 pub const KEYCHAIN_SERVICE: &str = "gpui-like-toad";
@@ -90,6 +92,40 @@ pub fn saved_password(
         return Ok(None);
     }
     store.get(&profile.id)
+}
+
+/// Whether a saved password may be used for `kind` / `username` /
+/// `connect_string`, i.e. the form still points at the database and login
+/// the password was saved for. A keychain entry is keyed by profile id
+/// only, so without this check editing a profile's host, service or
+/// username would send the old password to the new target.
+///
+/// Easy Connect strings compare by parts (host and service ignore case,
+/// the port compares as a number), so `DB:01521/x` matches `db:1521/X`.
+/// Anything else (TNS aliases, descriptors, SQLite paths) must match
+/// exactly after trimming. Usernames must match exactly: a change in case
+/// can be a different (quoted) Oracle user, so it asks again.
+pub fn same_credential_target(
+    saved: &SavedProfile,
+    kind: DbKind,
+    username: &str,
+    connect_string: &str,
+) -> bool {
+    saved.kind == kind
+        && saved.username.trim() == username.trim()
+        && same_connect_target(&saved.connect_string, connect_string)
+}
+
+fn same_connect_target(a: &str, b: &str) -> bool {
+    match (parse_easy_connect(a), parse_easy_connect(b)) {
+        (Some((host_a, port_a, svc_a)), Some((host_b, port_b, svc_b))) => {
+            host_a.eq_ignore_ascii_case(&host_b)
+                && port_a.parse::<u32>().ok() == port_b.parse::<u32>().ok()
+                && svc_a.eq_ignore_ascii_case(&svc_b)
+        }
+        (None, None) => a.trim() == b.trim(),
+        _ => false,
+    }
 }
 
 /// In-memory store for tests and for running without an OS keychain.
@@ -227,5 +263,101 @@ mod tests {
     fn secret_debug_is_redacted() {
         let secret = pw("hunter2");
         assert!(!format!("{secret:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn credential_target_matches_same_database_and_user() {
+        let saved = profile("p1", true);
+        assert!(same_credential_target(
+            &saved,
+            DbKind::Oracle,
+            "hr",
+            "db:1521/X"
+        ));
+        // Spelling differences of the same Easy Connect target.
+        assert!(same_credential_target(
+            &saved,
+            DbKind::Oracle,
+            " hr ",
+            "DB:01521/x"
+        ));
+        assert!(same_credential_target(
+            &saved,
+            DbKind::Oracle,
+            "hr",
+            "//db:1521/X"
+        ));
+    }
+
+    #[test]
+    fn credential_target_changes_with_host_port_service_or_user() {
+        let saved = profile("p1", true);
+        assert!(!same_credential_target(
+            &saved,
+            DbKind::Oracle,
+            "hr",
+            "other:1521/X"
+        ));
+        assert!(!same_credential_target(
+            &saved,
+            DbKind::Oracle,
+            "hr",
+            "db:1522/X"
+        ));
+        assert!(!same_credential_target(
+            &saved,
+            DbKind::Oracle,
+            "hr",
+            "db:1521/Y"
+        ));
+        assert!(!same_credential_target(
+            &saved,
+            DbKind::Oracle,
+            "hr",
+            "db:1521"
+        ));
+        assert!(!same_credential_target(
+            &saved,
+            DbKind::Oracle,
+            "scott",
+            "db:1521/X"
+        ));
+        assert!(!same_credential_target(
+            &saved,
+            DbKind::Oracle,
+            "HR",
+            "db:1521/X"
+        ));
+        assert!(!same_credential_target(
+            &saved,
+            DbKind::Sqlite,
+            "hr",
+            "db:1521/X"
+        ));
+        // Switching to a TNS alias or descriptor is a different target.
+        assert!(!same_credential_target(
+            &saved,
+            DbKind::Oracle,
+            "hr",
+            "ORCL"
+        ));
+    }
+
+    #[test]
+    fn credential_target_tns_compares_exactly() {
+        let mut saved = profile("p1", true);
+        saved.connect_string = "(DESCRIPTION=(ADDRESS=(HOST=db)(PORT=1521)))".into();
+        assert!(same_credential_target(
+            &saved,
+            DbKind::Oracle,
+            "hr",
+            " (DESCRIPTION=(ADDRESS=(HOST=db)(PORT=1521))) "
+        ));
+        assert!(!same_credential_target(
+            &saved,
+            DbKind::Oracle,
+            "hr",
+            "(DESCRIPTION=(ADDRESS=(HOST=evil)(PORT=1521)))"
+        ));
     }
 }

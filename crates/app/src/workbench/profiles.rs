@@ -25,9 +25,12 @@ pub(super) struct ConnectionForm {
     pub(super) kind: DbKind,
     pub(super) access: ConnectionAccess,
     pub(super) editing_profile: Option<usize>,
-    /// Whether the connection dialog (modal) is open. Closing it never
-    /// clears the inputs: the form keeps its input entities.
+    /// Whether the connection dialog (modal) is open. Closing it keeps
+    /// the other inputs but empties the password field.
     pub(super) show_connection_form: bool,
+    /// The dialog was hidden where no `Window` was at hand (disconnect):
+    /// the next render empties the password field.
+    pub(super) scrub_password: bool,
 }
 
 impl ConnectionForm {
@@ -69,6 +72,7 @@ impl ConnectionForm {
             access: ConnectionAccess::default(),
             editing_profile: None,
             show_connection_form: false,
+            scrub_password: false,
         }
     }
 }
@@ -86,24 +90,79 @@ impl Workbench {
         )
     }
 
+    /// The profile being edited, when it has a password in the keychain.
+    fn editing_saved_password_profile(&self) -> Option<&SavedProfile> {
+        self.connection_form
+            .editing_profile
+            .and_then(|ix| self.profiles.get(ix))
+            .filter(|p| p.save_password)
+    }
+
+    /// True when the dialog edits a profile with a saved password but the
+    /// host, port, service/TNS entry or username in the form no longer
+    /// match it. The keychain entry belongs to the old target then, so it
+    /// must not be sent anywhere until a new password is typed. Renaming
+    /// the profile or moving it to another folder keeps the target.
+    pub(super) fn saved_password_target_changed(&self, cx: &App) -> bool {
+        let Some(profile) = self.editing_saved_password_profile() else {
+            return false;
+        };
+        let username = Self::input_text(&self.connection_form.user_input, cx);
+        let connect_string = self.form_connect_string(cx);
+        !ora_core::credentials::same_credential_target(
+            profile,
+            self.connection_form.kind,
+            &username,
+            &connect_string,
+        )
+    }
+
+    fn password_field_blank(&self, cx: &App) -> bool {
+        self.connection_form
+            .password_input
+            .read(cx)
+            .value()
+            .is_empty()
+    }
+
     /// Password for a connect/test from the dialog: what was typed, or the
     /// keychain entry when the field is blank and the profile being edited
-    /// has a saved password.
-    pub(super) fn dialog_password(&self, cx: &App) -> Password {
-        let typed = self.typed_password(cx);
-        if ora_core::credentials::ExposeSecret::expose_secret(&typed).is_empty() {
-            if let Some(profile) = self
-                .connection_form
-                .editing_profile
-                .and_then(|ix| self.profiles.get(ix))
-                .filter(|p| p.save_password && self.connection_form.save_password)
-            {
-                return Password::Saved {
+    /// has a saved password for the same target. `None` when the field is
+    /// blank but the target changed: the caller asks for a new password
+    /// (see [`TARGET_CHANGED`]) instead of reusing the old one.
+    pub(super) fn dialog_password(&self, cx: &App) -> Option<Password> {
+        if self.password_field_blank(cx) && self.connection_form.save_password {
+            if let Some(profile) = self.editing_saved_password_profile() {
+                if self.saved_password_target_changed(cx) {
+                    return None;
+                }
+                return Some(Password::Saved {
                     profile_id: profile.id.clone(),
-                };
+                });
             }
         }
-        Password::Typed(typed)
+        Some(Password::Typed(self.typed_password(cx)))
+    }
+
+    /// Show [`TARGET_CHANGED`] in the dialog.
+    pub(super) fn ask_password_for_new_target(&mut self, cx: &mut Context<Self>) {
+        self.connection_form.show_advanced = false;
+        self.connection_form.form_notice = Some((true, TARGET_CHANGED.to_string()));
+        cx.notify();
+    }
+
+    /// Empty the password field and its undo history (`set_value` clears
+    /// both), so a typed password does not stay in the hidden dialog.
+    pub(super) fn scrub_password_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.connection_form.scrub_password = false;
+        if !self.password_field_blank(cx) {
+            Self::set_input(
+                &self.connection_form.password_input.clone(),
+                String::new(),
+                window,
+                cx,
+            );
+        }
     }
 
     /// Run a keychain write/delete off the UI thread; report failures in
@@ -401,8 +460,9 @@ impl Workbench {
         cx.notify();
     }
 
-    pub(super) fn close_connection_dialog(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_connection_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.connection_form.show_connection_form = false;
+        self.scrub_password_input(window, cx);
         cx.notify();
     }
 
@@ -431,6 +491,16 @@ impl Workbench {
             self.connection_form.show_advanced = false;
             self.connection_form.form_notice = Some((true, FORM_INCOMPLETE.to_string()));
             cx.notify();
+            return false;
+        }
+        // Keeping the saved password ("Save password" ticked, field blank)
+        // for a profile whose target changed would bind the old password
+        // to the new database or user.
+        if self.connection_form.save_password
+            && self.password_field_blank(cx)
+            && self.saved_password_target_changed(cx)
+        {
+            self.ask_password_for_new_target(cx);
             return false;
         }
         let name = Self::input_text(&self.connection_form.name_input, cx);
@@ -520,6 +590,10 @@ impl Workbench {
 }
 
 pub(super) const FORM_INCOMPLETE: &str = "Enter a username and a host or TNS entry.";
+
+/// Shown when a profile with a saved password now points at another
+/// host, port, service or username and the password field is blank.
+pub(super) const TARGET_CHANGED: &str = "The host, port, service or username changed. Type the password for this connection; the saved one is only used for the original target.";
 
 impl Workbench {
     pub(super) fn export_connections(&self, cx: &mut Context<Self>) {
