@@ -86,3 +86,53 @@ fn query_finishes_after_switching_connection(cx: &mut TestAppContext) {
         })
         .unwrap();
 }
+
+/// Stop only stops waiting: the connection stays busy (so a second write
+/// cannot be sent) until the worker answers, and that answer is ignored.
+#[gpui_kit::test]
+fn stop_keeps_connection_busy_until_worker_answers(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let window = cx.add_window(Workbench::new);
+    window
+        .update(cx, |this, window, cx| {
+            this.conn.session = Some(session("ALPHA"));
+            this.add_tab(window, cx);
+            this.conn.op_generation = 3;
+            this.conn.pending_op = Some(PendingOp::Run);
+            this.conn.busy = true;
+
+            this.stop(cx);
+            assert!(this.conn.busy, "still busy after Stop");
+            assert!(this.conn.abandoned);
+            // A second Stop is a no-op.
+            this.stop(cx);
+            assert!(this.conn.busy);
+
+            // The worker answers; the result is dropped, a write is noted.
+            this.on_db_response(3, Ok(Response::Executed(1)), false, window, cx);
+            assert!(!this.conn.busy);
+            assert!(!this.conn.abandoned);
+            assert!(this.conn.pending_op.is_none());
+            assert!(this.conn.uncommitted);
+            assert!(this.active_tab().last_result.is_none());
+        })
+        .unwrap();
+}
+
+/// Stop while only waiting for the production confirmation frees the UI:
+/// nothing reached the worker.
+#[gpui_kit::test]
+fn stop_before_dispatch_frees_connection(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let window = cx.add_window(Workbench::new);
+    window
+        .update(cx, |this, window, cx| {
+            this.conn.session = Some(session("ALPHA"));
+            this.add_tab(window, cx);
+            this.conn.busy = true;
+            this.stop(cx);
+            assert!(!this.conn.busy);
+            assert!(!this.conn.abandoned);
+        })
+        .unwrap();
+}
