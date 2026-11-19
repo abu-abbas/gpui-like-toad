@@ -198,7 +198,7 @@ impl Workbench {
             .flex_col()
             .items_center()
             .pt(px(96.))
-            .bg(gpui_kit::hsla(0., 0., 0., 0.35))
+            .bg(crate::theme::modal_scrim(theme))
             .occlude()
             .on_click(cx.listener(|this, _, _, cx| this.close_quick_open(cx)))
             .child(card)

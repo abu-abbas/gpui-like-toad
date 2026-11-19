@@ -288,14 +288,20 @@ impl DbClient for ThinClient {
                 // A materialized view is listed twice by the dictionary: as
                 // MATERIALIZED VIEW and as its container TABLE. Hide the
                 // container table so the MV shows up in its own category only.
-                "SELECT o.owner, o.object_name, o.object_type FROM all_objects o \
+                // Database links are not in ALL_OBJECTS at all; they come from
+                // ALL_DB_LINKS (own links plus PUBLIC ones, so only the
+                // schema's own are kept).
+                "SELECT owner, object_name, object_type FROM (\
+                 SELECT o.owner, o.object_name, o.object_type FROM all_objects o \
                  WHERE o.owner = :1 AND o.object_type IN \
-                 ('TABLE','VIEW','MATERIALIZED VIEW','INDEX','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','TRIGGER','SYNONYM','TYPE','DATABASE LINK') \
+                 ('TABLE','VIEW','MATERIALIZED VIEW','INDEX','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','TRIGGER','SYNONYM','TYPE') \
                  AND NOT (o.object_type = 'TYPE' AND o.object_name LIKE 'SYS\\_PLSQL\\_%' ESCAPE '\\') \
                  AND NOT (o.object_type = 'TABLE' AND EXISTS \
                    (SELECT 1 FROM all_mviews m WHERE m.owner = o.owner AND m.mview_name = o.object_name)) \
-                 ORDER BY o.object_type, o.object_name",
-                &[&owner_param],
+                 UNION ALL \
+                 SELECT l.owner, l.db_link, 'DATABASE LINK' FROM all_db_links l WHERE l.owner = :2) \
+                 ORDER BY object_type, object_name",
+                &[&owner_param, &owner_param],
             )
             .map_err(db_err)?;
         let mut objects = Vec::new();

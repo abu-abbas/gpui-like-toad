@@ -121,6 +121,16 @@ pub fn empty_hint(theme: &Theme) -> Hsla {
     theme.background.blend(theme.muted_foreground.opacity(0.66))
 }
 
+/// Backdrop behind every modal (connection dialog, prompts, Quick Open).
+/// Kept light so the app stays readable behind the dialog: the old 35 to
+/// 45% black turned a light theme into one flat grey, which on Windows
+/// (custom title bar included) looked like the whole window was broken.
+/// Dark themes need a bit more to separate the card from the background.
+pub fn modal_scrim(theme: &Theme) -> Hsla {
+    let alpha = if theme.mode.is_dark() { 0.32 } else { 0.16 };
+    gpui_kit::hsla(0., 0., 0., alpha)
+}
+
 fn hex(value: u32) -> Hsla {
     Hsla::from(rgb(value))
 }

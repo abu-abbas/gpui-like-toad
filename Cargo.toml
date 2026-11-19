@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/ora-core", "crates/ora-driver", "crates/app"]
+# Patched copy of oracle/rust-oracledb (see vendor/oracledb/PATCHES.md).
+exclude = ["vendor/oracledb"]
 
 [workspace.package]
 edition = "2021"

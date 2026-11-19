@@ -1,3 +1,11 @@
+// Windows: link release builds for the GUI subsystem so Explorer does not
+// open a console window next to the app (closing that console killed the
+// app too). Debug builds keep the console for logs. Without a console,
+// println!/eprintln! are silently dropped by std (no panic), panics still
+// land in crash.log, and `--version` still prints when stdout is redirected
+// (e.g. `$(app --version)` in the release smoke test).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 /// Display name shown to people: window title, macOS app menu, Home and
 /// About. A macro (not a const) so it can be used inside `concat!`.
 /// Crate/binary name, config directory, bundle identifier and keychain
