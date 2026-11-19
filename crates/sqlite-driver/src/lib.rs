@@ -113,7 +113,6 @@ pub(crate) fn fetch_rows(
     bind_all(&mut stmt, binds)?;
     let columns: Vec<ColumnInfo> = stmt
         .columns()
-        .iter()
         .map(|c| ColumnInfo {
             name: c.name().to_string(),
             data_type: c.decl_type().unwrap_or("").to_ascii_uppercase(),
