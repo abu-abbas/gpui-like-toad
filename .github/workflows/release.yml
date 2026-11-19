@@ -10,8 +10,9 @@
 # sampai dibuka sekali lewat klik-kanan -> Open. macOS juga menerbitkan
 # .dmg berisi .app + symlink Applications (tinggal drag-and-drop). Bundel
 # .app diberi tanda tangan ad-hoc. Setiap rilis juga membawa SHA256SUMS dan
-# (kalau secret MINISIGN_SECRET_KEY diisi) file .minisig per aset, untuk
-# verifikasi update otomatis; lihat docs/release-signing.md.
+# file .minisig per aset (wajib: tanpa secret MINISIGN_SECRET_KEY yang
+# cocok dengan release-key.pub, workflow berhenti sebelum build), untuk
+# verifikasi Download dan Update Now; lihat docs/release-signing.md.
 name: Release
 
 on:
@@ -38,12 +39,28 @@ env:
   VERSION: ${{ github.ref_type == 'tag' && github.ref_name || inputs.version || format('0.1.{0}', github.run_number) }}
 
 jobs:
+  # Cek kunci tanda tangan dulu, sebelum build 3 OS: rilis tanpa tanda
+  # tangan (atau dengan kunci lain) akan ditolak app, jadi tidak boleh
+  # terbit sama sekali.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Cek MINISIGN_SECRET_KEY cocok dengan release-key.pub
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          sudo apt-get install -y minisign
+          .github/scripts/check-release-key.sh release-key.pub "$RUNNER_TEMP/release.key"
+          rm -f "$RUNNER_TEMP/release.key" "$RUNNER_TEMP/release.key.pub"
+
   # Rilis berhenti kalau ada advisory yang gagal di audit dependency.
   audit:
     uses: ./.github/workflows/audit.yml
 
   build:
-    needs: audit
+    needs: [preflight, audit]
     strategy:
       fail-fast: false
       matrix:
@@ -243,37 +260,31 @@ jobs:
       - name: Checksum dan tanda tangan minisign
         env:
           # Kunci rahasia minisign TANPA password (minisign -G -W); isi file
-          # .key-nya disimpan sebagai secret repo. Kalau belum diisi, langkah
-          # tanda tangan dilewati (checksum tetap dibuat) supaya rilis tetap
-          # jalan. Kunci publiknya di-commit sebagai release-key.pub.
+          # .key-nya disimpan sebagai secret repo. Wajib: kalau kosong atau
+          # tidak cocok dengan release-key.pub, job berhenti di sini dan
+          # rilis tidak diterbitkan.
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           ls -la out/
           test "$(ls out/* | wc -l)" -eq 5
+          sudo apt-get install -y minisign
+          key="$RUNNER_TEMP/release.key"
+          .github/scripts/check-release-key.sh release-key.pub "$key"
+          trap 'rm -f "$key" "$key.pub"' EXIT
+          VERSION="${VERSION#v}"
           cd out
           sha256sum Kilat-* > SHA256SUMS
           cat SHA256SUMS
-          if [ -n "$MINISIGN_SECRET_KEY" ]; then
-            sudo apt-get install -y minisign
-            printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/release.key"
-            # Kunci publik diturunkan dari kunci rahasia, lalu dipakai
-            # memverifikasi tiap tanda tangan. Kalau release-key.pub di repo
-            # berbeda, beri peringatan: app akan menolak update.
-            minisign -R -s "$RUNNER_TEMP/release.key" -p "$RUNNER_TEMP/release.pub"
-            if [ -f ../release-key.pub ] && ! diff -q <(tail -n 1 ../release-key.pub) <(tail -n 1 "$RUNNER_TEMP/release.pub") >/dev/null; then
-              echo "::warning::release-key.pub di repo tidak cocok dengan MINISIGN_SECRET_KEY."
-            fi
-            for f in Kilat-* SHA256SUMS; do
-              # Trusted comment `version:X.Y.Z` binds the signature to this
-              # release, so an older signed file cannot pass as a newer one.
-              minisign -S -s "$RUNNER_TEMP/release.key" -t "version:${VERSION#v}" -m "$f"
-              minisign -V -p "$RUNNER_TEMP/release.pub" -m "$f"
-            done
-            rm -f "$RUNNER_TEMP/release.key"
-          else
-            echo "::warning::MINISIGN_SECRET_KEY belum diisi; rilis tanpa tanda tangan minisign."
-          fi
+          for f in Kilat-* SHA256SUMS; do
+            # Trusted comment `version:X.Y.Z` binds the signature to this
+            # release, so an older signed file cannot pass as a newer one.
+            minisign -S -s "$key" -t "version:$VERSION" -m "$f"
+          done
           ls -la
+      - name: Verifikasi rilis seperti app
+        # Pakai release-key.pub dari repo (kunci yang dibundel di app dan di
+        # updater versi lama), bukan kunci turunan dari secret.
+        run: .github/scripts/verify-release.sh out "${VERSION#v}" release-key.pub
       - name: Terbitkan rilis dan pangkas rilis lama
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

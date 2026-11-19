@@ -26,6 +26,8 @@ ureq = { version = "3", features = ["platform-verifier"] }
 # In-app update (download, verify, swap in, relaunch). The GPUI-free core:
 # it only needs Rust 1.85, so the workspace toolchain floor stays.
 gpui-updater-core = "0.4"
+# Private temp dir (owner-only) for release downloads until they verify.
+tempfile = "3"
 # Saved connection passwords live in the OS credential store: macOS
 # Keychain, Windows Credential Manager, Secret Service on Linux (pure-Rust
 # D-Bus via zbus, so no libdbus needed at build time).
@@ -56,5 +58,3 @@ serde_json = "1"
 # Headless GPUI windows for Workbench tests (`#[gpui_kit::test]`).
 gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-tempfile = "3"
