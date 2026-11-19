@@ -1158,6 +1158,9 @@ pub struct UpdatePrefs {
     pub dismissed_version: Option<String>,
     /// Most recent app version launched on this machine.
     pub last_launched_version: Option<String>,
+    /// HTTP(S) proxy URL for update checks and downloads, e.g.
+    /// `http://proxy.corp:8080`. `None` = use the proxy environment variables.
+    pub proxy: Option<String>,
 }
 
 impl Default for UpdatePrefs {
@@ -1167,6 +1170,7 @@ impl Default for UpdatePrefs {
             last_checked: 0,
             dismissed_version: None,
             last_launched_version: None,
+            proxy: None,
         }
     }
 }
@@ -1192,6 +1196,12 @@ pub fn load_update_prefs_in(dir: &Path) -> UpdatePrefs {
             .get("update_last_launched_version")
             .and_then(Json::as_str)
             .map(str::to_string),
+        proxy: v
+            .get("network_proxy")
+            .and_then(Json::as_str)
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string),
     }
 }
 
@@ -1213,6 +1223,15 @@ pub fn save_update_prefs_in(dir: &Path, prefs: &UpdatePrefs) -> std::io::Result<
     match &prefs.last_launched_version {
         Some(v) => pairs.insert("update_last_launched_version".into(), Json::Str(v.clone())),
         None => pairs.remove("update_last_launched_version"),
+    };
+    match prefs
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        Some(v) => pairs.insert("network_proxy".into(), Json::Str(v.to_string())),
+        None => pairs.remove("network_proxy"),
     };
     write_json_file(
         dir,
@@ -1577,6 +1596,7 @@ mod tests {
             last_checked: 1_700_000_000,
             dismissed_version: Some("0.2.0".into()),
             last_launched_version: Some("0.1.0".into()),
+            proxy: Some("http://proxy.corp:8080".into()),
         };
         save_update_prefs_in(&dir, &prefs).unwrap();
         assert_eq!(load_update_prefs_in(&dir), prefs);

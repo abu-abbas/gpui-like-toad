@@ -461,6 +461,17 @@ impl Workbench {
             }
         });
 
+        let proxy_sub = cx.subscribe(
+            &settings.proxy_input,
+            |this, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                    let text = input.read(cx).value().to_string();
+                    this.set_proxy(&text);
+                    cx.notify();
+                }
+            },
+        );
+
         // Panels the user minimized last time stay minimized.
         let layout = store::load_panel_layout();
 
@@ -510,7 +521,7 @@ impl Workbench {
             catalog,
             completion,
             updates: UpdateState::load(cx),
-            _subscriptions: vec![appearance_sub, settings_search_sub],
+            _subscriptions: vec![appearance_sub, settings_search_sub, proxy_sub],
         }
     }
 

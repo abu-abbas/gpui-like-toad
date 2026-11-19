@@ -58,7 +58,7 @@ impl SettingsPage {
             Self::Appearance => {
                 "appearance theme light dark system color accent font size motion icon"
             }
-            Self::Updates => "updates check download version",
+            Self::Updates => "updates check download version proxy network",
             Self::About => "about kilat version",
         }
     }
@@ -76,16 +76,24 @@ pub(super) struct SettingsState {
     pub(super) open: bool,
     page: SettingsPage,
     pub(super) search: Entity<InputState>,
+    pub(super) proxy_input: Entity<InputState>,
     previous_focus: Option<gpui_kit::FocusHandle>,
 }
 
 impl SettingsState {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Workbench>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
+        let proxy = store::load_update_prefs().proxy.unwrap_or_default();
+        let proxy_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("http://proxy.kantor:8080")
+                .default_value(proxy)
+        });
         Self {
             open: false,
             page: SettingsPage::Appearance,
             search,
+            proxy_input,
             previous_focus: None,
         }
     }

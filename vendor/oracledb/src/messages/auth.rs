@@ -135,7 +135,8 @@ fn password_hash_10g(user: &str, password: &[u8]) -> [u8; 8] {
         }
         chain
     };
-    let key2 = des_cbc_last_block(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF]);
+    let key2 =
+        des_cbc_last_block(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF]);
     des_cbc_last_block(&key2)
 }
 
@@ -712,9 +713,21 @@ mod tests_10g {
     #[test]
     fn known_10g_hashes() {
         let hex = |h: [u8; 8]| base16ct::upper::encode_string(&h);
-        assert_eq!(hex(password_hash_10g("SCOTT", b"TIGER")), "F894844C34402B67");
-        assert_eq!(hex(password_hash_10g("scott", b"tiger")), "F894844C34402B67");
-        assert_eq!(hex(password_hash_10g("SYSTEM", b"MANAGER")), "D4DF7931AB130E37");
-        assert_eq!(hex(password_hash_10g("SYS", b"CHANGE_ON_INSTALL")), "D4C5016086B2DC6A");
+        assert_eq!(
+            hex(password_hash_10g("SCOTT", b"TIGER")),
+            "F894844C34402B67"
+        );
+        assert_eq!(
+            hex(password_hash_10g("scott", b"tiger")),
+            "F894844C34402B67"
+        );
+        assert_eq!(
+            hex(password_hash_10g("SYSTEM", b"MANAGER")),
+            "D4DF7931AB130E37"
+        );
+        assert_eq!(
+            hex(password_hash_10g("SYS", b"CHANGE_ON_INSTALL")),
+            "D4C5016086B2DC6A"
+        );
     }
 }
