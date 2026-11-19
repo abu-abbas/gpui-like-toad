@@ -67,7 +67,7 @@ impl ResultsDelegate {
         let value = |row: usize, vis: usize| {
             self.visible
                 .get(vis)
-                .and_then(|&col| self.result.get(row, col))
+                .and_then(|&col| self.cell(row, col))
                 .map(ora_core::copy::plain)
                 .unwrap_or_default()
         };
@@ -186,6 +186,7 @@ mod tests {
                 })
                 .collect(),
             truncated: false,
+            byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
         };

@@ -38,6 +38,7 @@ impl Workbench {
                 | PendingOp::DataIndexes
                 | PendingOp::DataDdl
                 | PendingOp::ApplyEdits
+                | PendingOp::LoadCell
                 | PendingOp::DuplicateRows(_)
         );
         let tab_conn = self.tabs.get(self.active_tab).and_then(|t| t.conn);
@@ -376,11 +377,36 @@ impl Workbench {
                 self.conn.status = format!("Queries completed: {}.", results.len());
                 self.tabs[ix].statement_results = results;
                 self.show_statement_result(ix, 0, cx);
+                self.enforce_result_budget(cx);
+            }
+            (
+                Some(PendingOp::LoadCell),
+                Response::CellLoaded {
+                    rowid,
+                    column,
+                    value,
+                },
+            ) => {
+                let size = value.heap_bytes();
+                let shown = self.target_tab_mut().table_state.update(cx, |state, cx| {
+                    let shown = state
+                        .delegate_mut()
+                        .set_cell(&rowid, &column, value)
+                        .is_some();
+                    state.refresh(cx);
+                    shown
+                });
+                self.conn.status = if shown {
+                    format!("Loaded the full value of {column} ({size} bytes).")
+                } else {
+                    "The row is no longer in the grid.".to_string()
+                };
             }
             (Some(PendingOp::Run), Response::QueryDone(result)) => {
                 let rows = result.row_count();
                 let elapsed = result.elapsed.as_millis();
                 let truncated = result.truncated;
+                let limit_note = super::results::limit_note(&result);
                 if let Some(sql) = pending_sql {
                     self.record_run(&sql);
                 }
@@ -394,13 +420,16 @@ impl Workbench {
                 self.set_grid_result(result, cx);
                 self.target_tab_mut().results_tab = ResultsTab::Results;
                 let is_data = self.target_tab_mut().data.is_some();
-                self.conn.status = if truncated && is_data {
+                self.conn.status = if truncated && is_data && limit_note.is_empty() {
                     format!("{rows} rows in {elapsed} ms (more rows available)")
-                } else if truncated {
+                } else if truncated && limit_note.is_empty() {
                     format!("{rows} rows in {elapsed} ms (limited to {DEFAULT_MAX_ROWS} rows)")
                 } else {
-                    format!("{rows} rows in {elapsed} ms")
+                    format!("{rows} rows in {elapsed} ms{limit_note}")
                 };
+                if !limit_note.is_empty() {
+                    self.push_message(format!("{rows} rows{limit_note}"));
+                }
             }
             (Some(PendingOp::Run), Response::Executed(affected)) => {
                 if let Some(sql) = pending_sql {
@@ -474,13 +503,20 @@ impl Workbench {
                     path,
                     rows,
                     truncated,
+                    clipped,
                 },
             ) => {
-                let cap = if truncated {
+                let mut cap = if truncated {
                     format!(" (limited to {} rows)", ora_core::EXPORT_MAX_ROWS)
                 } else {
                     String::new()
                 };
+                if clipped > 0 {
+                    cap.push_str(&format!(
+                        "; {clipped} cells longer than {} MiB were cut",
+                        ora_core::fetch::EXPORT_MAX_CELL_BYTES / (1024 * 1024)
+                    ));
+                }
                 self.push_message(format!(
                     "Exported {rows} rows from {owner}.{name} to {}{cap}",
                     path.display()

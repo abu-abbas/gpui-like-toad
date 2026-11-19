@@ -12,8 +12,8 @@ use std::time::Instant;
 use ora_core::completion::CatalogObject;
 use ora_core::sql::clean_statement;
 use ora_core::{
-    ColumnDef, ColumnInfo, ConnectionProfile, DbClient, DbError, DbInfo, DbKind, IndexDef,
-    ObjectKind, PlanNode, QueryResult, SchemaObject, Value,
+    ColumnDef, ColumnInfo, ConnectionProfile, DbClient, DbError, DbInfo, DbKind, FetchLimits,
+    IndexDef, ObjectKind, PlanNode, QueryResult, RowCollector, SchemaObject, Value,
 };
 
 /// Blocking Oracle client. Owned exclusively by the GUI's background DB
@@ -52,11 +52,23 @@ fn db_err(err: oracledb::Error) -> DbError {
 /// column's database type. Unknown/exotic types (objects, REF CURSORs, XML)
 /// render as a `[TYPE]` placeholder rather than failing the whole query.
 fn cell_value(
-    row: &oracledb::Row,
+    row: &mut oracledb::Row,
     ix: usize,
     db_type: &oracledb::DbType,
+    rows: &mut LobBudget<'_>,
 ) -> Result<Value, DbError> {
     use oracledb as odb;
+    if rows.locators
+        && (db_type == odb::DB_TYPE_CLOB
+            || db_type == odb::DB_TYPE_NCLOB
+            || db_type == odb::DB_TYPE_BLOB)
+    {
+        let lob: Option<odb::Lob> = row.take(ix).map_err(db_err)?;
+        return match lob {
+            Some(mut lob) => lob_preview(&mut lob, db_type != odb::DB_TYPE_BLOB, rows),
+            None => Ok(Value::Null),
+        };
+    }
     if db_type == odb::DB_TYPE_NUMBER {
         let v: Option<odb::OracleNumber> = row.get(ix).map_err(db_err)?;
         Ok(v.map_or(Value::Null, |n| Value::Text(n.to_string())))
@@ -83,14 +95,17 @@ fn cell_value(
         || db_type == odb::DB_TYPE_ROWID
         || db_type == odb::DB_TYPE_UROWID
     {
-        let v: Option<String> = row.get(ix).map_err(db_err)?;
-        Ok(v.map_or(Value::Null, Value::Text))
+        // Taken, not copied: a clipped value just drops its tail.
+        let max = rows.collector.limits().max_cell_bytes;
+        let v: Option<String> = row.take(ix).map_err(db_err)?;
+        Ok(v.map_or(Value::Null, |t| Value::owned_text_limited(t, max)))
     } else if db_type == odb::DB_TYPE_BLOB
         || db_type == odb::DB_TYPE_RAW
         || db_type == odb::DB_TYPE_LONG_RAW
     {
-        let v: Option<Vec<u8>> = row.get(ix).map_err(db_err)?;
-        Ok(v.map_or(Value::Null, Value::Bytes))
+        let max = rows.collector.limits().max_cell_bytes;
+        let v: Option<Vec<u8>> = row.take(ix).map_err(db_err)?;
+        Ok(v.map_or(Value::Null, |b| Value::owned_bytes_limited(b, max)))
     } else if db_type == odb::DB_TYPE_BOOLEAN {
         let v: Option<bool> = row.get(ix).map_err(db_err)?;
         Ok(v.map_or(Value::Null, |b| {
@@ -133,11 +148,89 @@ fn describe_type(
     }
 }
 
+/// CLOB cells whose start is read for the grid, per result. Each read is
+/// one round trip to the server, so a 1,000-row result of CLOBs must not
+/// cost 1,000 of them; later CLOB cells show only their length until
+/// "Load full value". BLOBs are never read for the grid: their hex start
+/// tells nobody anything.
+const MAX_LOB_PREVIEWS: usize = 100;
+
+/// Reads (round trips) spent on one CLOB preview.
+const MAX_PREVIEW_READS: usize = 3;
+
+/// State shared by the cells of one fetch.
+struct LobBudget<'a> {
+    collector: &'a RowCollector,
+    /// LOB columns arrive as locators (grid fetches); otherwise the server
+    /// sends whole values inline (exports, "Load full value").
+    locators: bool,
+    previews_left: usize,
+}
+
+/// A CLOB/BLOB cell from its locator: the length is known without a round
+/// trip; a CLOB's start is read while the preview budget lasts.
+fn lob_preview(
+    lob: &mut oracledb::Lob,
+    is_char: bool,
+    budget: &mut LobBudget<'_>,
+) -> Result<Value, DbError> {
+    use std::io::Read as _;
+    let size = lob.get_size().map_err(db_err)?;
+    let unit = if is_char {
+        ora_core::LenUnit::Chars
+    } else {
+        ora_core::LenUnit::Bytes
+    };
+    let empty = if is_char {
+        Value::Text(String::new())
+    } else {
+        Value::Bytes(Vec::new())
+    };
+    if size == 0 {
+        return Ok(empty);
+    }
+    let clipped = |preview: Value| {
+        Value::Clipped(Box::new(ora_core::ClippedValue {
+            preview,
+            full_len: size as u64,
+            unit,
+        }))
+    };
+    if !is_char || budget.previews_left == 0 {
+        return Ok(clipped(empty));
+    }
+    budget.previews_left -= 1;
+    let max = budget.collector.limits().max_cell_bytes;
+    let mut out: Vec<u8> = Vec::new();
+    for _ in 0..MAX_PREVIEW_READS {
+        // A character LOB read needs room for 3 UTF-8 bytes per unit.
+        let room = max.saturating_sub(out.len());
+        if room < 4 {
+            break;
+        }
+        let mut buf = vec![0u8; room.min(size.saturating_mul(3)).max(4)];
+        match lob.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            // A later chunk that fails to decode (e.g. a split surrogate
+            // pair) just ends the preview.
+            Err(_) if !out.is_empty() => break,
+            Err(err) => return Err(DbError::new(err.to_string())),
+        }
+    }
+    let text = String::from_utf8_lossy(&out).into_owned();
+    if text.encode_utf16().count() >= size {
+        Ok(Value::Text(text))
+    } else {
+        Ok(clipped(Value::Text(text)))
+    }
+}
+
 fn fetch_rows(
     conn: &oracledb::Connection,
     sql: &str,
     binds: &[String],
-    max_rows: usize,
+    limits: FetchLimits,
 ) -> Result<QueryResult, DbError> {
     let sql = clean_statement(sql);
     let started = Instant::now();
@@ -145,8 +238,21 @@ fn fetch_rows(
         .iter()
         .map(|b| b as &dyn oracledb::ToDbValue)
         .collect();
-    let cursor = conn.query(sql, &params).map_err(db_err)?;
-    let fetching = Instant::now();
+    // Grid fetches take LOBs as locators, so a table of documents never
+    // sends whole documents; bigger per-cell limits (export, one full
+    // cell) want the values themselves and keep the inline fetch.
+    let locators = limits.max_cell_bytes <= ora_core::fetch::MAX_CELL_BYTES;
+    let mut builder = conn.statement(sql).map_err(db_err)?;
+    if locators {
+        builder = builder.fetch_lobs();
+    }
+    let cursor = builder
+        .build()
+        .map_err(db_err)?
+        .query(&params)
+        .map_err(db_err)?;
+    let mut collector = RowCollector::started_at(limits, started);
+    collector.start_fetch();
     // Column metadata comes from the cursor (not a row) so empty result
     // sets still report their columns. DbType refs are 'static, so the
     // borrow of the cursor ends here before iteration moves it.
@@ -159,27 +265,25 @@ fn fetch_rows(
         })
         .collect();
     let db_types: Vec<&oracledb::DbType> = cursor.columns().iter().map(|m| m.db_type()).collect();
-    let mut rows = Vec::new();
-    let mut truncated = false;
+    let mut previews_left = MAX_LOB_PREVIEWS;
     for row in cursor {
-        let row = row.map_err(db_err)?;
-        if rows.len() >= max_rows {
-            truncated = true;
+        let mut row = row.map_err(db_err)?;
+        if collector.is_full() {
             break;
         }
+        let mut budget = LobBudget {
+            collector: &collector,
+            locators,
+            previews_left,
+        };
         let mut values = Vec::with_capacity(db_types.len());
         for (ix, db_type) in db_types.iter().enumerate() {
-            values.push(cell_value(&row, ix, db_type)?);
+            values.push(cell_value(&mut row, ix, db_type, &mut budget)?);
         }
-        rows.push(values);
+        previews_left = budget.previews_left;
+        collector.push(values);
     }
-    Ok(QueryResult {
-        columns,
-        rows,
-        truncated,
-        fetch_time: Some(fetching.elapsed()),
-        elapsed: started.elapsed(),
-    })
+    Ok(collector.finish(columns))
 }
 
 impl DbClient for ThinClient {
@@ -240,23 +344,23 @@ impl DbClient for ThinClient {
         result.and(reset)
     }
 
-    fn query(&mut self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError> {
-        self.query_binds(sql, &[], max_rows)
+    fn query(&mut self, sql: &str, limits: FetchLimits) -> Result<QueryResult, DbError> {
+        self.query_binds(sql, &[], limits)
     }
 
     fn query_binds(
         &mut self,
         sql: &str,
         binds: &[String],
-        max_rows: usize,
+        limits: FetchLimits,
     ) -> Result<QueryResult, DbError> {
         let conn = self.conn()?;
         if !self.read_only {
-            return fetch_rows(conn, sql, binds, max_rows);
+            return fetch_rows(conn, sql, binds, limits);
         }
         conn.execute("SET TRANSACTION READ ONLY", &[])
             .map_err(db_err)?;
-        let result = fetch_rows(conn, sql, binds, max_rows);
+        let result = fetch_rows(conn, sql, binds, limits);
         let rollback = conn.rollback().map_err(db_err);
         result.and_then(|rows| rollback.map(|()| rows))
     }
@@ -617,7 +721,9 @@ mod tests {
     fn thin_client_starts_disconnected() {
         let mut client = ThinClient::new();
         assert!(!client.is_connected());
-        assert!(client.query("SELECT 1 FROM DUAL", 10).is_err());
+        assert!(client
+            .query("SELECT 1 FROM DUAL", FetchLimits::rows(10))
+            .is_err());
         assert!(client.explain_plan_nodes("SELECT 1 FROM DUAL").is_err());
         client.disconnect(); // safe when already disconnected
     }

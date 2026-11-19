@@ -21,8 +21,9 @@ use std::time::Instant;
 
 use ora_core::sql::clean_statement;
 use ora_core::{
-    ColumnDef, ColumnInfo, ConnectionProfile, DbClient, DbError, DbInfo, DbKind, IndexDef,
-    ObjectKind, PlanNode, QueryResult, SchemaObject, TableFilter, TablePage, Value,
+    ColumnDef, ColumnInfo, ConnectionProfile, DbClient, DbError, DbInfo, DbKind, FetchLimits,
+    IndexDef, ObjectKind, PlanNode, QueryResult, RowCollector, SchemaObject, TableFilter,
+    TablePage, Value,
 };
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, Statement};
@@ -73,13 +74,31 @@ fn bind_all(stmt: &mut Statement<'_>, binds: &[String]) -> Result<(), DbError> {
     Ok(())
 }
 
-fn cell_value(value: ValueRef<'_>) -> Value {
+/// One cell, copying at most the collector's per-cell limit out of
+/// SQLite's buffer (a BLOB column of documents must not be copied whole).
+fn cell_value(value: ValueRef<'_>, rows: &RowCollector) -> Value {
     match value {
         ValueRef::Null => Value::Null,
         ValueRef::Integer(n) => Value::Integer(i128::from(n)),
         ValueRef::Real(f) => Value::Float(f),
-        ValueRef::Text(t) => Value::Text(String::from_utf8_lossy(t).into_owned()),
-        ValueRef::Blob(b) => Value::Bytes(b.to_vec()),
+        ValueRef::Text(t) => match std::str::from_utf8(t) {
+            Ok(text) => rows.text(text),
+            // Not valid UTF-8: convert lossily, but only the kept part.
+            Err(_) => {
+                let kept = &t[..t.len().min(rows.limits().max_cell_bytes)];
+                let text = String::from_utf8_lossy(kept).into_owned();
+                if kept.len() == t.len() {
+                    Value::Text(text)
+                } else {
+                    Value::Clipped(Box::new(ora_core::ClippedValue {
+                        preview: Value::Text(text),
+                        full_len: t.len() as u64,
+                        unit: ora_core::LenUnit::Bytes,
+                    }))
+                }
+            }
+        },
+        ValueRef::Blob(b) => rows.bytes(b),
     }
 }
 
@@ -87,7 +106,7 @@ pub(crate) fn fetch_rows(
     conn: &Connection,
     sql: &str,
     binds: &[String],
-    max_rows: usize,
+    limits: FetchLimits,
 ) -> Result<QueryResult, DbError> {
     let started = Instant::now();
     let mut stmt = conn.prepare(clean_statement(sql)).map_err(db_err)?;
@@ -101,28 +120,20 @@ pub(crate) fn fetch_rows(
         })
         .collect();
     let width = columns.len();
-    let fetching = Instant::now();
-    let mut rows = Vec::new();
-    let mut truncated = false;
+    let mut rows = RowCollector::started_at(limits, started);
+    rows.start_fetch();
     let mut cursor = stmt.raw_query();
     while let Some(row) = cursor.next().map_err(db_err)? {
-        if rows.len() >= max_rows {
-            truncated = true;
+        if rows.is_full() {
             break;
         }
         let mut values = Vec::with_capacity(width);
         for ix in 0..width {
-            values.push(cell_value(row.get_ref(ix).map_err(db_err)?));
+            values.push(cell_value(row.get_ref(ix).map_err(db_err)?, &rows));
         }
         rows.push(values);
     }
-    Ok(QueryResult {
-        columns,
-        rows,
-        truncated,
-        fetch_time: Some(fetching.elapsed()),
-        elapsed: started.elapsed(),
-    })
+    Ok(rows.finish(columns))
 }
 
 impl DbClient for SqliteClient {
@@ -179,19 +190,19 @@ impl DbClient for SqliteClient {
             .map_err(db_err)
     }
 
-    fn query(&mut self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError> {
-        self.query_binds(sql, &[], max_rows)
+    fn query(&mut self, sql: &str, limits: FetchLimits) -> Result<QueryResult, DbError> {
+        self.query_binds(sql, &[], limits)
     }
 
     fn query_binds(
         &mut self,
         sql: &str,
         binds: &[String],
-        max_rows: usize,
+        limits: FetchLimits,
     ) -> Result<QueryResult, DbError> {
         // Reads do not open a transaction: that would hold a read lock on
         // the file until Commit and block other programs from writing.
-        fetch_rows(self.conn()?, sql, binds, max_rows)
+        fetch_rows(self.conn()?, sql, binds, limits)
     }
 
     /// Tables declared `WITHOUT ROWID` have no row id to edit by, so their
@@ -209,7 +220,7 @@ impl DbClient for SqliteClient {
             page
         };
         let query = ora_core::filter::select_sql(self.dialect(), owner, table, filter, page);
-        self.query_binds(&query.sql, &query.binds, page.limit)
+        self.query_binds(&query.sql, &query.binds, FetchLimits::rows(page.limit))
     }
 
     fn execute(&mut self, sql: &str) -> Result<u64, DbError> {

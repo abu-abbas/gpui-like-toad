@@ -18,10 +18,14 @@ use ora_core::export::{to_csv, to_xlsx};
 use ora_core::import::{map_columns, parse_csv};
 use ora_core::sql::statement_kind;
 use ora_core::{
-    ColumnDef, ConnectionAccess, ConnectionProfile, DbClient, DbError, DbInfo, DbKind, IndexDef,
-    ObjectKind, PlanNode, QueryResult, SchemaObject, TableFilter, TablePage, DEFAULT_MAX_ROWS,
-    EXPORT_MAX_ROWS,
+    ColumnDef, ConnectionAccess, ConnectionProfile, DbClient, DbError, DbInfo, DbKind, FetchLimits,
+    IndexDef, ObjectKind, PlanNode, QueryResult, SchemaObject, TableFilter, TablePage, Value,
 };
+
+/// Bytes all result sets of one script may keep together. Each statement
+/// gets what is left (at most the per-result limit), so a script of many
+/// SELECTs cannot keep many full-size results.
+pub const SCRIPT_MAX_RESULT_BYTES: usize = 2 * ora_core::fetch::MAX_RESULT_BYTES;
 
 /// File format for "Export Data" on a whole table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,7 +137,7 @@ pub enum Job {
         kind: ObjectKind,
     },
     /// Explorer "Export Data": fetch the whole table (capped at
-    /// [`EXPORT_MAX_ROWS`]) and write it to `path`.
+    /// [`ora_core::EXPORT_MAX_ROWS`]) and write it to `path`.
     ExportTable {
         owner: String,
         name: String,
@@ -150,6 +154,14 @@ pub enum Job {
     Describe {
         owner: String,
         name: String,
+    },
+    /// "Load full value": one cell of a data tab, by ROWID, fetched with
+    /// the full-value limit instead of the grid's per-cell limit.
+    LoadCell {
+        owner: String,
+        name: String,
+        column: String,
+        rowid: String,
     },
     /// Indexes of one table, for the data tab's Index view.
     Indexes {
@@ -191,7 +203,9 @@ impl Job {
 pub struct StatementResult {
     pub sql: String,
     pub started: String,
-    pub outcome: Result<QueryResult, String>,
+    /// Shared: the statement list, the tab and the grid hold the same
+    /// result instead of copies.
+    pub outcome: Result<std::sync::Arc<QueryResult>, String>,
 }
 
 pub enum Response {
@@ -209,6 +223,14 @@ pub enum Response {
         path: PathBuf,
         rows: usize,
         truncated: bool,
+        /// Cells longer than the export's per-cell limit (written cut).
+        clipped: usize,
+    },
+    /// The full value of one cell ("Load full value").
+    CellLoaded {
+        rowid: String,
+        column: String,
+        value: Value,
     },
     Imported(u64),
     /// How many of the cell edits went through, and why the next one
@@ -451,6 +473,7 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                 return Response::Failed("not connected".into());
             };
             let mut results = Vec::new();
+            let mut budget = SCRIPT_MAX_RESULT_BYTES;
             for sql in statements {
                 if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
@@ -458,8 +481,13 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                 let started = chrono::Local::now()
                     .format("%Y-%m-%d %H:%M:%S %:z")
                     .to_string();
+                let limits = script_limits(budget);
                 let outcome = client
-                    .query(&sql, DEFAULT_MAX_ROWS)
+                    .query(&sql, limits)
+                    .map(|result| {
+                        budget = budget.saturating_sub(result.heap_bytes());
+                        std::sync::Arc::new(result)
+                    })
                     .map_err(|e| e.to_string());
                 let failed = outcome.is_err();
                 results.push(StatementResult {
@@ -479,7 +507,7 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             };
             match statement_kind(&sql) {
                 ora_core::sql::StatementKind::Select => {
-                    match client.query(&sql, DEFAULT_MAX_ROWS) {
+                    match client.query(&sql, FetchLimits::grid()) {
                         Ok(result) => Response::QueryDone(result),
                         Err(err) => Response::Failed(err.to_string()),
                     }
@@ -588,10 +616,11 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             format,
         } => match client.as_mut() {
             Some(client) => match export_table(client.as_mut(), &owner, &name, &path, format) {
-                Ok((rows, truncated)) => Response::Exported {
+                Ok((rows, truncated, clipped)) => Response::Exported {
                     path,
                     rows,
                     truncated,
+                    clipped,
                 },
                 Err(err) => Response::Failed(err.to_string()),
             },
@@ -635,6 +664,22 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             },
             None => Response::Failed("not connected".to_string()),
         },
+        Job::LoadCell {
+            owner,
+            name,
+            column,
+            rowid,
+        } => match client.as_mut() {
+            Some(client) => match client.fetch_cell(&owner, &name, &column, &rowid) {
+                Ok(value) => Response::CellLoaded {
+                    rowid,
+                    column,
+                    value,
+                },
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
         Job::Indexes { owner, name } => match client.as_mut() {
             Some(client) => match client.list_indexes(&owner, &name) {
                 Ok(indexes) => Response::Indexes(indexes),
@@ -670,16 +715,24 @@ fn export_table(
     name: &str,
     path: &std::path::Path,
     format: ExportFormat,
-) -> Result<(usize, bool), DbError> {
+) -> Result<(usize, bool, usize), DbError> {
     let sql = format!("SELECT * FROM {}", client.dialect().table_ref(owner, name));
-    let result = client.query(&sql, EXPORT_MAX_ROWS)?;
+    let result = client.query(&sql, FetchLimits::export())?;
     let bytes = match format {
         ExportFormat::Csv => to_csv(&result).into_bytes(),
         ExportFormat::Xlsx => to_xlsx(&result).map_err(DbError::new)?,
     };
     std::fs::write(path, bytes)
         .map_err(|e| DbError::new(format!("Failed to write {}: {e}", path.display())))?;
-    Ok((result.row_count(), result.truncated))
+    Ok((result.row_count(), result.truncated, result.clipped_cells()))
+}
+
+/// Grid limits for the next statement of a script, given the bytes the
+/// script's earlier results left over.
+fn script_limits(budget_left: usize) -> FetchLimits {
+    let mut limits = FetchLimits::grid();
+    limits.max_result_bytes = limits.max_result_bytes.min(budget_left);
+    limits
 }
 
 fn import_csv(
@@ -822,7 +875,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("departments.csv");
         let mut client = demo();
-        let (rows, truncated) =
+        let (rows, truncated, _clipped) =
             export_table(&mut client, "HR", "DEPARTMENTS", &path, ExportFormat::Csv).unwrap();
         assert_eq!(rows, 4);
         assert!(!truncated);

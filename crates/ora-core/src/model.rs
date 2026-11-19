@@ -75,6 +75,51 @@ pub enum Value {
     Integer(i128),
     Float(f64),
     Bytes(Vec<u8>),
+    /// A text or binary value longer than the fetch's per-cell byte limit
+    /// ([`crate::FetchLimits::max_cell_bytes`]): only its start is kept.
+    /// Writing it back (edit, Copy As statements) would lose data, so code
+    /// that does must refuse or load the full value first.
+    Clipped(Box<ClippedValue>),
+}
+
+/// The kept start of a clipped cell, and how long the full value is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClippedValue {
+    /// `Value::Text` or `Value::Bytes` holding the start of the value.
+    pub preview: Value,
+    /// Length of the full value in `unit`s.
+    pub full_len: u64,
+    pub unit: LenUnit,
+}
+
+/// What [`ClippedValue::full_len`] counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LenUnit {
+    Bytes,
+    /// Oracle character LOB units (UCS-2 code units).
+    Chars,
+}
+
+impl ClippedValue {
+    pub fn describe_len(&self) -> String {
+        let unit = match self.unit {
+            LenUnit::Bytes => "bytes",
+            LenUnit::Chars => "chars",
+        };
+        format!("{} {unit}", self.full_len)
+    }
+}
+
+/// Largest index `<= max` that is a char boundary of `s`.
+fn floor_char_boundary(s: &str, max: usize) -> usize {
+    if max >= s.len() {
+        return s.len();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 impl Value {
@@ -96,11 +141,96 @@ impl Value {
                     format!("{}... ({} bytes)", hex_of(&b[..PREVIEW_LEN]), b.len())
                 }
             }
+            Value::Clipped(c) => match &c.preview {
+                // Only the length was fetched (LOB locators past the
+                // preview budget, every BLOB).
+                Value::Bytes(b) if b.is_empty() => format!("(BLOB, {})", c.describe_len()),
+                Value::Text(t) if t.is_empty() => format!("(CLOB, {})", c.describe_len()),
+                Value::Bytes(b) => {
+                    const PREVIEW_LEN: usize = 32;
+                    let shown = &b[..b.len().min(PREVIEW_LEN)];
+                    format!("{}... ({})", hex_of(shown), c.describe_len())
+                }
+                preview => format!("{}… ({}, clipped)", preview.display(), c.describe_len()),
+            },
         }
     }
 
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
+    }
+
+    pub fn is_clipped(&self) -> bool {
+        matches!(self, Value::Clipped(_))
+    }
+
+    /// Text cell, keeping at most `max_bytes` bytes (cut at a char
+    /// boundary). Copies only the kept part.
+    pub fn text_limited(text: &str, max_bytes: usize) -> Value {
+        if text.len() <= max_bytes {
+            return Value::Text(text.to_string());
+        }
+        let end = floor_char_boundary(text, max_bytes);
+        Value::Clipped(Box::new(ClippedValue {
+            preview: Value::Text(text[..end].to_string()),
+            full_len: text.len() as u64,
+            unit: LenUnit::Bytes,
+        }))
+    }
+
+    /// Like [`Value::text_limited`] for an owned string, freeing the cut
+    /// tail instead of copying.
+    pub fn owned_text_limited(mut text: String, max_bytes: usize) -> Value {
+        if text.len() <= max_bytes {
+            return Value::Text(text);
+        }
+        let full_len = text.len() as u64;
+        text.truncate(floor_char_boundary(&text, max_bytes));
+        text.shrink_to_fit();
+        Value::Clipped(Box::new(ClippedValue {
+            preview: Value::Text(text),
+            full_len,
+            unit: LenUnit::Bytes,
+        }))
+    }
+
+    /// Binary cell, keeping at most `max_bytes` bytes.
+    pub fn bytes_limited(bytes: &[u8], max_bytes: usize) -> Value {
+        if bytes.len() <= max_bytes {
+            return Value::Bytes(bytes.to_vec());
+        }
+        Value::Clipped(Box::new(ClippedValue {
+            preview: Value::Bytes(bytes[..max_bytes].to_vec()),
+            full_len: bytes.len() as u64,
+            unit: LenUnit::Bytes,
+        }))
+    }
+
+    /// Like [`Value::bytes_limited`] for an owned buffer.
+    pub fn owned_bytes_limited(mut bytes: Vec<u8>, max_bytes: usize) -> Value {
+        if bytes.len() <= max_bytes {
+            return Value::Bytes(bytes);
+        }
+        let full_len = bytes.len() as u64;
+        bytes.truncate(max_bytes);
+        bytes.shrink_to_fit();
+        Value::Clipped(Box::new(ClippedValue {
+            preview: Value::Bytes(bytes),
+            full_len,
+            unit: LenUnit::Bytes,
+        }))
+    }
+
+    /// Approximate memory held by this cell: the enum itself plus its heap
+    /// data. Used for the per-result and all-tabs byte budgets.
+    pub fn heap_bytes(&self) -> usize {
+        std::mem::size_of::<Value>()
+            + match self {
+                Value::Text(s) => s.capacity(),
+                Value::Bytes(b) => b.capacity(),
+                Value::Clipped(c) => std::mem::size_of::<ClippedValue>() + c.preview.heap_bytes(),
+                _ => 0,
+            }
     }
 }
 
@@ -136,11 +266,36 @@ pub struct QueryResult {
     pub elapsed: Duration,
     /// Time spent consuming the open cursor, when measured by the driver.
     pub fetch_time: Option<Duration>,
+    /// Set together with `truncated` when the fetch stopped because the
+    /// result reached [`crate::FetchLimits::max_result_bytes`] rather than
+    /// the row cap.
+    pub byte_limited: bool,
 }
 
 impl QueryResult {
     pub fn row_count(&self) -> usize {
         self.rows.len()
+    }
+
+    /// Approximate memory held by the rows (cells and row vectors).
+    pub fn heap_bytes(&self) -> usize {
+        self.rows
+            .iter()
+            .map(|row| {
+                std::mem::size_of::<Vec<Value>>()
+                    + row.iter().map(Value::heap_bytes).sum::<usize>()
+                    + (row.capacity() - row.len()) * std::mem::size_of::<Value>()
+            })
+            .sum()
+    }
+
+    /// Cells whose value was clipped at the per-cell limit.
+    pub fn clipped_cells(&self) -> usize {
+        self.rows
+            .iter()
+            .flatten()
+            .filter(|v| v.is_clipped())
+            .count()
     }
 
     pub fn get(&self, row: usize, col: usize) -> Option<&Value> {

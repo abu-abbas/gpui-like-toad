@@ -6,10 +6,16 @@
 //! Pagination is client-side: the delegate shows one [`PAGE_SIZE`]-row
 //! window of the full result. Sorting sorts the whole result first, so
 //! page boundaries stay consistent while paging.
+//!
+//! The delegate shares the tab's result (`Arc`) instead of owning a copy:
+//! a sort only keeps a row order (one index per row) and an edit shown in
+//! the grid only an override for that cell, so showing a result costs the
+//! view, not a second copy of every cell.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputState};
@@ -41,7 +47,12 @@ pub type InsertRows = Rc<Vec<InsertRow>>;
 pub struct ResultsDelegate {
     pub(crate) insert_rows: InsertRows,
     pub(crate) insert_disabled: bool,
-    result: QueryResult,
+    result: Arc<QueryResult>,
+    /// Result row behind each grid row after a sort; `None` = fetch order.
+    order: Option<Vec<usize>>,
+    /// Cells changed in the grid (edits not refetched yet), by (result
+    /// row, result column), shown over the shared result.
+    overrides: HashMap<(usize, usize), Value>,
     columns: Vec<Column>,
     /// Per result column: right-align its cells (numeric types).
     numeric: Vec<bool>,
@@ -75,6 +86,8 @@ pub struct ResultsDelegate {
     on_delete_rows: Option<DeleteRowsHandler>,
     /// Set on editable data tabs: the context menu's "Duplicate row(s)".
     on_duplicate_rows: Option<DuplicateRowsHandler>,
+    /// Set on data tabs with ROWIDs: "Load full value" on a clipped cell.
+    on_load_cell: Option<LoadCellHandler>,
     /// Result column holding each row's ROWID (never shown), if fetched.
     rowid_col: Option<usize>,
     /// Edited cells by (ROWID, column name), tinted until commit.
@@ -97,6 +110,9 @@ pub struct CellEditRequest {
 pub type EditHandler = Rc<dyn Fn(CellEditRequest, &mut Window, &mut App)>;
 
 pub type PasteHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// "Load full value": called with the row's ROWID and the column name.
+pub type LoadCellHandler = Rc<dyn Fn(String, String, &mut Window, &mut App)>;
 pub type DeleteRowsHandler = Rc<dyn Fn(Vec<String>, &mut Window, &mut App)>;
 
 /// Rows to duplicate, each as (column, value) pairs without the ROWID.
@@ -202,7 +218,9 @@ impl ResultsDelegate {
         ResultsDelegate {
             insert_rows: Default::default(),
             insert_disabled: false,
-            result: QueryResult::default(),
+            result: Arc::default(),
+            order: None,
+            overrides: HashMap::new(),
             columns: Vec::new(),
             numeric: Vec::new(),
             hidden: HashSet::new(),
@@ -219,6 +237,7 @@ impl ResultsDelegate {
             on_edit: None,
             on_delete_rows: None,
             on_duplicate_rows: None,
+            on_load_cell: None,
             on_cell_paste: None,
             rowid_col: None,
             table_name: None,
@@ -271,6 +290,12 @@ impl ResultsDelegate {
         self
     }
 
+    /// Offer "Load full value" on clipped cells (needs a ROWID column).
+    pub fn with_load_cell(mut self, handler: LoadCellHandler) -> Self {
+        self.on_load_cell = Some(handler);
+        self
+    }
+
     /// Absolute rows a right click on `abs_row` acts on, in grid order.
     fn target_rows(&self, abs_row: usize) -> Vec<usize> {
         if self.selected_rows.contains(&abs_row) {
@@ -288,7 +313,7 @@ impl ResultsDelegate {
             .iter()
             .enumerate()
             .filter(|(_, c)| c.name != ROWID_COLUMN)
-            .filter_map(|(ix, c)| Some((c.name.clone(), self.result.get(abs_row, ix)?.display())))
+            .filter_map(|(ix, c)| Some((c.name.clone(), self.cell(abs_row, ix)?.display())))
             .collect()
     }
 
@@ -299,7 +324,7 @@ impl ResultsDelegate {
             return self.selected_rowids();
         }
         self.rowid_col
-            .and_then(|c| self.result.get(abs_row, c))
+            .and_then(|c| self.cell(abs_row, c))
             .map(|v| vec![v.display()])
             .unwrap_or_default()
     }
@@ -314,12 +339,13 @@ impl ResultsDelegate {
     pub fn set_cell(&mut self, rowid: &str, column: &str, value: Value) -> Option<Value> {
         let rowid_col = self.rowid_col?;
         let col = self.result.columns.iter().position(|c| c.name == column)?;
-        let row = self
-            .result
-            .rows
-            .iter_mut()
-            .find(|r| r.get(rowid_col).is_some_and(|v| v.display() == rowid))?;
-        Some(std::mem::replace(&mut row[col], value))
+        let row = (0..self.result.rows.len()).find(|&r| {
+            self.source_cell(r, rowid_col)
+                .is_some_and(|v| v.display() == rowid)
+        })?;
+        let old = self.source_cell(row, col)?.clone();
+        self.overrides.insert((row, col), value);
+        Some(old)
     }
 
     /// Every field of the row shown at table row `row_ix`, in column
@@ -334,7 +360,7 @@ impl ResultsDelegate {
             .iter()
             .enumerate()
             .filter(|(_, c)| c.name != ROWID_COLUMN)
-            .filter_map(|(ix, c)| Some((c.name.clone(), self.result.get(abs_row, ix)?.clone())))
+            .filter_map(|(ix, c)| Some((c.name.clone(), self.cell(abs_row, ix)?.clone())))
             .collect()
     }
 
@@ -357,15 +383,14 @@ impl ResultsDelegate {
             .collect();
         let rowid = self
             .rowid_col
-            .and_then(|c| self.result.get(abs_row, c))
+            .and_then(|c| self.cell(abs_row, c))
             .map(Value::display);
         let table = self
             .table_name
             .clone()
             .unwrap_or_else(|| "TABLE_NAME".to_string());
         let cell = self
-            .result
-            .get(abs_row, data_col)
+            .cell(abs_row, data_col)
             .map(ora_core::copy::plain)
             .unwrap_or_default();
         let clipboard = |text: String| {
@@ -418,14 +443,51 @@ impl ResultsDelegate {
 
     /// The edit request for the cell at result row `abs_row`, column
     /// `data_col`; `None` when editing is off or the row has no ROWID.
+    ///
+    /// A clipped cell is not editable: the editor would start from (and
+    /// save back) only the kept start. "Load full value" first.
     fn edit_request(&self, abs_row: usize, data_col: usize) -> Option<CellEditRequest> {
         self.on_edit.as_ref()?;
-        let rowid = self.result.get(abs_row, self.rowid_col?)?.display();
+        let rowid = self.cell(abs_row, self.rowid_col?)?.display();
+        let value = self.cell(abs_row, data_col)?;
+        if value.is_clipped() {
+            return None;
+        }
         Some(CellEditRequest {
             rowid,
             column: self.result.columns.get(data_col)?.name.clone(),
-            value: self.result.get(abs_row, data_col)?.clone(),
+            value: value.clone(),
         })
+    }
+
+    /// "Load full value" for a clipped cell: the item, or a note on how to
+    /// see more when the grid has no ROWID to fetch the row by.
+    fn load_cell_item(&self, menu: PopupMenu, abs_row: usize, data_col: usize) -> PopupMenu {
+        let Some(Value::Clipped(clipped)) = self.cell(abs_row, data_col) else {
+            return menu;
+        };
+        let rowid = self
+            .rowid_col
+            .and_then(|c| self.cell(abs_row, c))
+            .map(Value::display);
+        let column = self.result.columns.get(data_col).map(|c| c.name.clone());
+        match (self.on_load_cell.clone(), rowid, column) {
+            (Some(handler), Some(rowid), Some(column)) => menu
+                .item(
+                    PopupMenuItem::new(format!("Load full value ({})", clipped.describe_len()))
+                        .icon(Icon::new(IconName::Download))
+                        .on_click(move |_, window, cx| {
+                            handler(rowid.clone(), column.clone(), window, cx)
+                        }),
+                )
+                .separator(),
+            _ => menu
+                .label(format!(
+                    "Value clipped ({}): open the table's data tab to load it",
+                    clipped.describe_len()
+                ))
+                .separator(),
+        }
     }
 
     /// Table column index to result column index; `None` is the gutter.
@@ -485,26 +547,51 @@ impl ResultsDelegate {
         self.page_size
     }
 
-    pub fn set_result(&mut self, result: QueryResult) {
+    /// Show `result`. Takes a shared handle: the grid keeps no copy of
+    /// the cells (see the module docs).
+    pub fn set_result(&mut self, result: impl Into<Arc<QueryResult>>) {
+        let result = result.into();
         self.selected_rows.clear();
         self.selection_anchor = 0;
         self.clear_cell_selection();
         self.numeric = numeric_columns(&result);
         self.rowid_col = result.columns.iter().position(|c| c.name == ROWID_COLUMN);
         self.result = result;
+        self.order = None;
+        self.overrides.clear();
         self.rebuild_columns();
         self.page = 0;
     }
 
+    /// Result row behind grid row `view_row` (after sorting).
+    fn source_row(&self, view_row: usize) -> Option<usize> {
+        match &self.order {
+            Some(order) => order.get(view_row).copied(),
+            None => (view_row < self.result.rows.len()).then_some(view_row),
+        }
+    }
+
+    /// A cell by result row, with grid edits applied.
+    fn source_cell(&self, row: usize, col: usize) -> Option<&Value> {
+        self.overrides
+            .get(&(row, col))
+            .or_else(|| self.result.get(row, col))
+    }
+
+    /// The cell at grid row `view_row` (sorted order), result column `col`.
+    fn cell(&self, view_row: usize, col: usize) -> Option<&Value> {
+        self.source_cell(self.source_row(view_row)?, col)
+    }
+
     pub fn selected_tsv(&self, fallback: Option<usize>) -> Option<String> {
         let row_text = |row: usize| {
-            let row = self.result.rows.get(row)?;
+            self.source_row(row)?;
             Some(
                 self.visible
                     .iter()
                     .map(|&column| {
                         tsv_field(
-                            row.get(column)
+                            self.cell(row, column)
                                 .map(ora_core::copy::plain)
                                 .unwrap_or_default(),
                         )
@@ -533,7 +620,7 @@ impl ResultsDelegate {
         };
         self.selected_rows
             .iter()
-            .filter_map(|row| self.result.get(*row, column))
+            .filter_map(|row| self.cell(*row, column))
             .map(Value::display)
             .collect()
     }
@@ -577,11 +664,24 @@ impl ResultsDelegate {
         (first, last, total)
     }
 
+    /// Text painted in a grid cell. The cell shows one truncated line, so
+    /// a 64 KiB value is cut before layout instead of shaping all of it.
     fn cell_text(&self, row_ix: usize, col_ix: usize) -> String {
-        self.result
-            .get(row_ix, col_ix)
-            .map(|v| v.display())
-            .unwrap_or_default()
+        const SHOWN_CHARS: usize = 512;
+        let Some(value) = self.cell(row_ix, col_ix) else {
+            return String::new();
+        };
+        match value {
+            Value::Text(t) if t.len() > SHOWN_CHARS * 4 => t.chars().take(SHOWN_CHARS).collect(),
+            Value::Clipped(c) if !c.preview.display().is_empty() => {
+                let preview: String = match &c.preview {
+                    Value::Text(t) => t.chars().take(SHOWN_CHARS).collect(),
+                    other => other.display(),
+                };
+                format!("{preview}… ({})", c.describe_len())
+            }
+            other => other.display(),
+        }
     }
 
     /// Map a visible row index to the underlying result row.
@@ -618,6 +718,11 @@ fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> Ordering {
                 m.partial_cmp(&(*n as f64)).unwrap_or(Ordering::Equal)
             }
             (Value::Bytes(m), Value::Bytes(n)) => m.cmp(n),
+            // Compared in place: `display()` would copy both texts for
+            // every comparison of a sort.
+            (Value::Text(m), Value::Text(n)) => m.cmp(n),
+            (Value::Clipped(m), _) => cmp_values(Some(&m.preview), Some(y)),
+            (_, Value::Clipped(n)) => cmp_values(Some(x), Some(&n.preview)),
             _ => x.display().cmp(&y.display()),
         },
     }
@@ -825,10 +930,7 @@ impl TableDelegate for ResultsDelegate {
             ),
             _ => cell,
         };
-        let is_null = self
-            .result
-            .get(abs_row, data_col)
-            .is_some_and(Value::is_null);
+        let is_null = self.cell(abs_row, data_col).is_some_and(Value::is_null);
         if is_null {
             // NULL is not an empty string: show it, dimmed.
             return cell
@@ -855,6 +957,7 @@ impl TableDelegate for ResultsDelegate {
             return menu;
         };
         let abs_row = self.absolute_row(row_ix);
+        menu = self.load_cell_item(menu, abs_row, data_col);
         menu = self.copy_menu(menu, row_ix, data_col, window, &mut **cx);
         menu = menu.separator();
         if let (Some(handler), Some(request)) =
@@ -913,7 +1016,7 @@ impl TableDelegate for ResultsDelegate {
         };
         let (Some(column), Some(value)) = (
             self.result.columns.get(data_col),
-            self.result.get(abs_row, data_col),
+            self.cell(abs_row, data_col),
         ) else {
             return menu;
         };
@@ -956,19 +1059,80 @@ impl TableDelegate for ResultsDelegate {
         self.selected_rows.clear();
         self.selection_anchor = 0;
         self.clear_cell_selection();
+        self.sort_by_column(col_ix, sort);
+    }
+}
+
+impl ResultsDelegate {
+    /// Sort the grid rows by result column `col_ix`.
+    fn sort_by_column(&mut self, col_ix: usize, sort: ColumnSort) {
+        // Sorting orders row indexes; the shared result stays as fetched,
+        // so Default restores the fetch order.
+        let mut order: Vec<usize> = (0..self.result.rows.len()).collect();
         match sort {
-            ColumnSort::Ascending => self
-                .result
-                .rows
-                .sort_by(|a, b| cmp_values(a.get(col_ix), b.get(col_ix))),
-            ColumnSort::Descending => self
-                .result
-                .rows
-                .sort_by(|a, b| cmp_values(b.get(col_ix), a.get(col_ix))),
-            // Default keeps the current order: the original fetch order is
-            // not retained after a sort, so there is nothing to restore to.
-            ColumnSort::Default => {}
+            ColumnSort::Ascending => order.sort_by(|&a, &b| {
+                cmp_values(self.source_cell(a, col_ix), self.source_cell(b, col_ix))
+            }),
+            ColumnSort::Descending => order.sort_by(|&a, &b| {
+                cmp_values(self.source_cell(b, col_ix), self.source_cell(a, col_ix))
+            }),
+            ColumnSort::Default => {
+                self.order = None;
+                return;
+            }
         }
+        self.order = Some(order);
+    }
+}
+
+/// Counts bytes allocated on the current thread while switched on, for
+/// the memory regression test below. Other test threads are not counted.
+#[cfg(test)]
+mod alloc_count {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    pub struct Counting;
+
+    thread_local! {
+        static ON: Cell<bool> = const { Cell::new(false) };
+        static BYTES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let _ = ON.try_with(|on| {
+                if on.get() {
+                    BYTES.with(|b| b.set(b.get() + layout.size()));
+                }
+            });
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let _ = ON.try_with(|on| {
+                if on.get() {
+                    BYTES.with(|b| b.set(b.get() + new_size));
+                }
+            });
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: Counting = Counting;
+
+    /// Bytes allocated (gross: freed blocks still count) while `f` runs.
+    pub fn allocated_by<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        BYTES.with(|b| b.set(0));
+        ON.with(|on| on.set(true));
+        let out = f();
+        ON.with(|on| on.set(false));
+        (out, BYTES.with(|b| b.get()))
     }
 }
 
@@ -976,6 +1140,52 @@ impl TableDelegate for ResultsDelegate {
 mod tests {
     use super::*;
     use ora_core::ColumnInfo;
+
+    const MIB: usize = 1024 * 1024;
+
+    /// The audit's baseline: 512 rows of 32 KiB synthetic text are about
+    /// 16 MiB as one `QueryResult`. Before results were shared, holding it
+    /// in the statement list, the tab and the grid made that 48 MiB.
+    /// Showing (and sorting) it must now only add the view: columns and a
+    /// row index, far below one more copy of the cells.
+    #[test]
+    fn showing_a_result_does_not_copy_its_cells() {
+        let (result, built) = alloc_count::allocated_by(|| QueryResult {
+            columns: vec![ColumnInfo {
+                name: "BODY".into(),
+                data_type: "CLOB".into(),
+            }],
+            rows: (0..512)
+                .map(|i| vec![Value::Text(format!("{i:05}").repeat(32 * 1024 / 5))])
+                .collect(),
+            ..Default::default()
+        });
+        assert!((15 * MIB..17 * MIB).contains(&built), "baseline {built}");
+        assert!((15 * MIB..17 * MIB).contains(&result.heap_bytes()));
+
+        let mut grid = ResultsDelegate::empty().with_row_numbers();
+        let ((), shown) = alloc_count::allocated_by(|| {
+            // The worker's script result, the tab's shown result and the
+            // grid: the same path as `Workbench::show_statement_result`.
+            let shared = Arc::new(result);
+            let statements = [crate::worker::StatementResult {
+                sql: "SELECT body FROM doc".into(),
+                started: String::new(),
+                outcome: Ok(shared.clone()),
+            }];
+            let last_result = statements[0].outcome.as_ref().ok().cloned();
+            grid.set_result(last_result.clone().unwrap_or_default());
+            grid.sort_by_column(0, ColumnSort::Descending);
+            assert!(Arc::ptr_eq(&grid.result, &shared));
+            assert_eq!(Arc::strong_count(&shared), 4);
+        });
+        assert!(
+            shown < MIB / 4,
+            "showing the result allocated {shown} bytes"
+        );
+        // Sorted view reads through the row index.
+        assert!(grid.cell_text(0, 0).starts_with("00511"));
+    }
 
     fn int(n: i128) -> Value {
         Value::Integer(n)
@@ -1036,6 +1246,7 @@ mod tests {
             }],
             rows: (0..n).map(|i| vec![Value::Integer(i as i128)]).collect(),
             truncated: false,
+            byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
         }
@@ -1099,6 +1310,7 @@ mod tests {
                 vec![Value::Null, Value::Null, int(2), Value::Null],
             ],
             truncated: false,
+            byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
         };
@@ -1153,6 +1365,7 @@ mod tests {
             ],
             rows: vec![vec![int(1), text("x"), text("y")]],
             truncated: false,
+            byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
         };

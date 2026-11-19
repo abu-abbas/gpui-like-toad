@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, RecvError};
+use std::sync::Arc;
 
 use gpui_kit::actions;
 use gpui_kit::assets::IconName;
@@ -150,6 +151,8 @@ enum PendingOp {
     DataDdl,
     /// Send a data tab's staged cell edits as UPDATEs.
     ApplyEdits,
+    /// "Load full value" of one clipped data tab cell.
+    LoadCell,
     /// Duplicate rows of a data tab once its identity/sequence columns are
     /// known (fetched by DESCRIBE).
     DuplicateRows(Vec<Vec<(String, String)>>),
@@ -307,7 +310,8 @@ struct QueryTab {
     statement_results: Vec<crate::worker::StatementResult>,
     result_ix: usize,
     result_connection: String,
-    last_result: Option<QueryResult>,
+    /// Shared with the grid's delegate and the statement list.
+    last_result: Option<std::sync::Arc<QueryResult>>,
     elapsed_ms: Option<u128>,
     plan_nodes: Option<Vec<PlanNode>>,
     plan_lines: Vec<String>,

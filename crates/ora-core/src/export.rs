@@ -36,7 +36,7 @@ pub fn to_xlsx(result: &QueryResult) -> Result<Vec<u8>, String> {
                         .write_number(row_num, col_num, *f)
                         .map_err(|e| e.to_string())?;
                 }
-                Value::Text(_) | Value::Bytes(_) => {
+                Value::Text(_) | Value::Bytes(_) | Value::Clipped(_) => {
                     sheet
                         .write_string(row_num, col_num, value.display())
                         .map_err(|e| e.to_string())?;
@@ -119,6 +119,7 @@ mod tests {
                 vec![Value::Integer(2), Value::Null, Value::Text("plain".into())],
             ],
             truncated: false,
+            byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
         }
@@ -148,6 +149,7 @@ mod tests {
             ],
             rows: vec![],
             truncated: false,
+            byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
         };
@@ -167,6 +169,7 @@ mod tests {
                 vec![Value::Text("a\rb".into())],
             ],
             truncated: false,
+            byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
         };
@@ -224,6 +227,7 @@ mod tests {
                 Value::Null,
             ]],
             truncated: false,
+            byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
         };

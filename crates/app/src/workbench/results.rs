@@ -224,11 +224,13 @@ impl Workbench {
                     .count(),
                 result.row_count()
             ));
-            if result.truncated && tab.data.is_some() {
+            let note = limit_note(result);
+            if result.truncated && tab.data.is_some() && !result.byte_limited {
                 summary.push_str(" (more rows available)");
-            } else if result.truncated {
+            } else if result.truncated && !result.byte_limited {
                 summary.push_str(&format!(" (limited to {DEFAULT_MAX_ROWS} rows)"));
             }
+            summary.push_str(&note);
         }
         if let Some(ms) = tab.elapsed_ms {
             summary.push_str(&format!(" · {ms} ms"));
@@ -595,11 +597,16 @@ impl Workbench {
                     }
                     let summary = match &entry.outcome {
                         Ok(r) => format!(
-                            "{} rows{}  ·  {} columns  ·  {:.3} s total",
+                            "{} rows{}  ·  {} columns  ·  {:.3} s total{}",
                             r.row_count(),
-                            if r.truncated { " (limited)" } else { "" },
+                            if r.truncated && !r.byte_limited {
+                                " (limited)"
+                            } else {
+                                ""
+                            },
                             r.columns.len(),
-                            r.elapsed.as_secs_f64()
+                            r.elapsed.as_secs_f64(),
+                            limit_note(r)
                         ),
                         Err(err) => err.clone(),
                     };
@@ -688,10 +695,15 @@ impl Workbench {
                 .children(tab.statement_results.iter().enumerate().map(|(ix, entry)| {
                     match &entry.outcome {
                         Ok(r) => div().child(format!(
-                            "Result {} · {} rows fetched{}",
+                            "Result {} · {} rows fetched{}{}",
                             ix + 1,
                             r.row_count(),
-                            if r.truncated { " (limited)" } else { "" }
+                            if r.truncated && !r.byte_limited {
+                                " (limited)"
+                            } else {
+                                ""
+                            },
+                            limit_note(r)
                         )),
                         Err(e) => div().text_color(theme.danger).child(format!(
                             "Result {} · {}",
@@ -1123,13 +1135,17 @@ mod tests {
 }
 
 impl Workbench {
+    /// Show a fresh result in the target tab. The tab and the grid share
+    /// one `Arc`: no cell is copied.
     pub(super) fn set_grid_result(&mut self, result: QueryResult, cx: &mut Context<Self>) {
+        let result = Arc::new(result);
         let tab = self.target_tab_mut();
         tab.last_result = Some(result.clone());
         tab.table_state.update(cx, |state, cx| {
             state.delegate_mut().set_result(result);
             state.refresh(cx);
         });
+        self.enforce_result_budget(cx);
     }
 
     fn export_csv(&mut self, cx: &mut Context<Self>) {
@@ -1210,5 +1226,120 @@ impl Workbench {
             state.refresh(cx);
         });
         cx.notify();
+    }
+}
+
+/// Bytes the results of all open tabs may hold together. A new result
+/// that pushes the total over releases the biggest results of other tabs
+/// (never the tab that just ran, never a data tab with changes).
+pub(super) const MAX_OPEN_RESULT_BYTES: usize = 256 * 1024 * 1024;
+
+/// Text an `outcome` gets when its result was released for memory.
+pub(super) const RESULT_RELEASED: &str =
+    "Result released to free memory (too many large results open). Run it again to see it.";
+
+/// Why a result was cut, for status and Info lines: empty for a normal
+/// result, else e.g. " (stopped at the 32 MiB result limit) · 3 cells clipped".
+pub(super) fn limit_note(result: &QueryResult) -> String {
+    let mut note = String::new();
+    if result.byte_limited {
+        note.push_str(&format!(
+            " (stopped at the {} MiB result limit)",
+            ora_core::fetch::MAX_RESULT_BYTES / (1024 * 1024)
+        ));
+    }
+    let clipped = result.clipped_cells();
+    if clipped > 0 {
+        note.push_str(&format!(
+            " · {clipped} long values show only their start (right click > Load full value)"
+        ));
+    }
+    note
+}
+
+/// The distinct results a tab holds (its statements and the shown one),
+/// with their sizes. Shared `Arc`s are counted once.
+fn tab_result_bytes(tab: &QueryTab, seen: &mut HashSet<usize>) -> usize {
+    let statements = tab
+        .statement_results
+        .iter()
+        .filter_map(|entry| entry.outcome.as_ref().ok());
+    statements
+        .chain(tab.last_result.iter())
+        .filter(|result| seen.insert(Arc::as_ptr(result) as usize))
+        .map(|result| result.heap_bytes())
+        .sum()
+}
+
+/// Which tabs to release, biggest first, so that `sizes` (bytes per tab;
+/// `None` = must be kept) fits in `budget`.
+pub(super) fn tabs_to_release(sizes: &[Option<usize>], kept: usize, budget: usize) -> Vec<usize> {
+    let mut total = kept + sizes.iter().flatten().sum::<usize>();
+    let mut order: Vec<usize> = (0..sizes.len()).filter(|&ix| sizes[ix].is_some()).collect();
+    order.sort_by_key(|&ix| std::cmp::Reverse(sizes[ix]));
+    let mut release = Vec::new();
+    for ix in order {
+        if total <= budget {
+            break;
+        }
+        total -= sizes[ix].unwrap_or(0);
+        release.push(ix);
+    }
+    release
+}
+
+impl Workbench {
+    /// Keep all open results under [`MAX_OPEN_RESULT_BYTES`]: release the
+    /// biggest results of other tabs until the total fits.
+    pub(super) fn enforce_result_budget(&mut self, cx: &mut Context<Self>) {
+        let keep = self.target_ix();
+        let mut seen = HashSet::new();
+        let mut kept = 0;
+        let sizes: Vec<Option<usize>> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(ix, tab)| {
+                let bytes = tab_result_bytes(tab, &mut seen);
+                let pinned = Some(ix) == keep || tab.data.as_ref().is_some_and(|d| d.has_staged());
+                if pinned {
+                    kept += bytes;
+                    None
+                } else {
+                    Some(bytes).filter(|b| *b > 0)
+                }
+            })
+            .collect();
+        for ix in tabs_to_release(&sizes, kept, MAX_OPEN_RESULT_BYTES) {
+            let tab = &mut self.tabs[ix];
+            tab.last_result = None;
+            for entry in &mut tab.statement_results {
+                if entry.outcome.is_ok() {
+                    entry.outcome = Err(RESULT_RELEASED.to_string());
+                }
+            }
+            tab.table_state.update(cx, |state, cx| {
+                state.delegate_mut().set_result(QueryResult::default());
+                state.refresh(cx);
+            });
+            let title = tab.title.clone();
+            self.push_message(format!("{title}: {RESULT_RELEASED}"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn releases_biggest_other_tabs_until_under_budget() {
+        // Tab 1 is pinned (None); 100 kept in it.
+        let sizes = [Some(50), None, Some(200), Some(10)];
+        assert_eq!(tabs_to_release(&sizes, 100, 400), Vec::<usize>::new());
+        assert_eq!(tabs_to_release(&sizes, 100, 300), vec![2]);
+        assert_eq!(tabs_to_release(&sizes, 100, 120), vec![2, 0]);
+        // Pinned results alone over budget: release everything else.
+        assert_eq!(tabs_to_release(&sizes, 1000, 120), vec![2, 0, 3]);
     }
 }
