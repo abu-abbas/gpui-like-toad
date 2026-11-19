@@ -22,6 +22,8 @@ mod completion;
 mod crash_log;
 mod error_log;
 mod keychain;
+#[cfg(target_os = "macos")]
+mod macos_bundle;
 mod plan;
 mod results;
 mod schema;
@@ -62,6 +64,10 @@ fn main() {
     // nosemgrep: rust.lang.security.args.args
     if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
         println!(concat!(app_name!(), " {}"), env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    if macos_bundle::relaunch_from_renamed_bundle() {
         return;
     }
     crash_log::install();

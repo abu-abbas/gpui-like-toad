@@ -2541,8 +2541,10 @@ dependencies = [
  "ora-driver",
  "rodio",
  "rust-embed",
+ "rustix",
  "serde_json",
  "sqlite-driver",
+ "tempfile",
  "ureq",
  "winresource",
 ]
