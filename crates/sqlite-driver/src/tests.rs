@@ -6,16 +6,23 @@ use ora_core::{
 
 use super::SqliteClient;
 
+/// Test-only scratch path, unique per process, thread and tag. Nothing
+/// secret is written there.
+fn scratch_path(tag: &str) -> PathBuf {
+    // nosemgrep: rust.lang.security.temp-dir.temp-dir
+    std::env::temp_dir().join(format!(
+        "sqlite-driver-{tag}-{}-{:?}.db",
+        std::process::id(),
+        std::thread::current().id()
+    ))
+}
+
 /// A fresh database file with a small `emp` table, removed on drop.
 struct TempDb(PathBuf);
 
 impl TempDb {
     fn new(tag: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "sqlite-driver-{tag}-{}-{:?}.db",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let path = scratch_path(tag);
         let _ = std::fs::remove_file(&path);
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch(
@@ -59,7 +66,7 @@ impl Drop for TempDb {
 #[test]
 fn missing_file_is_an_error_and_is_not_created() {
     let mut client = SqliteClient::new();
-    let path = std::env::temp_dir().join("sqlite-driver-does-not-exist.db");
+    let path = scratch_path("does-not-exist");
     let err = client
         .connect(
             &ConnectionProfile {
