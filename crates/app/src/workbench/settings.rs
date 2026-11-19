@@ -22,7 +22,7 @@ impl Workbench {
         theme::set_theme_names(names.clone(), cx);
         theme::apply_preference(theme::preference(cx), window, cx);
         if let Err(err) = store::save_theme_names(&names) {
-            self.push_message(format!("Gagal menyimpan pilihan tema: {err}"));
+            self.push_message(format!("Failed to save the selected theme: {err}"));
         }
         cx.notify();
     }
@@ -30,7 +30,7 @@ impl Workbench {
     fn set_theme(&mut self, pref: ThemePreference, window: &mut Window, cx: &mut Context<Self>) {
         theme::apply_preference(pref, window, cx);
         if let Err(err) = store::save_theme_preference(pref) {
-            self.push_message(format!("Gagal menyimpan preferensi tema: {err}"));
+            self.push_message(format!("Failed to save theme preferences: {err}"));
         }
         cx.notify();
     }
@@ -39,20 +39,18 @@ impl Workbench {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsPage {
     Appearance,
-    Updates,
     Logs,
     About,
 }
 
 impl SettingsPage {
-    const ALL: [Self; 4] = [Self::Appearance, Self::Updates, Self::Logs, Self::About];
+    const ALL: [Self; 3] = [Self::Appearance, Self::Logs, Self::About];
 
     fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
-            Self::Updates => "Updates",
             Self::Logs => "Logs",
-            Self::About => "About Ora",
+            Self::About => concat!("About ", app_name!()),
         }
     }
 
@@ -61,16 +59,14 @@ impl SettingsPage {
             Self::Appearance => {
                 "appearance theme light dark system color accent font size motion icon"
             }
-            Self::Updates => "updates check download version proxy network",
-            Self::Logs => "logs log error crash report bug lapor",
-            Self::About => "about kilat version",
+            Self::Logs => "logs log error crash report bug",
+            Self::About => "about kilat check for updates download version proxy network",
         }
     }
 
     fn icon(self) -> IconName {
         match self {
             Self::Appearance => IconName::Sun,
-            Self::Updates => IconName::Download,
             Self::Logs => IconName::FileText,
             Self::About => IconName::Info,
         }
@@ -93,7 +89,7 @@ impl SettingsState {
         let proxy = store::load_update_prefs().proxy.unwrap_or_default();
         let proxy_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("http://proxy.kantor:8080")
+                .placeholder("http://proxy.example.com:8080")
                 .default_value(proxy)
         });
         Self {
@@ -144,7 +140,7 @@ impl Workbench {
         let mut prefs = theme::appearance(cx);
         change(&mut prefs);
         if let Err(err) = store::save_appearance(&prefs) {
-            self.push_message(format!("Gagal menyimpan pengaturan tampilan: {err}"));
+            self.push_message(format!("Failed to save appearance settings: {err}"));
         }
         theme::set_appearance(prefs, cx);
         theme::apply_preference(theme::preference(cx), window, cx);
@@ -241,15 +237,18 @@ impl Workbench {
                         Some(SettingsPage::Appearance) => {
                             Some(self.render_appearance(theme, cx).into_any_element())
                         }
-                        Some(SettingsPage::Updates) => {
-                            Some(self.render_update_settings(theme, cx).into_any_element())
-                        }
                         Some(SettingsPage::Logs) => {
                             Some(self.render_logs(theme, cx).into_any_element())
                         }
-                        Some(SettingsPage::About) => {
-                            Some(crate::about::content(theme, cx).into_any_element())
-                        }
+                        Some(SettingsPage::About) => Some(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(SPACE_4))
+                                .child(crate::about::content(theme, cx))
+                                .child(self.render_update_settings(theme, cx))
+                                .into_any_element(),
+                        ),
                         None => None,
                     }),
             );

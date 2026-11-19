@@ -827,14 +827,14 @@ impl TableDelegate for ResultsDelegate {
             (self.on_edit.clone(), self.edit_request(abs_row, data_col))
         {
             menu = menu.item(
-                PopupMenuItem::new("Edit nilai…").on_click(move |_, window, cx| {
+                PopupMenuItem::new("Edit Cell…").on_click(move |_, window, cx| {
                     handler(request.clone(), window, cx);
                 }),
             );
             if let Some(paste) = self.on_cell_paste.clone() {
                 let label = match self.picked_cell_count() {
                     0 | 1 => "Paste".to_string(),
-                    n => format!("Paste ke {n} cell"),
+                    n => format!("Paste into {n} cells"),
                 };
                 menu = menu.item(
                     PopupMenuItem::new(label).on_click(move |_, window, cx| paste(window, cx)),

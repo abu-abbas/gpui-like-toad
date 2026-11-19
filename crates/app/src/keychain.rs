@@ -27,7 +27,7 @@ fn entry(profile_id: &str) -> Result<Entry, CredentialError> {
 fn describe(err: Error) -> CredentialError {
     CredentialError(match err {
         Error::NoDefaultStore => {
-            "Keychain OS tidak tersedia (di Linux butuh Secret Service, mis. GNOME Keyring)."
+            "The system keychain is unavailable. Linux requires a Secret Service provider such as GNOME Keyring."
                 .to_string()
         }
         Error::NoStorageAccess(e) | Error::PlatformFailure(e) => format!("Keychain error: {e}"),

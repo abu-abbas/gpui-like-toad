@@ -665,7 +665,8 @@ pub fn save_connection_folder_colors(colors: &BTreeMap<String, String>) -> std::
 }
 
 /// A portable list of connection settings. Keychain IDs and the saved
-/// password flag stay machine-local.
+/// password flag stay machine-local. The original format identifier keeps
+/// these exports compatible with older app versions.
 pub fn export_connection_profiles(profiles: &[SavedProfile]) -> String {
     let items = profiles
         .iter()
@@ -684,7 +685,7 @@ pub fn export_connection_profiles(profiles: &[SavedProfile]) -> String {
     ]))
 }
 
-/// Read Ora's portable format or its older bare connection list. A
+/// Read the portable format or its older bare connection list. A
 /// transferred profile never points to another machine's keychain and
 /// must explicitly be opted into SYSDBA after import.
 pub fn import_connection_profiles(text: &str) -> Result<Vec<SavedProfile>, String> {
@@ -700,7 +701,7 @@ pub fn import_connection_profiles(text: &str) -> Result<Vec<SavedProfile>, Strin
             .ok_or("Connections must be a JSON array")?,
         _ => {
             return Err(
-                "Unsupported connection file. Expected an Ora connections JSON file.".into(),
+                "Unsupported connection file. Expected a Kilat connections JSON file.".into(),
             )
         }
     };
@@ -980,7 +981,7 @@ pub fn save_panel_layout(layout: PanelLayout) -> std::io::Result<()> {
 }
 
 /// Names of the color themes picked for light and dark mode. `None` means
-/// the app's own palette ("Ora"). Names match gpui-kit `ThemeRegistry`
+/// the app's own palette ("Kilat"). Names match gpui-kit `ThemeRegistry`
 /// entries, e.g. "Ayu Light" or "Tokyo Night".
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ThemeNames {

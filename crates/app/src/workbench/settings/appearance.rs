@@ -188,7 +188,7 @@ impl Workbench {
             (if dark { names.dark } else { names.light }).filter(|name| options.contains(name));
         let label = current
             .as_deref()
-            .unwrap_or(theme::ORA_THEME_LABEL)
+            .unwrap_or(theme::DEFAULT_THEME_LABEL)
             .to_owned();
         let view = cx.entity();
         Button::new("theme-picker")
@@ -206,7 +206,7 @@ impl Workbench {
                 menu.min_w(px(252.))
                     .check_side(gpui_kit::component::Side::Right)
                     .item(
-                        PopupMenuItem::new(theme::ORA_THEME_LABEL)
+                        PopupMenuItem::new(theme::DEFAULT_THEME_LABEL)
                             .icon(icon(IconName::CaseSensitive, 20., cx.theme().primary))
                             .checked(selected)
                             .on_click(move |_, window, cx| {

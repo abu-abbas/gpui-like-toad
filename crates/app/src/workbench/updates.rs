@@ -3,9 +3,9 @@
 //! newer release shows a banner with its notes and a button that opens the
 //! release page in the browser (the banner is one minimal line; a
 //! "What's new" tab next to Home lists the full release notes). The tab
-//! also has "Update sekarang": gpui-updater-core downloads the asset for
+//! also has "Update Now": gpui-updater-core downloads the asset for
 //! this OS, checks SHA256SUMS and the minisign signature (key in
-//! release-key.pub), swaps the app in, then "Mulai ulang" relaunches.
+//! release-key.pub), swaps the app in, then "Restart" relaunches.
 //! The request is one anonymous GET of the public API: no identifiers.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -33,7 +33,7 @@ pub(super) struct UpdateState {
     previous_focus: Option<gpui_kit::FocusHandle>,
     /// Newest release, when newer than this build.
     available: Option<ReleaseInfo>,
-    /// Banner visible (hidden by "Nanti" until the next newer version).
+    /// Banner visible (hidden by "Later" until the next newer version).
     banner: bool,
     /// "What's new" tab exists (next to Home) and is the shown page.
     tab_open: bool,
@@ -97,7 +97,7 @@ pub(super) fn set_http_proxy(url: Option<String>) {
 /// `Ok(None)` keeps the default; a bad URL is reported instead of ignored.
 fn configured_proxy() -> Result<Option<ureq::Proxy>, String> {
     let url = HTTP_PROXY.lock().ok().and_then(|slot| slot.clone());
-    url.map(|u| ureq::Proxy::new(&u).map_err(|e| format!("Proxy tidak valid ({u}): {e}")))
+    url.map(|u| ureq::Proxy::new(&u).map_err(|e| format!("Invalid proxy ({u}): {e}")))
         .transpose()
 }
 
@@ -259,7 +259,7 @@ fn install_release(info: &ReleaseInfo) -> Result<Option<std::path::PathBuf>, Str
     let engine = update_engine(info);
     match engine.update_now(|_, _| {}) {
         Ok(Some(installed)) => Ok(installed.restart_path),
-        Ok(None) => Err("Sudah versi terbaru.".to_string()),
+        Ok(None) => Err("You're up to date.".to_string()),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -279,13 +279,13 @@ impl Workbench {
         else {
             u.download_note = Some((
                 true,
-                "Tidak ada file untuk OS ini; buka halaman rilis.".into(),
+                "No download is available for this operating system. Open the release page for details.".into(),
             ));
             cx.notify();
             return;
         };
         u.downloading = true;
-        u.download_note = Some((false, format!("Mengunduh {}...", asset.name)));
+        u.download_note = Some((false, format!("Downloading {}…", asset.name)));
         let task = cx
             .background_executor()
             .spawn(async move { download_asset(&asset) });
@@ -296,9 +296,9 @@ impl Workbench {
                 this.updates.download_note = Some(match result {
                     Ok(path) => {
                         cx.reveal_path(&path);
-                        (false, format!("Tersimpan di {}", path.display()))
+                        (false, format!("Saved to {}", path.display()))
                     }
-                    Err(err) => (true, format!("Gagal mengunduh: {err}")),
+                    Err(err) => (true, format!("Download failed: {err}")),
                 });
                 cx.notify();
             });
@@ -317,7 +317,10 @@ impl Workbench {
             return;
         };
         u.installing = true;
-        u.download_note = Some((false, format!("Mengunduh dan memasang {}...", info.version)));
+        u.download_note = Some((
+            false,
+            format!("Downloading and installing {}…", info.version),
+        ));
         let task = cx
             .background_executor()
             .spawn(async move { install_release(&info) });
@@ -330,10 +333,10 @@ impl Workbench {
                         this.updates.staged = Some(path);
                         (
                             false,
-                            "Update terpasang. Mulai ulang untuk memakainya.".into(),
+                            "Update installed. Restart to use the new version.".into(),
                         )
                     }
-                    Err(err) => (true, format!("Update gagal: {err}")),
+                    Err(err) => (true, format!("Update failed: {err}")),
                 });
                 cx.notify();
             });
@@ -633,7 +636,7 @@ impl Workbench {
 
     fn save_update_prefs(&mut self) {
         if let Err(err) = store::save_update_prefs(&self.updates.prefs) {
-            self.push_message(format!("Gagal menyimpan pengaturan update: {err}"));
+            self.push_message(format!("Failed to save update settings: {err}"));
         }
     }
 
@@ -642,7 +645,7 @@ impl Workbench {
         self.save_update_prefs();
     }
 
-    /// Settings > Updates > Proxy: apply and remember the proxy URL (blank =
+    /// Settings > About Kilat > Proxy: apply and remember the proxy URL (blank =
     /// use the system environment variables).
     pub(super) fn set_proxy(&mut self, text: &str) {
         let url = Some(text.trim().to_string()).filter(|u| !u.is_empty());
@@ -662,7 +665,7 @@ impl Workbench {
         }
     }
 
-    /// Settings > Updates section.
+    /// Updates section on the About page.
     pub(super) fn render_update_settings(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -676,7 +679,7 @@ impl Workbench {
             .child(form_label("Updates", theme))
             .child(
                 Checkbox::new("auto-check-updates")
-                    .label("Cek update otomatis saat start")
+                    .label("Check for updates automatically on startup")
                     .checked(u.prefs.auto_check)
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.set_auto_check_updates(*checked);
@@ -701,15 +704,14 @@ impl Workbench {
             .child(form_label("Proxy", theme))
             .child(Input::new(&self.settings.proxy_input).small().w_full())
             .child(caption_text(
-                "Isi kalau jaringan kantor harus lewat proxy, contoh http://proxy.kantor:8080 \
-                 (bisa http://user:pass@host:port). Kosong = pakai HTTPS_PROXY / ALL_PROXY \
-                 dari environment. Berlaku untuk cek dan unduh update."
+                "Enter a proxy URL if your network requires one, for example http://proxy.example.com:8080 \
+                 (or http://user:pass@host:port). Leave blank to use HTTPS_PROXY or ALL_PROXY \
+                 from the environment. Applies to update checks and downloads."
                     .to_string(),
                 theme,
             ));
         section.child(caption_text(
-            "Cek ke GitHub Releases (maksimal sehari sekali); tidak ada data kamu yang dikirim."
-                .to_string(),
+            "Automatic checks contact GitHub Releases at most once a day.".to_string(),
             theme,
         ))
     }
@@ -739,7 +741,7 @@ impl Workbench {
     }
 
     /// Minimal one-line banner above the whole window when a newer release
-    /// exists; clicking the text or "Lihat detail" opens the popup.
+    /// exists; clicking the text or "View Details" opens the popup.
     pub(super) fn render_update_banner(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -748,7 +750,7 @@ impl Workbench {
         let u = &self.updates;
         let release = u.available.as_ref().filter(|_| u.banner)?;
         let text = format!(
-            "Versi {} tersedia (kamu pakai {}).",
+            "Version {} is available. You're running {}.",
             release.version,
             env!("CARGO_PKG_VERSION")
         );
@@ -776,7 +778,7 @@ impl Workbench {
                 )
                 .child(
                     Button::new("update-details")
-                        .label("Lihat detail")
+                        .label("View Details")
                         .primary()
                         .small()
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -942,7 +944,7 @@ impl Workbench {
                 )
                 .child(caption_text(
                     format!(
-                        "Kamu memakai versi terbaru ({}).",
+                        "You are running the latest version ({}).",
                         env!("CARGO_PKG_VERSION")
                     ),
                     theme,
@@ -964,7 +966,7 @@ impl Workbench {
                     .child(format!("What's new di {}", release.version)),
             )
             .child(caption_text(
-                format!("Kamu memakai {}.", env!("CARGO_PKG_VERSION")),
+                format!("You are running version {}.", env!("CARGO_PKG_VERSION")),
                 theme,
             ))
             .child(
@@ -976,7 +978,7 @@ impl Workbench {
                     .when(staged, |row| {
                         row.child(
                             Button::new("update-restart")
-                                .label("Mulai ulang")
+                                .label("Restart")
                                 .icon(IconName::Play)
                                 .primary()
                                 .on_click(
@@ -987,7 +989,7 @@ impl Workbench {
                     .when(can_install && !staged, |row| {
                         row.child(
                             Button::new("update-install")
-                                .label("Update sekarang")
+                                .label("Update Now")
                                 .icon(IconName::Download)
                                 .primary()
                                 .loading(installing)
@@ -1011,7 +1013,7 @@ impl Workbench {
                     })
                     .child(
                         Button::new("update-open")
-                            .label("Buka halaman rilis")
+                            .label("Open release page")
                             .on_click(move |_, _, cx| cx.open_url(&url)),
                     ),
             );
@@ -1041,7 +1043,7 @@ impl Workbench {
         let notes = release.notes.trim();
         if notes.is_empty() {
             page = page.child(empty_state_text(
-                "Tidak ada catatan rilis.".to_string(),
+                "No release notes available.".to_string(),
                 theme,
             ));
         }

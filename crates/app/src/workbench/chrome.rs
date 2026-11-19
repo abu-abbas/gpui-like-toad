@@ -166,7 +166,7 @@ impl Workbench {
             return (
                 theme.danger,
                 "Connection failed",
-                "lihat Messages".to_string(),
+                "see Messages".to_string(),
             );
         }
         if self.conn.connection_lost {
@@ -223,13 +223,15 @@ impl Workbench {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_size(theme::ui_size(theme, FONT_HEADING_MD))
                             .text_color(theme.muted_foreground)
-                            .child("Belum ada objek yang dibuka"),
+                            .child("No objects open"),
                     )
                     .child(
                         div()
                             .text_center()
                             .text_color(theme::empty_hint(theme))
-                            .child("Klik dua kali objek di explorer atau buka New SQL editor."),
+                            .child(
+                                "Double-click an object in the explorer or open a new SQL editor.",
+                            ),
                     ),
             );
         } else if self.active_tab().kind != TabKind::Query {
@@ -605,7 +607,7 @@ impl Workbench {
                         if self.conn.busy {
                             "Running…".to_string()
                         } else if self.conn.session.is_some()
-                            || self.conn.status != "Belum terhubung."
+                            || self.conn.status != "Not connected."
                         {
                             self.conn.status.clone()
                         } else {

@@ -30,7 +30,7 @@ impl Workbench {
                             crate::error_log::report(),
                         ));
                         this.push_message(
-                            "Laporan error disalin; tempel ke chat atau issue.".to_string(),
+                            "Error report copied. Paste it into a chat or issue.".to_string(),
                         );
                         cx.notify();
                     })),
@@ -67,7 +67,7 @@ impl Workbench {
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Err(err) = crate::error_log::clear() {
                             // Not through push_message: that would log it.
-                            this.settings.log_text = format!("Gagal menghapus log: {err}");
+                            this.settings.log_text = format!("Failed to clear the log: {err}");
                         } else {
                             this.reload_error_log();
                         }
@@ -88,7 +88,7 @@ impl Workbench {
             .child(if text.is_empty() {
                 div()
                     .text_color(theme.muted_foreground)
-                    .child("Belum ada error yang tercatat.")
+                    .child("No errors logged.")
             } else {
                 // Newest first, like the Info panel.
                 div()
@@ -110,8 +110,8 @@ impl Workbench {
             .gap(px(SPACE_2))
             .child(form_label("Error log", theme))
             .child(caption_text(
-                "Semua error yang muncul di panel Info juga dicatat di file ini, jadi tetap ada \
-                 setelah app ditutup. Klik Copy report lalu tempel waktu melapor bug."
+                "Errors shown in the Info panel are saved in this file so you can review them \
+                 after closing the app. Use Copy Report to include them in a bug report."
                     .to_string(),
                 theme,
             ))
@@ -122,8 +122,8 @@ impl Workbench {
             .child(form_label("Crash log", theme))
             .child(caption_text(
                 format!(
-                    "Kalau app tertutup sendiri (panic), detailnya ada di {}. Ikut tersalin di \
-                     Copy report.",
+                    "Crash details are saved in {} and included when you select \
+                     Copy Report.",
                     crash_path.display()
                 ),
                 theme,

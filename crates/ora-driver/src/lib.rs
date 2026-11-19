@@ -375,7 +375,7 @@ impl DbClient for ThinClient {
             )
             .map_err(db_err)?;
         let Some(row) = cursor.into_iter().next() else {
-            return Err(DbError::new(format!("DDL kosong untuk {owner}.{name}")));
+            return Err(DbError::new(format!("No DDL returned for {owner}.{name}")));
         };
         let ddl: Option<String> = row.map_err(db_err)?.get(0).map_err(db_err)?;
         let mut ddl = ddl.unwrap_or_default().trim().to_string();
@@ -593,8 +593,8 @@ fn run_explain_plan(conn: &oracledb::Connection, sql: &str) -> Result<(), DbErro
         let mut message = err.to_string();
         if message.contains("02404") || message.contains("PLAN_TABLE") {
             message.push_str(
-                "\nHint: jalankan @?/rdbms/admin/catplan.sql sebagai user ini \
-                 untuk membuat PLAN_TABLE.",
+                "\nHint: Run @?/rdbms/admin/catplan.sql as this user \
+                 to create PLAN_TABLE.",
             );
         }
         return Err(DbError::new(message));

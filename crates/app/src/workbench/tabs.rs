@@ -385,19 +385,4 @@ impl Workbench {
         let editor = self.active_tab().editor.clone();
         editor.update(cx, |state, cx| state.set_value(sql, window, cx));
     }
-
-    pub(super) fn load_sql_into_active_tab(
-        &mut self,
-        sql: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.show_empty_workspace {
-            self.new_tab_with_sql(sql, window, cx);
-            return;
-        }
-        let editor = self.active_tab().editor.clone();
-        editor.update(cx, |state, cx| state.set_value(sql, window, cx));
-        cx.notify();
-    }
 }

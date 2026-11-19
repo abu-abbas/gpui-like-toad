@@ -77,7 +77,10 @@ fn missing_file_is_an_error_and_is_not_created() {
             "",
         )
         .unwrap_err();
-    assert!(err.to_string().contains("tidak ditemukan"), "{err}");
+    assert!(
+        err.to_string().contains("SQLite database file not found"),
+        "{err}"
+    );
     assert!(!path.exists());
 }
 

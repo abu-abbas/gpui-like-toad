@@ -133,12 +133,14 @@ impl DbClient for SqliteClient {
     fn connect(&mut self, profile: &ConnectionProfile, _password: &str) -> Result<DbInfo, DbError> {
         let path = profile.connect_string.trim();
         if path.is_empty() {
-            return Err(DbError::new("Pilih file database SQLite dulu."));
+            return Err(DbError::new("Select a SQLite database file first."));
         }
         // No CREATE flag: a typo in the path must not leave an empty
         // database file behind.
         if !Path::new(path).is_file() {
-            return Err(DbError::new(format!("File SQLite tidak ditemukan: {path}")));
+            return Err(DbError::new(format!(
+                "SQLite database file not found: {path}"
+            )));
         }
         let flags = if profile.access.read_only {
             OpenFlags::SQLITE_OPEN_READ_ONLY

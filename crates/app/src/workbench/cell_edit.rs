@@ -51,7 +51,7 @@ impl Workbench {
         if !self.conn.access().read_only {
             return false;
         }
-        self.conn.status = format!("Koneksi ini read only: {what}.");
+        self.conn.status = format!("This connection is read-only: {what}.");
         cx.notify();
         true
     }
@@ -75,11 +75,11 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         if self.conn.busy {
-            self.conn.status = "Masih ada operasi berjalan.".to_string();
+            self.conn.status = "An operation is already running.".to_string();
             cx.notify();
             return;
         }
-        if self.blocked_by_read_only("cell tidak bisa diubah", cx) {
+        if self.blocked_by_read_only("cannot edit cells", cx) {
             return;
         }
         let initial = if request.value.is_null() {
@@ -89,7 +89,7 @@ impl Workbench {
         };
         let input = cx.new(|cx| {
             InputState::new(&mut *window, cx)
-                .placeholder("Nilai baru")
+                .placeholder("New value")
                 .default_value(initial)
         });
         let sub = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
@@ -144,12 +144,12 @@ impl Workbench {
             return;
         }
         if self.conn.busy {
-            self.conn.status = "Masih ada operasi berjalan.".to_string();
+            self.conn.status = "An operation is already running.".to_string();
             cx.notify();
             return;
         }
         if self.conn.access().read_only {
-            self.conn.status = "Koneksi ini read only: cell tidak bisa diubah.".to_string();
+            self.conn.status = "This connection is read-only: cannot edit cells.".to_string();
             cx.notify();
             return;
         }
@@ -175,13 +175,13 @@ impl Workbench {
             cx.notify();
         });
         self.conn.status = match (count, paste.clipped) {
-            (0, 0) => "Nilai clipboard sama dengan isi cell, tidak ada yang berubah.".to_string(),
+            (0, 0) => "The clipboard values match the existing cells.".to_string(),
             (n, 0) => {
-                format!("{n} cell diisi dari clipboard. Klik Apply untuk mengirim ke database.")
+                format!("Pasted cells: {n}. Click Apply to send the changes to the database.")
             }
-            (n, c) => format!(
-                "{n} cell diisi dari clipboard; {c} nilai tidak muat di halaman/kolom yang tampil."
-            ),
+            (n, c) => {
+                format!("Pasted cells: {n}. Values outside the visible rows or columns: {c}.")
+            }
         };
         cx.notify();
     }
@@ -233,7 +233,7 @@ impl Workbench {
                 .set_cell(&request.rowid, &request.column, shown);
         });
         self.sync_pending(tab_ix, cx);
-        self.conn.status = "Perubahan ditandai. Klik Apply untuk mengirim ke database.".to_string();
+        self.conn.status = "Changes staged. Click Apply to send them to the database.".to_string();
     }
 
     /// Push the tab's edit marks to its grid.
@@ -282,7 +282,7 @@ impl Workbench {
             })
             .collect();
         if inserts.iter().any(Vec::is_empty) {
-            self.conn.status = "Isi minimal satu kolom untuk setiap baris baru.".into();
+            self.conn.status = "Enter a value in at least one column of each new row.".into();
             cx.notify();
             return;
         }
@@ -310,7 +310,7 @@ impl Workbench {
             );
             self.push_message(query.inlined());
         }
-        self.conn.status = format!("Mengirim {} perubahan...", updates.len());
+        self.conn.status = format!("Applying changes ({})…", updates.len());
         self.spawn_db(
             Job::UpdateCells {
                 owner,
@@ -360,16 +360,16 @@ impl Workbench {
         match error {
             None => {
                 self.push_message(format!(
-                    "{done} perubahan dikirim. Belum di-commit: pakai Commit atau Rollback."
+                    "Applied changes: {done}. Use Commit to keep them or Rollback to undo them."
                 ));
-                self.conn.status = format!("{done} perubahan dikirim, belum di-commit.");
+                self.conn.status = format!("Applied changes: {done} (uncommitted).");
             }
             Some(err) => {
                 self.push_message(format!(
-                    "Gagal pada perubahan ke-{} ({err}). {done} sebelumnya sudah dikirim.",
+                    "Failed to apply change #{} ({err}). Changes already applied: {done}.",
                     done + 1
                 ));
-                self.conn.status = format!("Perubahan gagal: {err}");
+                self.conn.status = format!("Failed to apply changes: {err}");
             }
         }
     }
@@ -461,10 +461,10 @@ impl Workbench {
                     .flex_col()
                     .gap(px(SPACE_2))
                     .p(px(SPACE_4))
-                    .child(caption_text(format!("Nilai sekarang: {old}"), theme))
+                    .child(caption_text(format!("Current value: {old}"), theme))
                     .child(Input::new(&editor.input).w_full())
                     .child(caption_text(
-                        "Kosong = NULL. Perubahan dikirim lewat Apply dan baru permanen setelah Commit."
+                        "Leave blank for NULL. Click Apply to send the change, then Commit to save it permanently."
                             .to_string(),
                         theme,
                     )),
@@ -489,12 +489,12 @@ impl Workbench {
                     .child(div().flex_1())
                     .child(
                         Button::new("cell-cancel")
-                            .label("Batal")
+                            .label("Cancel")
                             .on_click(cx.listener(|this, _, _, cx| this.close_cell_editor(cx))),
                     )
                     .child(
                         Button::new("cell-save")
-                            .label("Simpan")
+                            .label("Save")
                             .primary()
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.save_cell_editor(false, window, cx)

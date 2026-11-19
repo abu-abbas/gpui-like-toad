@@ -17,16 +17,15 @@ pub fn log_path() -> PathBuf {
     ora_core::store::config_dir().join(LOG_FILE)
 }
 
-/// Messages are plain strings; Oracle/SQLite driver errors and Indonesian
-/// failure texts ("gagal") count as errors. Also drives the danger color in
-/// the Info panel.
+/// Recognize driver errors and failure messages for logging and danger styling
+/// in the Info panel.
 pub fn is_error_message(message: &str) -> bool {
     let lower = message.to_lowercase();
     message.contains("ORA-")
         || message.contains("DPY-")
         || message.starts_with("SQLite:")
         || lower.contains("error")
-        || lower.contains("gagal")
+        || lower.contains("failed")
         || lower.starts_with("demo:")
 }
 
@@ -98,12 +97,12 @@ pub fn report() -> String {
         std::env::consts::OS,
         std::env::consts::ARCH,
         if errors.is_empty() {
-            "(kosong)"
+            "(empty)"
         } else {
             &errors
         },
         if crashes.is_empty() {
-            "(kosong)"
+            "(empty)"
         } else {
             &crashes
         },
@@ -118,8 +117,8 @@ mod tests {
     fn errors_are_recognized_by_driver_prefix_or_wording() {
         assert!(is_error_message("ORA-00942: table or view does not exist"));
         assert!(is_error_message("SQLite: no such table: x"));
-        assert!(is_error_message("Gagal menyimpan koneksi"));
+        assert!(is_error_message("Failed to save connection"));
         assert!(!is_error_message("Connected: main @ toko.sqlite"));
-        assert!(!is_error_message("40 baris dalam 0ms"));
+        assert!(!is_error_message("40 rows in 0 ms"));
     }
 }
