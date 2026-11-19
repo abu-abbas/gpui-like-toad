@@ -55,6 +55,25 @@ impl Workbench {
         }
     }
 
+    /// Mutable access to the connection with this id, active or parked,
+    /// without making it active. Prefer this over [`Workbench::with_conn`]
+    /// for state that lives in `ConnState` alone.
+    pub(super) fn conn_mut(&mut self, id: u64) -> Option<&mut ConnState> {
+        if self.conn.id == id {
+            Some(&mut self.conn)
+        } else {
+            self.parked.iter_mut().find(|c| c.id == id)
+        }
+    }
+
+    /// Whether operation `generation` is still the one connection `id`
+    /// waits for. False for a superseded operation (Stop, a newer op) or a
+    /// connection that is gone: its response must be dropped.
+    pub(super) fn op_is_current(&self, id: u64, generation: u64) -> bool {
+        self.conn_by_id(id)
+            .is_some_and(|c| c.op_generation == generation)
+    }
+
     /// Swap `parked[ix]` with the active connection, autocomplete catalog
     /// included (the completion provider shares `self.catalog`, so the
     /// live catalog moves in and out of it). Calling it twice with the same
