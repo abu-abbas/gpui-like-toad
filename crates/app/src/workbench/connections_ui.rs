@@ -405,7 +405,9 @@ impl Workbench {
                 .editing_profile
                 .and_then(|ix| self.profiles.get(ix))
                 .is_some_and(|p| p.save_password);
-            let hint = if self.connection_form.save_password && has_saved {
+            let hint = if !form.kind.capabilities().password {
+                "File dibuka langsung, tanpa username atau password."
+            } else if self.connection_form.save_password && has_saved {
                 "Password tersimpan di keychain OS. Kosongkan untuk tetap pakai yang lama."
             } else if self.connection_form.save_password {
                 "Password disimpan di keychain OS, bukan di file profil."
