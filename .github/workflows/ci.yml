@@ -98,6 +98,9 @@ jobs:
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Compile macOS launcher icon
+        if: runner.os == 'macOS'
+        run: sh crates/app/assets/icon/compile-macos-icon.sh "$RUNNER_TEMP/kilat-icons"
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
