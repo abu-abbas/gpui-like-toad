@@ -240,3 +240,17 @@ fn read_only_profile_refuses_writes() {
     let err = client.execute("DELETE FROM emp").unwrap_err();
     assert!(err.to_string().contains("readonly"), "{err}");
 }
+
+/// Advisory SQLite lama diperbaiki di 3.54.0; pastikan build memakai versi itu.
+#[test]
+fn bundled_sqlite_is_patched() {
+    let parts: Vec<u32> = rusqlite::version()
+        .split('.')
+        .map(|p| p.parse().unwrap_or(0))
+        .collect();
+    assert!(
+        (parts[0], parts[1]) >= (3, 54),
+        "SQLite terlalu lama: {}",
+        rusqlite::version()
+    );
+}

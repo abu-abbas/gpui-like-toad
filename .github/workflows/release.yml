@@ -55,8 +55,12 @@ jobs:
           .github/scripts/check-release-key.sh release-key.pub "$RUNNER_TEMP/release.key"
           rm -f "$RUNNER_TEMP/release.key" "$RUNNER_TEMP/release.key.pub"
 
+  # Rilis berhenti kalau ada advisory yang gagal di audit dependency.
+  audit:
+    uses: ./.github/workflows/audit.yml
+
   build:
-    needs: preflight
+    needs: [preflight, audit]
     strategy:
       fail-fast: false
       matrix:
