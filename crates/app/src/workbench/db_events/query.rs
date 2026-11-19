@@ -28,6 +28,7 @@ impl Workbench {
         self.conn.status = format!("Queries completed: {}.", results.len());
         self.tabs[ix].statement_results = results;
         self.show_statement_result(ix, 0, cx);
+        self.enforce_result_budget(cx);
     }
 
     pub(super) fn on_query_done(
@@ -39,6 +40,7 @@ impl Workbench {
         let rows = result.row_count();
         let elapsed = result.elapsed.as_millis();
         let truncated = result.truncated;
+        let limit_note = super::super::results::limit_note(&result);
         if let Some(sql) = pending_sql {
             self.record_run(&sql);
         }
@@ -51,13 +53,16 @@ impl Workbench {
         self.set_grid_result(result, cx);
         self.target_tab_mut().results_tab = ResultsTab::Results;
         let is_data = self.target_tab_mut().data.is_some();
-        self.conn.status = if truncated && is_data {
+        self.conn.status = if truncated && is_data && limit_note.is_empty() {
             format!("{rows} rows in {elapsed} ms (more rows available)")
-        } else if truncated {
+        } else if truncated && limit_note.is_empty() {
             format!("{rows} rows in {elapsed} ms (limited to {DEFAULT_MAX_ROWS} rows)")
         } else {
-            format!("{rows} rows in {elapsed} ms")
+            format!("{rows} rows in {elapsed} ms{limit_note}")
         };
+        if !limit_note.is_empty() {
+            self.push_message(format!("{rows} rows{limit_note}"));
+        }
     }
 
     pub(super) fn on_statement_executed(&mut self, affected: u64, pending_sql: Option<String>) {
@@ -85,5 +90,28 @@ impl Workbench {
         tab.plan_lines = lines;
         tab.results_tab = ResultsTab::Plan;
         self.conn.status = "Explain plan ready.".to_string();
+    }
+
+    pub(super) fn on_cell_loaded(
+        &mut self,
+        rowid: String,
+        column: String,
+        value: ora_core::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let size = value.heap_bytes();
+        let shown = self.target_tab_mut().table_state.update(cx, |state, cx| {
+            let shown = state
+                .delegate_mut()
+                .set_cell(&rowid, &column, value)
+                .is_some();
+            state.refresh(cx);
+            shown
+        });
+        self.conn.status = if shown {
+            format!("Loaded the full value of {column} ({size} bytes).")
+        } else {
+            "The row is no longer in the grid.".to_string()
+        };
     }
 }

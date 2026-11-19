@@ -45,6 +45,7 @@ impl Workbench {
                 | PendingOp::DataIndexes
                 | PendingOp::DataDdl
                 | PendingOp::ApplyEdits
+                | PendingOp::LoadCell
                 | PendingOp::DuplicateRows(_)
         );
         let tab_conn = self.tabs.get(self.active_tab).and_then(|t| t.conn);
@@ -322,6 +323,14 @@ impl Workbench {
             (Some(PendingOp::Run), Response::ScriptDone(results)) => {
                 self.on_script_done(results, cx)
             }
+            (
+                Some(PendingOp::LoadCell),
+                Response::CellLoaded {
+                    rowid,
+                    column,
+                    value,
+                },
+            ) => self.on_cell_loaded(rowid, column, value, cx),
             (Some(PendingOp::Run), Response::QueryDone(result)) => {
                 self.on_query_done(result, pending_sql, cx)
             }
@@ -349,8 +358,9 @@ impl Workbench {
                     path,
                     rows,
                     truncated,
+                    clipped,
                 },
-            ) => self.on_table_exported(owner, name, path, rows, truncated),
+            ) => self.on_table_exported(owner, name, path, rows, truncated, clipped),
             (Some(PendingOp::RefreshMaterializedView { owner, name }), Response::Executed(_)) => {
                 self.on_materialized_view_refreshed(owner, name, cx)
             }

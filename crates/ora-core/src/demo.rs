@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use crate::client::{DbClient, DbError, DbInfo};
 use crate::dialect::DbKind;
+use crate::fetch::{FetchLimits, RowCollector};
 use crate::filter::{TableFilter, TablePage};
 use crate::model::{
     ColumnDef, ColumnInfo, ConnectionProfile, IndexDef, ObjectKind, PlanNode, QueryResult,
@@ -78,7 +79,7 @@ impl Default for DemoClient {
     }
 }
 
-fn employees_result(max_rows: usize) -> QueryResult {
+fn employees_result(limits: FetchLimits) -> QueryResult {
     let columns = vec![
         ColumnInfo {
             name: "EMPLOYEE_ID".into(),
@@ -165,10 +166,10 @@ fn employees_result(max_rows: usize) -> QueryResult {
             Value::Float(0.3),
         ],
     ];
-    finish(columns, rows, max_rows)
+    finish(columns, rows, limits)
 }
 
-fn departments_result(max_rows: usize) -> QueryResult {
+fn departments_result(limits: FetchLimits) -> QueryResult {
     let columns = vec![
         ColumnInfo {
             name: "DEPARTMENT_ID".into(),
@@ -205,28 +206,20 @@ fn departments_result(max_rows: usize) -> QueryResult {
             Value::Integer(2400),
         ],
     ];
-    finish(columns, rows, max_rows)
+    finish(columns, rows, limits)
 }
 
-fn dual_result(max_rows: usize) -> QueryResult {
+fn dual_result(limits: FetchLimits) -> QueryResult {
     let columns = vec![ColumnInfo {
         name: "USER".into(),
         data_type: "VARCHAR2(128)".into(),
     }];
     let rows = vec![vec![Value::Text("DEMO".into())]];
-    finish(columns, rows, max_rows)
+    finish(columns, rows, limits)
 }
 
-fn finish(columns: Vec<ColumnInfo>, rows: Vec<Vec<Value>>, max_rows: usize) -> QueryResult {
-    let truncated = rows.len() > max_rows;
-    let rows = rows.into_iter().take(max_rows).collect();
-    QueryResult {
-        columns,
-        rows,
-        truncated,
-        elapsed: Default::default(),
-        fetch_time: None,
-    }
+fn finish(columns: Vec<ColumnInfo>, rows: Vec<Vec<Value>>, limits: FetchLimits) -> QueryResult {
+    RowCollector::collect_all(limits, columns, rows, Default::default())
 }
 
 impl DbClient for DemoClient {
@@ -256,7 +249,7 @@ impl DbClient for DemoClient {
         self.connected_user.is_some()
     }
 
-    fn query(&mut self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError> {
+    fn query(&mut self, sql: &str, limits: FetchLimits) -> Result<QueryResult, DbError> {
         self.require_connected()?;
         let started = Instant::now();
         // Ignore identifier quotes and the owner prefix so the explorer's
@@ -272,11 +265,11 @@ impl DbClient for DemoClient {
             .next()
             .unwrap_or("");
         let mut result = if table == "employees" || table == "emp_details_view" {
-            employees_result(max_rows)
+            employees_result(limits)
         } else if table == "departments" {
-            departments_result(max_rows)
+            departments_result(limits)
         } else if lowered.contains("dual") {
-            dual_result(max_rows)
+            dual_result(limits)
         } else {
             return Err(DbError::new(
                 "demo: unknown table in query (demo catalog: EMPLOYEES, DEPARTMENTS, DUAL)",
@@ -299,7 +292,7 @@ impl DbClient for DemoClient {
         let sql =
             crate::filter::select_sql(self.dialect(), owner, table, &TableFilter::default(), page)
                 .sql;
-        let all = self.query(&sql, usize::MAX)?;
+        let all = self.query(&sql, FetchLimits::unlimited_bytes(usize::MAX))?;
         let mut columns = all.columns;
         let mut rows: Vec<(usize, Vec<Value>)> = all.rows.into_iter().enumerate().collect();
         for change in self.committed_rows.iter().chain(&self.staged_rows) {
@@ -358,7 +351,7 @@ impl DbClient for DemoClient {
                 },
             );
         }
-        let mut result = finish(columns, rows, page.limit);
+        let mut result = finish(columns, rows, FetchLimits::rows(page.limit));
         result.elapsed = started.elapsed();
         Ok(result)
     }
@@ -709,14 +702,18 @@ mod tests {
     #[test]
     fn demo_query_returns_employees_and_honors_cap() {
         let mut client = connected();
-        let full = client.query("SELECT * FROM employees", 100).unwrap();
+        let full = client
+            .query("SELECT * FROM employees", FetchLimits::rows(100))
+            .unwrap();
         assert_eq!(full.row_count(), 6);
         assert!(!full.truncated);
         assert_eq!(full.columns[0].name, "EMPLOYEE_ID");
         assert_eq!(full.get(0, 0), Some(&Value::Integer(100)));
         assert_eq!(full.get(0, 6), Some(&Value::Null));
 
-        let capped = client.query("SELECT * FROM employees", 2).unwrap();
+        let capped = client
+            .query("SELECT * FROM employees", FetchLimits::rows(2))
+            .unwrap();
         assert_eq!(capped.row_count(), 2);
         assert!(capped.truncated);
     }
@@ -727,7 +724,7 @@ mod tests {
         let r = client
             .query(
                 "SELECT * FROM \"HR\".\"DEPARTMENTS\" FETCH FIRST 1000 ROWS ONLY",
-                100,
+                FetchLimits::rows(100),
             )
             .unwrap();
         assert_eq!(r.columns[0].name, "DEPARTMENT_ID");
@@ -871,7 +868,11 @@ mod tests {
         );
         // Binds without a SQL engine are refused, not silently ignored.
         assert!(client
-            .query_binds("SELECT * FROM employees WHERE x = :1", &["1".into()], 10)
+            .query_binds(
+                "SELECT * FROM employees WHERE x = :1",
+                &["1".into()],
+                FetchLimits::rows(10)
+            )
             .is_err());
     }
 
@@ -891,14 +892,18 @@ mod tests {
     #[test]
     fn demo_query_rejects_unknown_tables() {
         let mut client = connected();
-        let err = client.query("SELECT * FROM nope", 10).unwrap_err();
+        let err = client
+            .query("SELECT * FROM nope", FetchLimits::rows(10))
+            .unwrap_err();
         assert!(err.0.contains("EMPLOYEES"), "{err}");
     }
 
     #[test]
     fn demo_requires_connection() {
         let mut client = DemoClient::new();
-        assert!(client.query("SELECT * FROM dual", 10).is_err());
+        assert!(client
+            .query("SELECT * FROM dual", FetchLimits::rows(10))
+            .is_err());
         assert!(!client.is_connected());
     }
 

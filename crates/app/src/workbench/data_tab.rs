@@ -228,6 +228,24 @@ impl Workbench {
         }
     }
 
+    /// "Load full value": fetch one clipped cell of the active data tab
+    /// in full; the response shows it in the grid.
+    pub(super) fn load_full_cell(&mut self, rowid: String, column: String, cx: &mut Context<Self>) {
+        if self.conn.busy {
+            return;
+        }
+        let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
+            return;
+        };
+        let job = Job::LoadCell {
+            owner: data.owner.clone(),
+            name: data.name.clone(),
+            column,
+            rowid,
+        };
+        self.spawn_db(job, PendingOp::LoadCell, cx);
+    }
+
     pub(super) fn data_mut(&mut self) -> Option<&mut DataTab> {
         self.tabs.get_mut(self.active_tab)?.data.as_mut()
     }
@@ -847,7 +865,10 @@ impl Workbench {
         let view = cx.entity();
         let join_button = Button::new("filter-join")
             .small()
-            .child(select_trigger(format!("Gabung: {}", join.keyword()), theme))
+            .child(select_trigger(
+                format!("Combine: {}", join.keyword()),
+                theme,
+            ))
             .tooltip("Choose how to combine checked filters")
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.min_w(px(260.));

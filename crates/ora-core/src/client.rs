@@ -2,9 +2,12 @@ use std::fmt;
 
 use crate::completion::CatalogObject;
 use crate::dialect::{Capabilities, DbKind, Dialect};
+use crate::fetch::FetchLimits;
 use crate::filter::{self, TableFilter, TablePage};
 use crate::model::IndexDef;
-use crate::model::{ColumnDef, ConnectionProfile, ObjectKind, PlanNode, QueryResult, SchemaObject};
+use crate::model::{
+    ColumnDef, ConnectionProfile, ObjectKind, PlanNode, QueryResult, SchemaObject, Value,
+};
 
 /// Error from a database operation. The message is user-facing: driver errors
 /// are converted to their display text (including the ORA- number) so the UI
@@ -78,11 +81,12 @@ pub trait DbClient: Send {
         }
     }
 
-    /// Run a SELECT/WITH statement and fetch up to `max_rows` rows.
+    /// Run a SELECT/WITH statement and fetch rows within `limits` (rows,
+    /// bytes per cell, bytes per result; see [`FetchLimits`]).
     /// Implementations strip a trailing `;`/`/` before executing (the thin
-    /// driver rejects them) and set `QueryResult::truncated` when the cap
+    /// driver rejects them) and set `QueryResult::truncated` when a limit
     /// cut the result short.
-    fn query(&mut self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError>;
+    fn query(&mut self, sql: &str, limits: FetchLimits) -> Result<QueryResult, DbError>;
 
     /// Like [`DbClient::query`], with positional bind values (`:1` is
     /// `binds[0]`), all bound as text; Oracle converts them to the column's
@@ -91,10 +95,10 @@ pub trait DbClient: Send {
         &mut self,
         sql: &str,
         binds: &[String],
-        max_rows: usize,
+        limits: FetchLimits,
     ) -> Result<QueryResult, DbError> {
         if binds.is_empty() {
-            self.query(sql, max_rows)
+            self.query(sql, limits)
         } else {
             Err(DbError::new(
                 "bind variables are not supported by this backend",
@@ -114,7 +118,34 @@ pub trait DbClient: Send {
         page: TablePage,
     ) -> Result<QueryResult, DbError> {
         let query = filter::select_sql(self.dialect(), owner, table, filter, page);
-        self.query_binds(&query.sql, &query.binds, page.limit)
+        self.query_binds(&query.sql, &query.binds, FetchLimits::rows(page.limit))
+    }
+
+    /// One cell of the row with `rowid`, fetched with the "Load full
+    /// value" limit instead of the grid's per-cell limit.
+    fn fetch_cell(
+        &mut self,
+        owner: &str,
+        table: &str,
+        column: &str,
+        rowid: &str,
+    ) -> Result<Value, DbError> {
+        let query = crate::edit::select_cell_sql(self.dialect(), owner, table, column, rowid);
+        let result = self.query_binds(&query.sql, &query.binds, FetchLimits::full_cell())?;
+        match result
+            .rows
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next())
+        {
+            Some(Value::Clipped(c)) => Err(DbError::new(format!(
+                "The value is {}, larger than the {} MiB that can be loaded into the grid.",
+                c.describe_len(),
+                crate::fetch::MAX_FULL_CELL_BYTES / (1024 * 1024)
+            ))),
+            Some(value) => Ok(value),
+            None => Err(DbError::new("Row no longer exists or its ROWID changed")),
+        }
     }
 
     /// Run a non-SELECT statement (DML/DDL/PL/SQL). Returns rows affected

@@ -27,12 +27,19 @@ impl Workbench {
         path: std::path::PathBuf,
         rows: usize,
         truncated: bool,
+        clipped: usize,
     ) {
-        let cap = if truncated {
+        let mut cap = if truncated {
             format!(" (limited to {} rows)", ora_core::EXPORT_MAX_ROWS)
         } else {
             String::new()
         };
+        if clipped > 0 {
+            cap.push_str(&format!(
+                "; {clipped} cells longer than {} MiB were cut",
+                ora_core::fetch::EXPORT_MAX_CELL_BYTES / (1024 * 1024)
+            ));
+        }
         self.push_message(format!(
             "Exported {rows} rows from {owner}.{name} to {}{cap}",
             path.display()

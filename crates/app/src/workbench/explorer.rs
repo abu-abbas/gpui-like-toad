@@ -451,6 +451,7 @@ impl Workbench {
         tab.kind = TabKind::Data;
         tab.data = Some(data);
         let edit_view = view.clone();
+        let load_view = view.clone();
 
         tab.table_state.update(cx, |state, _| {
             let mut delegate = ResultsDelegate::empty()
@@ -458,6 +459,9 @@ impl Workbench {
                 .with_row_numbers()
                 .with_quick_filter(Rc::new(move |condition, window, cx| {
                     let _ = view.update(cx, |this, cx| this.quick_filter(condition, window, cx));
+                }))
+                .with_load_cell(Rc::new(move |rowid, column, _, cx| {
+                    let _ = load_view.update(cx, |this, cx| this.load_full_cell(rowid, column, cx));
                 }));
             // Only tables have a stable ROWID to find a row by.
             if editable {
