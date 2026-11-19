@@ -1,5 +1,12 @@
 use super::*;
 
+mod catalog;
+mod connect;
+mod edits;
+mod objects;
+mod query;
+mod transaction;
+
 impl Workbench {
     /// Index of the tab the finished operation belongs to: the tab it was
     /// started from if it still exists, else the active tab.
@@ -299,175 +306,42 @@ impl Workbench {
         ) {
             self.conn.uncommitted = true;
         }
-        if let Response::Failed(message) = &resp {
-            if matches!(pending, Some(PendingOp::Connect)) {
-                // A direct connect with a saved password failed (wrong or
-                // missing password): open the dialog so it can be fixed.
-                if !self.connection_form.show_connection_form {
-                    if let Some(ix) = self
-                        .conn
-                        .last_connection
-                        .as_ref()
-                        .filter(|l| !l.demo)
-                        .and_then(|l| l.profile_ix)
-                    {
-                        self.edit_profile(ix, window, cx);
-                    }
-                }
-                self.conn.connect_error = Some(message.clone());
-            }
-            self.push_message(message.clone());
-            self.conn.status = "Error (see Messages).".to_string();
-            self.target_tab_mut().results_tab = ResultsTab::Messages;
-            cx.notify();
+        if let Response::Failed(message) = resp {
+            self.on_db_failed(pending, message, window, cx);
             return;
         }
         match (pending, resp) {
+            // Connect and Test (connect.rs).
             (Some(PendingOp::Connect), Response::Connected(info)) => {
-                self.conn.session = Some(info.clone());
-                self.conn.connection_lost = false;
-                self.reset_catalog(Some(info.user.clone()));
-                self.conn.current_schema = None;
-                self.conn.connect_error = None;
-                self.connection_form.show_connection_form = false;
-                self.scrub_password_input(window, cx);
-                self.conn.status = format!("Connected as {}.", info.user);
-                self.push_message(format!(
-                    "Connected: {} @ {} ({})",
-                    info.user, info.database, info.version
-                ));
-                cx.notify();
-                self.refresh_schema(cx);
+                self.on_connected(info, window, cx)
             }
-            (Some(PendingOp::TestConnect), Response::Tested(outcome)) => match outcome {
-                Ok(info) => {
-                    let text = format!(
-                        "Connection test succeeded: {} @ {} ({})",
-                        info.user, info.database, info.version
-                    );
-                    self.push_message(text.clone());
-                    self.connection_form.form_notice = Some((false, text));
-                    self.conn.status = "Connection test succeeded.".to_string();
-                }
-                Err(message) => {
-                    self.push_message(format!("Connection test failed: {message}"));
-                    self.connection_form.form_notice =
-                        Some((true, format!("Connection test failed: {message}")));
-                    self.conn.status = "Connection test failed.".to_string();
-                }
-            },
+            (Some(PendingOp::TestConnect), Response::Tested(outcome)) => {
+                self.on_connection_tested(outcome)
+            }
+            // SQL tabs: Run and Explain (query.rs).
             (Some(PendingOp::Run), Response::ScriptDone(results)) => {
-                let Some(ix) = self.target_ix() else {
-                    return;
-                };
-                for entry in &results {
-                    if entry.outcome.is_ok() {
-                        self.record_run(&entry.sql);
-                    }
-                    if let Err(err) = &entry.outcome {
-                        self.push_message(err.clone());
-                    }
-                }
-                self.tabs[ix].result_connection = self
-                    .conn
-                    .session
-                    .as_ref()
-                    .map(|info| format!("{}  ·  {}", self.conn.label(), info.database))
-                    .unwrap_or_default();
-                self.conn.status = format!("Queries completed: {}.", results.len());
-                self.tabs[ix].statement_results = results;
-                self.show_statement_result(ix, 0, cx);
+                self.on_script_done(results, cx)
             }
             (Some(PendingOp::Run), Response::QueryDone(result)) => {
-                let rows = result.row_count();
-                let elapsed = result.elapsed.as_millis();
-                let truncated = result.truncated;
-                if let Some(sql) = pending_sql {
-                    self.record_run(&sql);
-                }
-                let column_names: Vec<String> =
-                    result.columns.iter().map(|c| c.name.clone()).collect();
-                let tab = self.target_tab_mut();
-                tab.elapsed_ms = Some(elapsed);
-                if let Some(data) = tab.data.as_mut() {
-                    data.set_columns(column_names);
-                }
-                self.set_grid_result(result, cx);
-                self.target_tab_mut().results_tab = ResultsTab::Results;
-                let is_data = self.target_tab_mut().data.is_some();
-                self.conn.status = if truncated && is_data {
-                    format!("{rows} rows in {elapsed} ms (more rows available)")
-                } else if truncated {
-                    format!("{rows} rows in {elapsed} ms (limited to {DEFAULT_MAX_ROWS} rows)")
-                } else {
-                    format!("{rows} rows in {elapsed} ms")
-                };
+                self.on_query_done(result, pending_sql, cx)
             }
             (Some(PendingOp::Run), Response::Executed(affected)) => {
-                if let Some(sql) = pending_sql {
-                    self.record_run(&sql);
-                }
-                self.target_tab_mut().statement_results.clear();
-                self.push_message(format!("Affected rows: {affected}."));
-                self.conn.status = format!("Affected rows: {affected} (uncommitted).");
-                self.target_tab_mut().results_tab = ResultsTab::Messages;
+                self.on_statement_executed(affected, pending_sql)
             }
             (Some(PendingOp::Explain), Response::PlanTree(nodes, lines)) => {
-                let tab = self.target_tab_mut();
-                tab.plan_expanded = plan::all_plan_ids(&nodes);
-                tab.plan_nodes = Some(nodes);
-                tab.plan_lines = lines;
-                tab.results_tab = ResultsTab::Plan;
-                self.conn.status = "Explain plan ready.".to_string();
+                self.on_plan_tree(nodes, lines)
             }
-            (Some(PendingOp::Explain), Response::Plan(lines)) => {
-                let tab = self.target_tab_mut();
-                tab.plan_nodes = None;
-                tab.plan_lines = lines;
-                tab.results_tab = ResultsTab::Plan;
-                self.conn.status = "Explain plan ready.".to_string();
-            }
+            (Some(PendingOp::Explain), Response::Plan(lines)) => self.on_plan_text(lines),
+            // Explorer schema and object lists (catalog.rs).
             (Some(PendingOp::ListSchemas), Response::Schemas(schemas)) => {
-                let user = self.conn.session.as_ref().map(|s| s.user.clone());
-                // Keep the current pick on refresh; otherwise start in the
-                // session user's own schema, as Toad does.
-                let keep = self
-                    .conn
-                    .current_schema
-                    .clone()
-                    .filter(|c| schemas.contains(c));
-                self.conn.current_schema = keep
-                    .or_else(|| user.filter(|u| schemas.contains(u)))
-                    .or_else(|| schemas.first().cloned());
-                self.catalog.borrow_mut().set_schemas(schemas.clone());
-                self.conn.schemas = schemas;
-                self.load_objects(cx);
+                self.on_schemas(schemas, cx)
             }
             (Some(PendingOp::ListObjects), Response::Objects(objects)) => {
-                let count = objects.len();
-                self.conn.objects = objects;
-                self.conn.selected_object = None;
-                let schema = self.conn.current_schema.clone().unwrap_or_default();
-                self.conn.status = format!("{schema}: loaded objects: {count}.");
-                // Autocomplete metadata follows the explorer: (re)load the
-                // schema just listed, and the session user's own schema,
-                // which unqualified names resolve against.
-                let user = self.conn.session.as_ref().map(|s| s.user.clone());
-                if !schema.is_empty() {
-                    self.load_catalog(schema, cx);
-                }
-                if let Some(user) = user {
-                    if !self.catalog.borrow().has_owner(&user) {
-                        self.load_catalog(user, cx);
-                    }
-                }
+                self.on_objects(objects, cx)
             }
+            // Explorer object actions and data tab views (objects.rs).
             (Some(PendingOp::Ddl { owner, name }), Response::Ddl(ddl)) => {
-                self.new_tab_with_sql(ddl, window, cx);
-                let tab = self.active_tab_mut();
-                tab.title = format!("{name}.sql");
-                tab.kind = TabKind::Script;
-                self.conn.status = format!("Script {owner}.{name}.");
+                self.on_object_script(owner, name, ddl, window, cx)
             }
             (
                 Some(PendingOp::ExportTable { owner, name }),
@@ -476,103 +350,65 @@ impl Workbench {
                     rows,
                     truncated,
                 },
-            ) => {
-                let cap = if truncated {
-                    format!(" (limited to {} rows)", ora_core::EXPORT_MAX_ROWS)
-                } else {
-                    String::new()
-                };
-                self.push_message(format!(
-                    "Exported {rows} rows from {owner}.{name} to {}{cap}",
-                    path.display()
-                ));
-                self.conn.status = format!("Exported {rows} rows from {name}.");
-            }
+            ) => self.on_table_exported(owner, name, path, rows, truncated),
             (Some(PendingOp::RefreshMaterializedView { owner, name }), Response::Executed(_)) => {
-                self.push_message(format!("Refreshed materialized view {owner}.{name}."));
-                self.conn.status = format!("Refreshed {name}.");
-                self.target_tab_mut().results_tab = ResultsTab::Messages;
-                // Show the new rows when that view is open in a data tab.
-                let open_here = self.target_tab_mut().data.as_ref().is_some_and(|d| {
-                    d.owner.eq_ignore_ascii_case(&owner) && d.name.eq_ignore_ascii_case(&name)
-                });
-                if open_here {
-                    self.reload_data(cx);
-                }
+                self.on_materialized_view_refreshed(owner, name, cx)
             }
             (Some(PendingOp::ImportCsv { owner, name }), Response::Imported(rows)) => {
-                self.push_message(format!(
-                    "Imported {rows} rows into {owner}.{name} (uncommitted)."
-                ));
-                self.conn.status = format!("Imported {rows} rows into {name} (uncommitted).");
-                self.target_tab_mut().results_tab = ResultsTab::Messages;
-            }
-            (Some(PendingOp::DuplicateRows(rows)), Response::Described(defs)) => {
-                self.stage_duplicates(rows, &defs, window, cx);
+                self.on_csv_imported(owner, name, rows)
             }
             (Some(PendingOp::DataStructure), Response::Described(defs)) => {
-                let result = schema::describe_to_result(&defs);
-                self.conn.status = format!("Columns: {}.", result.row_count());
-                if let Some(state) = self
-                    .target_tab_mut()
-                    .data
-                    .as_ref()
-                    .map(|d| d.structure.clone())
-                {
-                    state.update(cx, |state, cx| {
-                        state.delegate_mut().set_result(result);
-                        state.refresh(cx);
-                    });
-                }
+                self.on_data_structure(defs, cx)
             }
             (Some(PendingOp::DataIndexes), Response::Indexes(indexes)) => {
-                let result = schema::indexes_to_result(&indexes);
-                self.conn.status = format!("{} index.", result.row_count());
-                if let Some(state) = self
-                    .target_tab_mut()
-                    .data
-                    .as_ref()
-                    .map(|d| d.indexes.clone())
-                {
-                    state.update(cx, |state, cx| {
-                        state.delegate_mut().set_result(result);
-                        state.refresh(cx);
-                    });
-                }
+                self.on_data_indexes(indexes, cx)
             }
-            (Some(PendingOp::DataDdl), Response::Ddl(ddl)) => {
-                self.conn.status = "DDL loaded.".to_string();
-                if let Some(editor) = self.target_tab_mut().data.as_ref().map(|d| d.ddl.clone()) {
-                    editor.update(cx, |state, cx| state.set_value(ddl, window, cx));
-                }
+            (Some(PendingOp::DataDdl), Response::Ddl(ddl)) => self.on_data_ddl(ddl, window, cx),
+            // Grid edits (edits.rs).
+            (Some(PendingOp::DuplicateRows(rows)), Response::Described(defs)) => {
+                self.stage_duplicates(rows, &defs, window, cx)
             }
             (Some(PendingOp::ApplyEdits), Response::CellsUpdated { done, error }) => {
-                self.conn.uncommitted |= done > 0;
-                self.edits_applied(done, error, cx);
+                self.on_cells_updated(done, error, cx)
             }
-            (Some(PendingOp::Commit), Response::Committed) => {
-                self.conn.uncommitted = false;
-                self.push_message("Commit succeeded.".to_string());
-                self.conn.status = "Commit succeeded.".to_string();
-                self.clear_edit_marks(cx);
-            }
+            // Commit and Rollback (transaction.rs).
+            (Some(PendingOp::Commit), Response::Committed) => self.on_committed(cx),
             (Some(PendingOp::Rollback), Response::RolledBack) => {
-                self.conn.uncommitted = false;
-                self.push_message("Rollback succeeded.".to_string());
-                self.conn.status = "Rollback succeeded.".to_string();
-                self.clear_edit_marks(cx);
-                // The grid still shows the rolled-back values.
-                if !background
-                    && self
-                        .tabs
-                        .get(self.active_tab)
-                        .is_some_and(|t| t.data.is_some())
-                {
-                    self.reload_data(cx);
-                }
+                self.on_rolled_back(background, cx)
             }
             _ => {}
         }
+        cx.notify();
+    }
+
+    /// Any operation failed: show the error. A failed direct connect also
+    /// opens the profile's dialog so the password can be fixed.
+    fn on_db_failed(
+        &mut self,
+        pending: Option<PendingOp>,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(pending, Some(PendingOp::Connect)) {
+            // A direct connect with a saved password failed (wrong or
+            // missing password): open the dialog so it can be fixed.
+            if !self.connection_form.show_connection_form {
+                if let Some(ix) = self
+                    .conn
+                    .last_connection
+                    .as_ref()
+                    .filter(|l| !l.demo)
+                    .and_then(|l| l.profile_ix)
+                {
+                    self.edit_profile(ix, window, cx);
+                }
+            }
+            self.conn.connect_error = Some(message.clone());
+        }
+        self.push_message(message);
+        self.conn.status = "Error (see Messages).".to_string();
+        self.target_tab_mut().results_tab = ResultsTab::Messages;
         cx.notify();
     }
 }
