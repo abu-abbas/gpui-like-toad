@@ -316,6 +316,8 @@ impl Workbench {
                 owner: data.owner.clone(),
                 name: data.name.clone(),
                 kind: data.kind.clone(),
+                parent: None,
+                detail: None,
             };
             let import_object = object.clone();
             let unavailable = busy || self.conn.session.is_none() || tab.conn != Some(self.conn.id);

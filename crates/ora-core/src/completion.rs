@@ -567,7 +567,10 @@ impl<'a> Collector<'a> {
                 ObjectKind::Synonym => SuggestionKind::Object,
                 // Indexes, triggers and database links are never named like
                 // a table in a query.
-                ObjectKind::Index | ObjectKind::Trigger | ObjectKind::DbLink => continue,
+                ObjectKind::Index
+                | ObjectKind::Trigger
+                | ObjectKind::DbLink
+                | ObjectKind::Constraint => continue,
                 _ if tables_only => continue,
                 _ => SuggestionKind::Object,
             };

@@ -707,17 +707,27 @@ impl DbClient for ThinClient {
                 // Database links are not in ALL_OBJECTS at all; they come from
                 // ALL_DB_LINKS (own links plus PUBLIC ones, so only the
                 // schema's own are kept).
-                "SELECT owner, object_name, object_type FROM (\
-                 SELECT o.owner, o.object_name, o.object_type FROM all_objects o \
+                "SELECT owner, object_name, object_type, parent, detail FROM (\
+                 SELECT o.owner, o.object_name, o.object_type, \
+                 CAST(NULL AS VARCHAR2(128)) AS parent, CAST(NULL AS VARCHAR2(60)) AS detail \
+                 FROM all_objects o \
                  WHERE o.owner = :1 AND o.object_type IN \
                  ('TABLE','VIEW','MATERIALIZED VIEW','INDEX','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','TRIGGER','SYNONYM','TYPE') \
                  AND NOT (o.object_type = 'TYPE' AND o.object_name LIKE 'SYS\\_PLSQL\\_%' ESCAPE '\\') \
                  AND NOT (o.object_type = 'TABLE' AND EXISTS \
                    (SELECT 1 FROM all_mviews m WHERE m.owner = o.owner AND m.mview_name = o.object_name)) \
                  UNION ALL \
-                 SELECT l.owner, l.db_link, 'DATABASE LINK' FROM all_db_links l WHERE l.owner = :2) \
+                 SELECT l.owner, l.db_link, 'DATABASE LINK', NULL, NULL FROM all_db_links l WHERE l.owner = :2 \
+                 UNION ALL \
+                 SELECT c.owner, c.constraint_name, 'CONSTRAINT', c.table_name, \
+                 CASE c.constraint_type WHEN 'P' THEN 'PRIMARY KEY' WHEN 'U' THEN 'UNIQUE' \
+                 WHEN 'R' THEN 'FOREIGN KEY' ELSE 'CHECK' END || ', ' || c.status \
+                 FROM all_constraints c \
+                 WHERE c.owner = :3 AND c.constraint_type IN ('P','U','R','C') \
+                 AND NOT (c.constraint_type = 'C' AND c.generated = 'GENERATED NAME') \
+                 AND c.constraint_name NOT LIKE 'BIN$%') \
                  ORDER BY object_type, object_name",
-                &[&owner_param, &owner_param],
+                &[&owner_param, &owner_param, &owner_param],
             )
             .map_err(db_err)?;
         let mut objects = Vec::new();
@@ -726,10 +736,14 @@ impl DbClient for ThinClient {
             let owner: String = row.get(0).map_err(db_err)?;
             let name: String = row.get(1).map_err(db_err)?;
             let raw_type: String = row.get(2).map_err(db_err)?;
+            let parent: Option<String> = row.get(3).map_err(db_err)?;
+            let detail: Option<String> = row.get(4).map_err(db_err)?;
             objects.push(SchemaObject {
                 owner,
                 name,
                 kind: ObjectKind::from_oracle_type(&raw_type),
+                parent,
+                detail,
             });
         }
         Ok(objects)
@@ -771,6 +785,28 @@ impl DbClient for ThinClient {
         // (MATERIALIZED_VIEW).
         let type_owned = match kind {
             ObjectKind::DbLink => "DB_LINK".to_string(),
+            // Foreign keys have their own metadata type.
+            ObjectKind::Constraint => {
+                let owner_param: &str = owner;
+                let name_param: &str = name;
+                let is_ref = conn
+                    .query(
+                        "SELECT constraint_type FROM all_constraints \
+                         WHERE owner = :1 AND constraint_name = :2",
+                        &[&owner_param, &name_param],
+                    )
+                    .map_err(db_err)?
+                    .next()
+                    .and_then(|row| row.ok())
+                    .and_then(|row| row.get::<Option<String>>(0).ok().flatten())
+                    .is_some_and(|t| t == "R");
+                if is_ref {
+                    "REF_CONSTRAINT"
+                } else {
+                    "CONSTRAINT"
+                }
+                .to_string()
+            }
             other => other.oracle_type().replace(' ', "_"),
         };
         let type_param: &str = &type_owned;
@@ -934,6 +970,46 @@ impl DbClient for ThinClient {
             }
         }
         Ok(indexes)
+    }
+
+    fn routine_signature(
+        &mut self,
+        owner: &str,
+        name: &str,
+    ) -> Result<(Vec<ora_core::ddl::RoutineArg>, String), DbError> {
+        let conn = self.conn()?;
+        let owner_upper = owner.trim().to_ascii_uppercase();
+        let owner_param: &str = &owner_upper;
+        let name_param: &str = name;
+        // Position 0 is the return value; data_level 0 skips the fields of
+        // record parameters.
+        let cursor = conn
+            .query(
+                "SELECT argument_name, data_type, in_out, position \
+                 FROM all_arguments \
+                 WHERE owner = :1 AND object_name = :2 AND package_name IS NULL \
+                   AND data_level = 0 AND data_type IS NOT NULL \
+                 ORDER BY position",
+                &[&owner_param, &name_param],
+            )
+            .map_err(db_err)?;
+        let mut args = Vec::new();
+        let mut returns = String::new();
+        for row in cursor {
+            let row = row.map_err(db_err)?;
+            let arg_name: Option<String> = row.get(0).map_err(db_err)?;
+            let data_type: Option<String> = row.get(1).map_err(db_err)?;
+            let in_out: Option<String> = row.get(2).map_err(db_err)?;
+            match arg_name {
+                None => returns = data_type.unwrap_or_default(),
+                Some(arg_name) => args.push(ora_core::ddl::RoutineArg {
+                    name: arg_name,
+                    data_type: data_type.unwrap_or_default(),
+                    direction: in_out.unwrap_or_else(|| "IN".to_string()),
+                }),
+            }
+        }
+        Ok((args, returns))
     }
 
     fn explain_plan(&mut self, sql: &str) -> Result<Vec<String>, DbError> {

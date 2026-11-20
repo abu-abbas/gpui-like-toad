@@ -253,7 +253,6 @@ impl Workbench {
             .min_w(px(0.))
             .overflow_hidden()
             .child(body)
-            .children(self.render_edit_bar(theme, cx))
             .child(self.render_data_footer(theme, cx))
     }
 

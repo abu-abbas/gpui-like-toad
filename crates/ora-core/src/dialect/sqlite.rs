@@ -18,6 +18,10 @@ impl Dialect for SqliteDialect {
             password: false,
             sysdba: false,
             explain_text: false,
+            truncate: false,
+            special_tables: false,
+            programs: false,
+            sequences: false,
         }
     }
 

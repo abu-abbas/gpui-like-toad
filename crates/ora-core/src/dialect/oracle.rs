@@ -17,6 +17,10 @@ impl Dialect for OracleDialect {
             password: true,
             sysdba: true,
             explain_text: true,
+            truncate: true,
+            special_tables: true,
+            programs: true,
+            sequences: true,
         }
     }
 

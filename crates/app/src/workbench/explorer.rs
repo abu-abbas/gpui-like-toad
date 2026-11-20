@@ -1,3 +1,6 @@
+use ora_core::ddl;
+
+use super::object_ops::ObjectAction;
 use super::*;
 
 pub(super) const EXPLORER_CONTROL_HEIGHT: f32 = 30.;
@@ -121,6 +124,8 @@ impl Workbench {
                 owner: o.owner.clone(),
                 name: o.name.clone(),
                 kind: o.kind.clone(),
+                parent: o.parent.clone(),
+                detail: o.detail.clone(),
             })
             .collect();
         let list = if visible.is_empty() {
@@ -148,6 +153,7 @@ impl Workbench {
             let reloading =
                 self.conn.busy && matches!(self.conn.pending_op, Some(PendingOp::ListObjects));
             let theme = theme.clone();
+            let caps = self.active_kind().capabilities();
             let cover = reloading.then(|| loading_overlay(&theme));
             div()
                 .relative()
@@ -163,7 +169,7 @@ impl Workbench {
                                     let object = visible[ix].clone();
                                     let is_selected =
                                         selected.as_deref() == Some(object.name.as_str());
-                                    render_object_row(ix, object, is_selected, &theme, cx)
+                                    render_object_row(ix, object, is_selected, caps, &theme, cx)
                                 })
                                 .collect::<Vec<_>>()
                         }),
@@ -212,6 +218,44 @@ impl Workbench {
                             .min_w(px(0.))
                             .child(category_button),
                     )
+                    .when(
+                        current_category == ObjectCategory::Tables && self.conn.session.is_some(),
+                        |row| {
+                            row.child(
+                                control("explorer-new-table", theme)
+                                    .icon(icon(IconName::Plus, 15., theme.muted_foreground))
+                                    .size(px(EXPLORER_CONTROL_HEIGHT))
+                                    .flex_none()
+                                    .tooltip("New Table")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_new_table(window, cx)
+                                    })),
+                            )
+                        },
+                    )
+                    .when(
+                        self.active_kind().capabilities().programs
+                            && self.conn.session.is_some()
+                            && matches!(
+                                current_category,
+                                ObjectCategory::Programs
+                                    | ObjectCategory::Views
+                                    | ObjectCategory::Triggers
+                                    | ObjectCategory::Types
+                            ),
+                        |row| {
+                            row.child(
+                                control("explorer-compile-invalid", theme)
+                                    .icon(icon(IconName::Hammer, 15., theme.muted_foreground))
+                                    .size(px(EXPLORER_CONTROL_HEIGHT))
+                                    .flex_none()
+                                    .tooltip("Compile invalid objects")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.compile_invalid(cx)),
+                                    ),
+                            )
+                        },
+                    )
                     .child(
                         control("explorer-quick-open", theme)
                             .icon(icon(IconName::Search, 15., theme.muted_foreground))
@@ -234,6 +278,7 @@ fn render_object_row(
     ix: usize,
     object: ObjectRef,
     selected: bool,
+    caps: ora_core::Capabilities,
     theme: &gpui_kit::component::Theme,
     cx: &mut Context<Workbench>,
 ) -> impl IntoElement {
@@ -249,6 +294,7 @@ fn render_object_row(
         ObjectKind::Synonym => IconName::Link,
         ObjectKind::Type => IconName::Braces,
         ObjectKind::DbLink => IconName::Plug,
+        ObjectKind::Constraint => IconName::Key,
         ObjectKind::Other(_) => IconName::FileText,
     };
     let click_object = object.clone();
@@ -275,15 +321,34 @@ fn render_object_row(
     }
     let view = cx.entity();
     row.child(icon(icon_name, 14., theme.muted_foreground))
-        .child(div().flex_1().truncate().child(object.name.clone()))
-        .context_menu(move |menu, _, _| object_menu(menu, &view, &object))
+        .child(div().truncate().child(object.name.clone()))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .text_color(theme.muted_foreground)
+                .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
+                .children(match (&object.parent, &object.detail) {
+                    (Some(table), Some(detail)) => Some(format!("{table} · {detail}")),
+                    (None, Some(detail)) => Some(detail.clone()),
+                    _ => None,
+                }),
+        )
+        .context_menu(move |menu, _, _| object_menu(menu, &view, &object, caps))
 }
 
 /// The right-click menu for an explorer object.
-fn object_menu(menu: PopupMenu, view: &Entity<Workbench>, object: &ObjectRef) -> PopupMenu {
+fn object_menu(
+    menu: PopupMenu,
+    view: &Entity<Workbench>,
+    object: &ObjectRef,
+    caps: ora_core::Capabilities,
+) -> PopupMenu {
     let has_data = schema::has_data(&object.kind);
     let is_table = object.kind == ObjectKind::Table;
     let is_mview = object.kind == ObjectKind::MaterializedView;
+    let (compile_normal, compile_debug) = ddl::compile_support(&object.kind);
     let item =
         |label: &str,
          icon_name: IconName,
@@ -353,6 +418,160 @@ fn object_menu(menu: PopupMenu, view: &Entity<Workbench>, object: &ObjectRef) ->
             is_table,
             |this, o, _, cx| this.import_table(o, cx),
         ))
+        .when(is_table, |menu| {
+            menu.separator()
+                .item(item(
+                    "Rename Table…",
+                    IconName::Pencil,
+                    true,
+                    |this, o, w, cx| this.object_action(o, ObjectAction::Rename, w, cx),
+                ))
+                .item(item(
+                    "Duplicate Table…",
+                    IconName::Copy,
+                    true,
+                    |this, o, w, cx| this.object_action(o, ObjectAction::Duplicate, w, cx),
+                ))
+                .item(item(
+                    "Empty Table…",
+                    IconName::Eraser,
+                    true,
+                    |this, o, w, cx| this.object_action(o, ObjectAction::Empty, w, cx),
+                ))
+                .when(caps.truncate, |menu| {
+                    menu.item(item(
+                        "Truncate Table…",
+                        IconName::Eraser,
+                        true,
+                        |this, o, w, cx| this.object_action(o, ObjectAction::Truncate, w, cx),
+                    ))
+                })
+                .item(item(
+                    "Delete Table…",
+                    IconName::Trash,
+                    true,
+                    |this, o, w, cx| this.object_action(o, ObjectAction::Drop, w, cx),
+                ))
+        })
+        .when(caps.programs && compile_normal, |menu| {
+            menu.separator()
+                .item(item(
+                    "Maintain: Compile",
+                    IconName::Hammer,
+                    true,
+                    |this, o, w, cx| {
+                        this.object_action(o, ObjectAction::Compile { debug: false }, w, cx)
+                    },
+                ))
+                .when(compile_debug, |menu| {
+                    menu.item(item(
+                        "Maintain: Compile for Debug",
+                        IconName::Bug,
+                        true,
+                        |this, o, w, cx| {
+                            this.object_action(o, ObjectAction::Compile { debug: true }, w, cx)
+                        },
+                    ))
+                })
+        })
+        .when(object.kind == ObjectKind::Constraint, |menu| {
+            let enabled = object
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.ends_with("ENABLED"));
+            menu.separator()
+                .item(item(
+                    if enabled {
+                        "Disable Constraint"
+                    } else {
+                        "Enable Constraint"
+                    },
+                    IconName::Ban,
+                    true,
+                    if enabled {
+                        |this, o, w, cx| {
+                            this.object_action(
+                                o,
+                                ObjectAction::ConstraintState { enable: false },
+                                w,
+                                cx,
+                            )
+                        }
+                    } else {
+                        |this, o, w, cx| {
+                            this.object_action(
+                                o,
+                                ObjectAction::ConstraintState { enable: true },
+                                w,
+                                cx,
+                            )
+                        }
+                    },
+                ))
+                .item(item(
+                    "Delete Constraint…",
+                    IconName::Trash,
+                    true,
+                    |this, o, w, cx| this.object_action(o, ObjectAction::DropConstraint, w, cx),
+                ))
+        })
+        .when(
+            !is_table
+                && ddl::drop_object_sql(&ora_core::dialect::OracleDialect, "O", "N", &object.kind)
+                    .is_some(),
+            |menu| {
+                menu.separator().item(item(
+                    &format!("Delete {}…", ddl::kind_noun(&object.kind)),
+                    IconName::Trash,
+                    true,
+                    |this, o, w, cx| this.object_action(o, ObjectAction::Drop, w, cx),
+                ))
+            },
+        )
+        .when(
+            caps.programs && object.kind == ObjectKind::Trigger,
+            |menu| {
+                menu.separator()
+                    .item(item(
+                        "Enable Trigger",
+                        IconName::Zap,
+                        true,
+                        |this, o, w, cx| {
+                            this.object_action(o, ObjectAction::Trigger { enable: true }, w, cx)
+                        },
+                    ))
+                    .item(item(
+                        "Disable Trigger",
+                        IconName::Ban,
+                        true,
+                        |this, o, w, cx| {
+                            this.object_action(o, ObjectAction::Trigger { enable: false }, w, cx)
+                        },
+                    ))
+            },
+        )
+        .when(
+            caps.programs && object.kind == ObjectKind::Function,
+            |menu| {
+                menu.item(item(
+                    "Execute Function…",
+                    IconName::Play,
+                    true,
+                    |this, o, w, cx| this.object_action(o, ObjectAction::Execute, w, cx),
+                ))
+            },
+        )
+        .when(
+            caps.sequences && object.kind == ObjectKind::Sequence,
+            |menu| {
+                menu.separator().item(item(
+                    "Reset Sequence…",
+                    IconName::RotateCcw,
+                    true,
+                    |this, o, w, cx| this.object_action(o, ObjectAction::ResetSequence, w, cx),
+                ))
+            },
+        )
 }
 
 impl Workbench {

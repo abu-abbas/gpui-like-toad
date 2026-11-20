@@ -121,6 +121,14 @@ pub enum Job {
         deletes: Vec<String>,
         inserts: Vec<Vec<(String, String)>>,
     },
+    /// Explorer object operations (create/rename/drop table, compile,
+    /// reset sequence, call function), see [`ora_core::ddl`].
+    ObjectOp(ora_core::ddl::ObjectOp),
+    /// Parameters of a function, for the Execute Function dialog.
+    RoutineSignature {
+        owner: String,
+        name: String,
+    },
     /// Explorer "Refresh Materialized View": `DBMS_MVIEW.REFRESH`.
     RefreshMaterializedView {
         owner: String,
@@ -206,6 +214,14 @@ impl Job {
             Self::ImportCsv { .. } => Some("Import CSV rows"),
             Self::Explain { .. } => Some("Write to the Oracle plan table"),
             Self::RefreshMaterializedView { .. } => Some("Refresh materialized view"),
+            // Calling a function can write too, so it counts as a change.
+            Self::ObjectOp(op) => Some(match op {
+                ora_core::ddl::ObjectOp::Statements { .. } => "Change database objects",
+                ora_core::ddl::ObjectOp::Compile { .. } => "Compile object",
+                ora_core::ddl::ObjectOp::ResetSequence { .. } => "Reset sequence",
+                ora_core::ddl::ObjectOp::CallFunction { .. } => "Execute function",
+                ora_core::ddl::ObjectOp::CompileInvalid { .. } => "Compile invalid objects",
+            }),
             Self::Commit => Some("Commit changes"),
             Self::Rollback => Some("Roll back changes"),
             _ => None,
@@ -232,6 +248,10 @@ pub enum Response {
     Schemas(Vec<String>),
     Objects(Vec<SchemaObject>),
     Ddl(String),
+    /// Lines for Messages after an object operation.
+    ObjectOp(Vec<String>),
+    /// Parameters and return type asked for by [`Job::RoutineSignature`].
+    RoutineSignature(Vec<ora_core::ddl::RoutineArg>, String),
     Exported {
         path: PathBuf,
         rows: usize,
@@ -637,6 +657,20 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                     truncated,
                     clipped,
                 },
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
+        Job::ObjectOp(op) => match client.as_mut() {
+            Some(client) => match ora_core::ddl::run(client.as_mut(), &op) {
+                Ok(lines) => Response::ObjectOp(lines),
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
+        Job::RoutineSignature { owner, name } => match client.as_mut() {
+            Some(client) => match client.routine_signature(&owner, &name) {
+                Ok((args, returns)) => Response::RoutineSignature(args, returns),
                 Err(err) => Response::Failed(err.to_string()),
             },
             None => Response::Failed("not connected".to_string()),

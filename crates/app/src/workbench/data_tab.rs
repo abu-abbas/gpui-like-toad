@@ -665,12 +665,10 @@ impl Workbench {
         };
         let bar = div()
             .flex()
+            .flex_row()
+            .flex_wrap()
             .items_center()
             .gap(px(3.))
-            .h(px(30.))
-            .px(px(6.))
-            .border_t_1()
-            .border_color(theme.border)
             .child(
                 button(
                     "row-add",
@@ -1299,6 +1297,15 @@ impl Workbench {
                     button.ghost()
                 }
             }))
+            .children(self.render_edit_bar(theme, cx).map(|actions| {
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .child(div().flex_none().w(px(1.)).h(px(18.)).bg(theme.border))
+                    .child(actions)
+            }))
             .when(on_data && filters > 0, |this| {
                 this.child(icon(IconName::ListFilter, 14., theme.success))
                     .child(caption_text(format!("{filters} filter"), theme))
@@ -1307,7 +1314,13 @@ impl Workbench {
         if on_data {
             if let Some(data) = tab.data.as_ref() {
                 let step = page.limit;
-                footer = footer
+                let pager = div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .min_w(px(0.))
+                    .items_center()
+                    .gap(px(SPACE_2))
                     .child(
                         Button::new("page-prev")
                             .small()
@@ -1367,15 +1380,15 @@ impl Workbench {
                                 cx.notify();
                             })),
                     )
-                    .child(self.render_columns_button(data, theme, cx))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(130.))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(caption_text(text, theme)),
-                    );
+                    .child(self.render_columns_button(data, theme, cx));
+                footer = footer.child(pager).child(
+                    div()
+                        .flex_none()
+                        .w(px(130.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(caption_text(text, theme)),
+                );
             }
         }
         footer
