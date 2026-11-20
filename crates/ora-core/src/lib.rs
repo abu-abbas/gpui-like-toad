@@ -20,6 +20,7 @@ pub mod fetch;
 pub mod filter;
 pub mod import;
 pub mod model;
+pub mod pretty;
 pub mod redact;
 pub mod sql;
 pub mod store;
