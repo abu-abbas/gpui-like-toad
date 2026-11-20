@@ -21,6 +21,9 @@ use ora_core::{
 pub struct ThinClient {
     conn: Option<oracledb::Connection>,
     read_only: bool,
+    /// `show_storage` of the last `DBMS_METADATA` transform setup on this
+    /// session, so repeated DDL views skip the extra round trip.
+    ddl_storage: Option<bool>,
 }
 
 impl ThinClient {
@@ -45,6 +48,7 @@ impl ThinClient {
         ThinClient {
             conn: None,
             read_only: false,
+            ddl_storage: None,
         }
     }
 
@@ -178,7 +182,7 @@ struct LobBudget<'a> {
 }
 
 /// Per-stage timing of one fetch. Only written out when timing is switched
-/// on (see [`timing_enabled`]); counting is cheap enough to always run.
+/// on (see [`ora_core::timing`]); counting is cheap enough to always run.
 #[derive(Default)]
 struct FetchTiming {
     /// Time spent waiting in the cursor for the next row (the server round
@@ -197,31 +201,7 @@ struct FetchTiming {
     rows: u64,
 }
 
-/// Timing is opt-in: set the environment variable `KILAT_TIMING=1`, or
-/// create an empty file named `timing-on` in the config directory (handy
-/// for a macOS `.app` started from Finder).
-fn timing_enabled() -> bool {
-    std::env::var_os("KILAT_TIMING").is_some_and(|v| !v.is_empty() && v != "0")
-        || ora_core::store::config_dir().join("timing-on").exists()
-}
-
-/// Append one line to `timing.log` in the config directory. Carries only
-/// counts and durations: no SQL text, no cell contents, no names.
-fn write_timing_line(line: &str) {
-    use std::io::Write as _;
-    let dir = ora_core::store::config_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("timing.log"))
-    {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        let _ = writeln!(f, "{secs} {line}");
-    }
-}
+use ora_core::timing::{enabled as timing_enabled, write_line as write_timing_line};
 
 /// A CLOB/BLOB cell from its locator. The length is known without a
 /// round trip. Grid fetches read only the start of a CLOB while the
@@ -755,18 +735,28 @@ impl DbClient for ThinClient {
         name: &str,
         kind: &ObjectKind,
     ) -> Result<String, DbError> {
+        self.object_ddl_with(owner, name, kind, false)
+    }
+
+    fn object_ddl_with(
+        &mut self,
+        owner: &str,
+        name: &str,
+        kind: &ObjectKind,
+        show_storage: bool,
+    ) -> Result<String, DbError> {
+        let total = std::time::Instant::now();
         let conn = self.conn()?;
-        // End each statement with `;`/`/` and pretty-print, like Toad's
-        // View Script. Session-scoped, so setting it every call is cheap and
-        // never leaks into other sessions.
-        conn.execute(
-            "BEGIN \
-             DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SQLTERMINATOR', TRUE); \
-             DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'PRETTY', TRUE); \
-             END;",
-            &[],
-        )
-        .map_err(db_err)?;
+        // Session-scoped DBMS_METADATA setup (terminator, pretty print and
+        // the storage noise switch). Only re-sent when the choice changed.
+        let t_setup = std::time::Instant::now();
+        let mut setup_calls = 0u32;
+        if self.ddl_storage != Some(show_storage) {
+            conn.execute(&ddl_transform_sql(show_storage), &[])
+                .map_err(db_err)?;
+            setup_calls = 1;
+        }
+        let setup_ms = t_setup.elapsed().as_millis();
         // DBMS_METADATA spells multi-word types with an underscore
         // (MATERIALIZED_VIEW).
         let type_owned = match kind {
@@ -776,18 +766,23 @@ impl DbClient for ThinClient {
         let type_param: &str = &type_owned;
         let name_param: &str = name;
         let owner_param: &str = owner;
+        let t_get = std::time::Instant::now();
         let cursor = conn
             .query(
                 "SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM dual",
                 &[&type_param, &name_param, &owner_param],
             )
             .map_err(db_err)?;
+        let query_ms = t_get.elapsed().as_millis();
+        let t_read = std::time::Instant::now();
         let Some(row) = cursor.into_iter().next() else {
             return Err(DbError::new(format!("No DDL returned for {owner}.{name}")));
         };
         let ddl: Option<String> = row.map_err(db_err)?.get(0).map_err(db_err)?;
+        let read_ms = t_read.elapsed().as_millis();
         let mut ddl = ddl.unwrap_or_default().trim().to_string();
         // GET_DDL('TYPE') is the spec only; add the body when there is one.
+        let t_body = std::time::Instant::now();
         if matches!(kind, ObjectKind::Type) {
             let body_type: &str = "TYPE_BODY";
             if let Ok(cursor) = conn.query(
@@ -803,6 +798,21 @@ impl DbClient for ThinClient {
                     ddl = format!("{ddl}\n\n{}", body.trim());
                 }
             }
+        }
+        let ddl_len = ddl.len();
+        // `conn` is no longer used: remember the transform setup.
+        self.ddl_storage = Some(show_storage);
+        if timing_enabled() {
+            write_timing_line(&format!(
+                "ddl total_ms={} setup_ms={setup_ms} setup_calls={setup_calls} \
+                 query_ms={query_ms} read_ms={read_ms} body_ms={} bytes={} lines={} \
+                 show_storage={}",
+                total.elapsed().as_millis(),
+                t_body.elapsed().as_millis(),
+                ddl_len,
+                ddl.lines().count(),
+                u8::from(show_storage),
+            ));
         }
         Ok(ddl)
     }
@@ -1017,6 +1027,28 @@ fn number_to_i64(n: oracledb::OracleNumber) -> Option<i64> {
     n.to_string().parse::<i64>().ok()
 }
 
+/// PL/SQL block that sets the session's `DBMS_METADATA` transforms for
+/// View Script / the DDL tab: statements end with `;`, output is pretty
+/// printed, and unless `show_storage` the physical noise (STORAGE clauses,
+/// segment attributes such as PCTFREE/LOGGING, TABLESPACE) is left out.
+fn ddl_transform_sql(show_storage: bool) -> String {
+    let flag = if show_storage { "TRUE" } else { "FALSE" };
+    let mut sql = String::from("BEGIN ");
+    for (param, value) in [
+        ("SQLTERMINATOR", "TRUE"),
+        ("PRETTY", "TRUE"),
+        ("SEGMENT_ATTRIBUTES", flag),
+        ("STORAGE", flag),
+        ("TABLESPACE", flag),
+    ] {
+        sql.push_str(&format!(
+            "DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, '{param}', {value}); "
+        ));
+    }
+    sql.push_str("END;");
+    sql
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1126,5 +1158,23 @@ mod tests {
             .unwrap_err();
         assert!(!err.to_string().is_empty());
         assert!(!client.is_connected());
+    }
+
+    #[test]
+    fn ddl_transform_hides_storage_by_default() {
+        let lean = ddl_transform_sql(false);
+        for param in ["SEGMENT_ATTRIBUTES", "STORAGE", "TABLESPACE"] {
+            assert!(lean.contains(&format!("'{param}', FALSE")), "{param}");
+        }
+        assert!(lean.contains("'SQLTERMINATOR', TRUE"));
+        assert!(lean.contains("'PRETTY', TRUE"));
+        assert!(lean.starts_with("BEGIN ") && lean.ends_with("END;"));
+    }
+
+    #[test]
+    fn ddl_transform_can_show_storage() {
+        let full = ddl_transform_sql(true);
+        assert!(!full.contains("FALSE"));
+        assert!(full.contains("'STORAGE', TRUE"));
     }
 }

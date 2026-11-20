@@ -246,6 +246,20 @@ pub trait DbClient: Send {
     fn object_ddl(&mut self, owner: &str, name: &str, kind: &ObjectKind)
         -> Result<String, DbError>;
 
+    /// Like [`object_ddl`](DbClient::object_ddl), but `show_storage` asks
+    /// for the physical clauses too (STORAGE, TABLESPACE, PCTFREE, ...).
+    /// Backends without such clauses ignore it.
+    fn object_ddl_with(
+        &mut self,
+        owner: &str,
+        name: &str,
+        kind: &ObjectKind,
+        show_storage: bool,
+    ) -> Result<String, DbError> {
+        let _ = show_storage;
+        self.object_ddl(owner, name, kind)
+    }
+
     /// Insert rows into `owner.table`, one statement per row, values given
     /// as text in `columns` order. Does not commit. Returns rows inserted.
     /// Stops at the first failing row and reports its 1-based number; rows

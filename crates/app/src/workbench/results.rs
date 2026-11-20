@@ -216,6 +216,19 @@ impl Workbench {
                 .flex_1()
                 .min_h(px(0.))
                 .overflow_hidden()
+                .when(self.active_kind() == DbKind::Oracle, |body| {
+                    body.child(
+                        div().flex().flex_none().px_2().py_1().child(
+                            Checkbox::new("ddl-show-storage")
+                                .small()
+                                .label("Show storage")
+                                .checked(data.show_storage)
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.set_show_storage(*checked, cx);
+                                })),
+                        ),
+                    )
+                })
                 .child(
                     self.view_loader(PendingOp::DataDdl, theme)
                         .unwrap_or_else(|| {

@@ -143,7 +143,16 @@ impl Workbench {
             .as_ref()
             .map(|d| d.ddl.clone())
         {
+            let t_render = std::time::Instant::now();
+            let (bytes, lines) = (ddl.len(), ddl.lines().count());
             editor.update(cx, |state, cx| state.set_value(ddl, window, cx));
+            if ora_core::timing::enabled() {
+                // UI-thread cost of putting the script into the editor.
+                ora_core::timing::write_line(&format!(
+                    "ddl-render set_value_ms={} bytes={bytes} lines={lines}",
+                    t_render.elapsed().as_millis()
+                ));
+            }
         }
     }
 }
