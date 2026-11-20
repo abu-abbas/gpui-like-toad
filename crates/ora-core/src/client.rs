@@ -121,6 +121,20 @@ pub trait DbClient: Send {
         self.query_binds(&query.sql, &query.binds, FetchLimits::rows(page.limit))
     }
 
+    /// The start of CLOB cells of the data tab, for the rows with `rowids`
+    /// and the CLOB `columns`: one query for all of them. Cells that are
+    /// NULL or empty are left out. Backends that read CLOB starts together
+    /// with the page do not need this and return nothing.
+    fn fetch_clob_previews(
+        &mut self,
+        _owner: &str,
+        _table: &str,
+        _columns: &[String],
+        _rowids: &[String],
+    ) -> Result<Vec<crate::ClobPreview>, DbError> {
+        Ok(Vec::new())
+    }
+
     /// One cell of the row with `rowid`, fetched with the "Load full
     /// value" limit instead of the grid's per-cell limit. `budget` is the
     /// most bytes the value may take (the room left in the app's open

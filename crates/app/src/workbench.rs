@@ -61,6 +61,7 @@ use crate::worker::{DbHandle, ExportFormat, Job, Password, Response};
 
 mod cell_edit;
 mod chrome;
+mod clob_preview;
 mod completion_catalog;
 mod connection_tree;
 mod connections_ui;

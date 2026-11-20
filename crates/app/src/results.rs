@@ -88,6 +88,14 @@ pub struct ResultsDelegate {
     on_duplicate_rows: Option<DuplicateRowsHandler>,
     /// Set on data tabs with ROWIDs: "Load full value" on a clipped cell.
     on_load_cell: Option<LoadCellHandler>,
+    /// Set on data tabs with ROWIDs: called with the grid rows now on
+    /// screen, so CLOB starts can be read for them only.
+    on_visible_rows: Option<VisibleRowsHandler>,
+    /// CLOB cells (result row, result column) whose start was already
+    /// asked for: each is read at most once per result.
+    previews_asked: HashSet<(usize, usize)>,
+    /// Table rows last reported as shown.
+    last_visible: std::ops::Range<usize>,
     /// Result column holding each row's ROWID (never shown), if fetched.
     rowid_col: Option<usize>,
     /// Edited cells by (ROWID, column name), tinted until commit.
@@ -113,6 +121,15 @@ pub type PasteHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// "Load full value": called with the row's ROWID and the column name.
 pub type LoadCellHandler = Rc<dyn Fn(String, String, &mut Window, &mut App)>;
+/// CLOB cells of some rows whose start is to be read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviewBatch {
+    pub rowids: Vec<String>,
+    pub columns: Vec<String>,
+}
+
+/// Called with the table rows (page-relative) the grid now shows.
+pub type VisibleRowsHandler = Rc<dyn Fn(std::ops::Range<usize>, &mut Window, &mut App)>;
 pub type DeleteRowsHandler = Rc<dyn Fn(Vec<String>, &mut Window, &mut App)>;
 
 /// Rows to duplicate, each as (column, value) pairs without the ROWID.
@@ -243,6 +260,9 @@ impl ResultsDelegate {
             on_duplicate_rows: None,
             on_load_cell: None,
             on_cell_paste: None,
+            on_visible_rows: None,
+            previews_asked: HashSet::new(),
+            last_visible: 0..0,
             rowid_col: None,
             table_name: None,
             pending: HashMap::new(),
@@ -297,6 +317,13 @@ impl ResultsDelegate {
     /// Offer "Load full value" on clipped cells (needs a ROWID column).
     pub fn with_load_cell(mut self, handler: LoadCellHandler) -> Self {
         self.on_load_cell = Some(handler);
+        self
+    }
+
+    /// Read CLOB starts only for the rows on screen: the handler gets the
+    /// visible table rows whenever they change.
+    pub fn with_visible_rows(mut self, handler: VisibleRowsHandler) -> Self {
+        self.on_visible_rows = Some(handler);
         self
     }
 
@@ -374,6 +401,129 @@ impl ResultsDelegate {
         let old = self.source_cell(row, col)?.clone();
         self.overrides.insert((row, col), value);
         Some(old)
+    }
+
+    /// The next CLOB previews to read: unread CLOB cells of the shown
+    /// columns in the table rows `visible` plus `buffer` rows on each
+    /// side, at most `max_rows` rows, visible rows first. Cells handed
+    /// out are never handed out again for this result.
+    pub fn take_preview_batch(
+        &mut self,
+        visible: std::ops::Range<usize>,
+        buffer: usize,
+        max_rows: usize,
+    ) -> Option<PreviewBatch> {
+        let rowid_col = self.rowid_col?;
+        let page_rows = self.page_rows();
+        let start = visible.start.min(page_rows);
+        let end = visible.end.min(page_rows);
+        // Visible rows first, then the buffer below, then above.
+        let order = (start..end)
+            .chain(end..(end + buffer).min(page_rows))
+            .chain((start.saturating_sub(buffer)..start).rev());
+        let mut rows: Vec<usize> = Vec::new();
+        let mut columns: Vec<usize> = Vec::new();
+        for view_row in order {
+            if rows.len() >= max_rows {
+                break;
+            }
+            let Some(row) = self.source_row(self.absolute_row(view_row)) else {
+                continue;
+            };
+            let wanted: Vec<usize> = self
+                .visible
+                .iter()
+                .copied()
+                .filter(|&col| {
+                    !self.previews_asked.contains(&(row, col))
+                        && self
+                            .source_cell(row, col)
+                            .is_some_and(Value::is_unread_clob)
+                })
+                .collect();
+            if wanted.is_empty() || self.source_cell(row, rowid_col).is_none() {
+                continue;
+            }
+            for col in wanted {
+                if !columns.contains(&col) {
+                    columns.push(col);
+                }
+            }
+            rows.push(row);
+        }
+        if rows.is_empty() {
+            return None;
+        }
+        let mut rowids = Vec::new();
+        for &row in &rows {
+            rowids.push(self.source_cell(row, rowid_col)?.display());
+            for &col in &columns {
+                if self
+                    .source_cell(row, col)
+                    .is_some_and(Value::is_unread_clob)
+                {
+                    self.previews_asked.insert((row, col));
+                }
+            }
+        }
+        let columns = columns
+            .into_iter()
+            .map(|col| self.result.columns[col].name.clone())
+            .collect();
+        Some(PreviewBatch { rowids, columns })
+    }
+
+    /// Show CLOB starts read for [`Self::take_preview_batch`]. Only cells
+    /// that are still unread take one (an edit or a loaded full value
+    /// wins), and only while the previews fit in `room` bytes. Returns how
+    /// many cells changed. `room` is what the open results can still hold
+    /// (already net of the overrides this grid has).
+    pub fn apply_previews(&mut self, previews: Vec<ora_core::ClobPreview>, room: usize) -> usize {
+        let Some(rowid_col) = self.rowid_col else {
+            return 0;
+        };
+        let wanted: HashSet<&str> = previews.iter().map(|p| p.rowid.as_str()).collect();
+        let mut by_rowid: HashMap<String, usize> = HashMap::new();
+        for row in 0..self.result.rows.len() {
+            if let Some(Value::Text(id)) = self.source_cell(row, rowid_col) {
+                if wanted.contains(id.as_str()) {
+                    by_rowid.insert(id.clone(), row);
+                }
+            }
+        }
+        let mut used = 0;
+        let mut applied = 0;
+        for preview in previews {
+            let Some(&row) = by_rowid.get(&preview.rowid) else {
+                continue;
+            };
+            let Some(col) = self
+                .result
+                .columns
+                .iter()
+                .position(|c| c.name == preview.column)
+            else {
+                continue;
+            };
+            let Some(Value::Clipped(clipped)) = self.source_cell(row, col) else {
+                continue;
+            };
+            if !self
+                .source_cell(row, col)
+                .is_some_and(Value::is_unread_clob)
+            {
+                continue;
+            }
+            let value = clipped.with_preview_text(preview.text);
+            let size = value.heap_bytes();
+            if used + size > room {
+                continue;
+            }
+            used += size;
+            self.overrides.insert((row, col), value);
+            applied += 1;
+        }
+        applied
     }
 
     /// Every field of the row shown at table row `row_ix`, in column
@@ -587,6 +737,7 @@ impl ResultsDelegate {
         self.result = result;
         self.order = None;
         self.overrides.clear();
+        self.previews_asked.clear();
         self.rebuild_columns();
         self.page = 0;
     }
@@ -757,6 +908,18 @@ fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> Ordering {
 }
 
 impl TableDelegate for ResultsDelegate {
+    fn visible_rows_changed(
+        &mut self,
+        visible_range: std::ops::Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        self.last_visible = visible_range.clone();
+        if let Some(handler) = self.on_visible_rows.clone() {
+            handler(visible_range, window, &mut **cx);
+        }
+    }
+
     fn render_tr(
         &mut self,
         ix: usize,
@@ -1081,8 +1244,8 @@ impl TableDelegate for ResultsDelegate {
         &mut self,
         col_ix: usize,
         sort: ColumnSort,
-        _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
     ) {
         let Some(col_ix) = self.data_col(col_ix) else {
             return;
@@ -1091,6 +1254,10 @@ impl TableDelegate for ResultsDelegate {
         self.selection_anchor = 0;
         self.clear_cell_selection();
         self.sort_by_column(col_ix, sort);
+        // Other rows are on screen now: their CLOB starts are still due.
+        if let Some(handler) = self.on_visible_rows.clone() {
+            handler(self.last_visible.clone(), window, &mut **cx);
+        }
     }
 }
 
@@ -1122,6 +1289,120 @@ mod tests {
     use ora_core::ColumnInfo;
 
     const MIB: usize = 1024 * 1024;
+
+    fn clob(full_len: u64, preview: &str) -> Value {
+        Value::Clipped(Box::new(ora_core::ClippedValue {
+            preview: Value::Text(preview.to_string()),
+            full_len,
+            unit: ora_core::LenUnit::Chars,
+        }))
+    }
+
+    /// `rows` data rows: ROWID "R<i>", ID and an unread CLOB BODY.
+    fn clob_grid(rows: usize) -> ResultsDelegate {
+        let col = |name: &str| ColumnInfo {
+            name: name.into(),
+            data_type: "X".into(),
+        };
+        let result = QueryResult {
+            columns: vec![col(ROWID_COLUMN), col("ID"), col("BODY")],
+            rows: (0..rows)
+                .map(|i| {
+                    vec![
+                        Value::Text(format!("R{i}")),
+                        Value::Integer(i as i128),
+                        clob(500, ""),
+                    ]
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut grid = ResultsDelegate::empty()
+            .with_page_size(1000)
+            .with_row_numbers();
+        grid.set_result(result);
+        grid
+    }
+
+    fn preview(rowid: &str, text: &str) -> ora_core::ClobPreview {
+        ora_core::ClobPreview {
+            rowid: rowid.into(),
+            column: "BODY".into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn preview_batch_covers_visible_rows_and_buffer_only() {
+        let mut grid = clob_grid(1000);
+        let batch = grid.take_preview_batch(100..130, 30, 60).unwrap();
+        // Visible rows first, then the buffer below, capped at 60 rows.
+        assert_eq!(batch.rowids.len(), 60);
+        assert_eq!(batch.rowids[0], "R100");
+        assert_eq!(batch.rowids[29], "R129");
+        assert_eq!(batch.rowids[59], "R159");
+        assert_eq!(batch.columns, vec!["BODY".to_string()]);
+        // Nothing is asked twice: the same view yields the rows before it.
+        let next = grid.take_preview_batch(100..130, 30, 60).unwrap();
+        assert_eq!(next.rowids.first().map(String::as_str), Some("R99"));
+        assert_eq!(next.rowids.len(), 30);
+        assert!(grid.take_preview_batch(100..130, 30, 60).is_none());
+        // Rows far from the view were never asked for.
+        let far = grid.take_preview_batch(900..910, 0, 60).unwrap();
+        assert_eq!(far.rowids.len(), 10);
+    }
+
+    #[test]
+    fn preview_batch_follows_sort_order_and_clamps_to_the_page() {
+        let mut grid = clob_grid(5);
+        grid.sort_by_column(1, ColumnSort::Descending);
+        let batch = grid.take_preview_batch(0..2, 0, 60).unwrap();
+        assert_eq!(batch.rowids, vec!["R4".to_string(), "R3".to_string()]);
+        let rest = grid.take_preview_batch(0..50, 50, 60).unwrap();
+        assert_eq!(rest.rowids, vec!["R2", "R1", "R0"]);
+    }
+
+    #[test]
+    fn applied_previews_fill_only_unread_cells_within_room() {
+        let mut grid = clob_grid(3);
+        let applied = grid.apply_previews(
+            vec![
+                preview("R0", "hello"),
+                preview("R1", &"x".repeat(200)),
+                preview("R9", "no such row"),
+            ],
+            usize::MAX,
+        );
+        assert_eq!(applied, 2);
+        assert_eq!(grid.cell(0, 2), Some(&clob(500, "hello")));
+        assert_eq!(grid.cell(2, 2), Some(&clob(500, "")));
+        // A cell that is no longer unread (edited, or loaded in full)
+        // keeps its value when a late preview arrives.
+        grid.set_cell("R2", "BODY", Value::Text("edited".into()));
+        assert_eq!(
+            grid.apply_previews(vec![preview("R2", "late")], usize::MAX),
+            0
+        );
+        assert_eq!(grid.cell(2, 2), Some(&Value::Text("edited".into())));
+        // Read cells are not handed out again, even without a preview.
+        assert!(grid.take_preview_batch(0..3, 0, 60).is_none());
+        // Previews that do not fit the room are dropped.
+        let mut tight = clob_grid(1);
+        assert_eq!(tight.apply_previews(vec![preview("R0", "12345678")], 4), 0);
+        assert_eq!(tight.cell(0, 2), Some(&clob(500, "")));
+    }
+
+    #[test]
+    fn a_whole_value_becomes_plain_text_and_a_new_result_starts_over() {
+        let mut grid = clob_grid(1);
+        grid.apply_previews(vec![preview("R0", &"y".repeat(500))], usize::MAX);
+        assert_eq!(grid.cell(0, 2), Some(&Value::Text("y".repeat(500))));
+        let mut grid = clob_grid(2);
+        assert!(grid.take_preview_batch(0..2, 0, 60).is_some());
+        let again = clob_grid(2).result;
+        grid.set_result(again);
+        assert!(grid.take_preview_batch(0..2, 0, 60).is_some());
+    }
 
     /// The audit's baseline: 512 rows of 32 KiB synthetic text are about
     /// 16 MiB as one `QueryResult`. Before results were shared, holding it

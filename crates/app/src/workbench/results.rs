@@ -1226,10 +1226,12 @@ impl Workbench {
 
     fn goto_page(&mut self, page: usize, cx: &mut Context<Self>) {
         let tab = self.active_tab_mut();
+        let tab_id = tab.id;
         tab.table_state.update(cx, |state, cx| {
             state.delegate_mut().set_page(page);
             state.refresh(cx);
         });
+        self.clob_rows_changed(tab_id, None, cx);
         cx.notify();
     }
 }

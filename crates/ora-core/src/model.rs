@@ -103,6 +103,32 @@ pub enum LenUnit {
 }
 
 impl ClippedValue {
+    /// The cell after its start was read separately from the cursor: a plain
+    /// text when `text` already covers the whole value, else still clipped
+    /// with the longer start.
+    pub fn with_preview_text(&self, text: String) -> Value {
+        if text.encode_utf16().count() as u64 >= self.full_len {
+            Value::Text(text)
+        } else {
+            Value::Clipped(Box::new(ClippedValue {
+                preview: Value::Text(text),
+                full_len: self.full_len,
+                unit: self.unit,
+            }))
+        }
+    }
+}
+
+/// The start of one CLOB cell, read for the grid after the page arrived
+/// (see `DbClient::fetch_clob_previews`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClobPreview {
+    pub rowid: String,
+    pub column: String,
+    pub text: String,
+}
+
+impl ClippedValue {
     pub fn describe_len(&self) -> String {
         let unit = match self.unit {
             LenUnit::Bytes => "bytes",
@@ -125,6 +151,17 @@ fn floor_char_boundary(s: &str, max: usize) -> usize {
 }
 
 impl Value {
+    /// A CLOB cell the fetch left without any of its text: clipped, empty,
+    /// counted in characters. The data tab fills these in lazily.
+    pub fn is_unread_clob(&self) -> bool {
+        matches!(
+            self,
+            Value::Clipped(c)
+                if c.unit == LenUnit::Chars
+                    && matches!(&c.preview, Value::Text(t) if t.is_empty())
+        )
+    }
+
     /// Text shown in the grid and used by CSV export.
     ///
     /// NULL renders as an empty string; the grid is expected to style NULL
@@ -520,6 +557,33 @@ pub fn parse_easy_connect(s: &str) -> Option<(String, String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unread_clobs_and_their_previews() {
+        let clipped = |len: u64, preview: &str, unit| ClippedValue {
+            preview: Value::Text(preview.to_string()),
+            full_len: len,
+            unit,
+        };
+        let unread = Value::Clipped(Box::new(clipped(10, "", LenUnit::Chars)));
+        assert!(unread.is_unread_clob());
+        assert!(!Value::Clipped(Box::new(clipped(10, "ab", LenUnit::Chars))).is_unread_clob());
+        assert!(!Value::Clipped(Box::new(clipped(10, "", LenUnit::Bytes))).is_unread_clob());
+        assert!(!Value::Text(String::new()).is_unread_clob());
+
+        let Value::Clipped(c) = &unread else {
+            unreachable!()
+        };
+        let Value::Clipped(partial) = c.with_preview_text("abcd".into()) else {
+            panic!("a start shorter than the value stays clipped");
+        };
+        assert_eq!(partial.preview, Value::Text("abcd".into()));
+        assert_eq!(partial.full_len, 10);
+        assert_eq!(
+            c.with_preview_text("0123456789".into()),
+            Value::Text("0123456789".into())
+        );
+    }
+
     use super::*;
 
     #[test]
