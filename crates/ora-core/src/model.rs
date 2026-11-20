@@ -573,11 +573,11 @@ mod tests {
         let Value::Clipped(c) = &unread else {
             unreachable!()
         };
-        assert_eq!(c.with_preview_text("abcd".into()).display(), "abcd");
-        assert!(matches!(
-            c.with_preview_text("abcd".into()),
-            Value::Clipped(_)
-        ));
+        let Value::Clipped(partial) = c.with_preview_text("abcd".into()) else {
+            panic!("a start shorter than the value stays clipped");
+        };
+        assert_eq!(partial.preview, Value::Text("abcd".into()));
+        assert_eq!(partial.full_len, 10);
         assert_eq!(
             c.with_preview_text("0123456789".into()),
             Value::Text("0123456789".into())
