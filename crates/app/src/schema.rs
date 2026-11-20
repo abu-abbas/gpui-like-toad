@@ -260,7 +260,8 @@ mod tests {
         assert!(ObjectCategory::MaterializedViews.contains(&ObjectKind::MaterializedView));
         assert!(!ObjectCategory::Views.contains(&ObjectKind::MaterializedView));
         assert!(!ObjectCategory::Tables.contains(&ObjectKind::MaterializedView));
-        assert_eq!(ObjectCategory::ALL.len(), 10);
+        assert_eq!(ObjectCategory::ALL.len(), 11);
+        assert!(ObjectCategory::Constraints.contains(&ObjectKind::Constraint));
     }
 
     #[test]
