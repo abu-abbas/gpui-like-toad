@@ -132,7 +132,11 @@ const MENU_VALUE_CHARS: usize = 32;
 
 /// The Quick Filter entries for one cell, in menu order; `None` is a
 /// separator. A NULL cell only offers the NULL checks (comparing with
-/// NULL never matches).
+/// NULL never matches). A clipped cell (only a preview or just the length
+/// is in memory, shown as e.g. "(CLOB, 415 chars)") offers the NULL checks
+/// too: its display text is a placeholder, not data, so comparing with it
+/// would never match. After "Load full value" the cell holds the real value
+/// and gets the full menu.
 pub fn quick_filter_entries(column: &str, value: &Value) -> Vec<Option<(String, FilterCondition)>> {
     let null_checks = [FilterOp::IsNull, FilterOp::IsNotNull].map(|op| {
         Some((
@@ -140,7 +144,7 @@ pub fn quick_filter_entries(column: &str, value: &Value) -> Vec<Option<(String, 
             FilterCondition::new(column, op, ""),
         ))
     });
-    if value.is_null() {
+    if value.is_null() || value.is_clipped() {
         return null_checks.into();
     }
     let text = value.display();
@@ -1045,6 +1049,9 @@ impl TableDelegate for ResultsDelegate {
             return menu;
         };
         menu = menu.min_w(px(260.)).label("Quick Filter");
+        if value.is_clipped() {
+            menu = menu.label("Load the full value to filter by its text");
+        }
         for entry in quick_filter_entries(&column.name, value) {
             menu = match entry {
                 None => menu.separator(),
@@ -1355,6 +1362,25 @@ mod tests {
         // NULL cells only get the NULL checks.
         let nulls = quick_filter_entries("X", &Value::Null);
         assert_eq!(nulls.len(), 2);
+
+        // Clipped cells (CLOB placeholder, previews) only get the NULL checks.
+        let clob = Value::Clipped(Box::new(ora_core::ClippedValue {
+            preview: text(""),
+            full_len: 415,
+            unit: ora_core::LenUnit::Chars,
+        }));
+        let labels: Vec<String> = quick_filter_entries("TX_DATA", &clob)
+            .into_iter()
+            .flatten()
+            .map(|(label, _)| label)
+            .collect();
+        assert_eq!(labels, ["TX_DATA IS NULL", "TX_DATA IS NOT NULL"]);
+        let preview = Value::Clipped(Box::new(ora_core::ClippedValue {
+            preview: text("abc"),
+            full_len: 90_000,
+            unit: ora_core::LenUnit::Bytes,
+        }));
+        assert_eq!(quick_filter_entries("T", &preview).len(), 2);
 
         // Long values are shortened in the label, not in the condition.
         let long = "a".repeat(100);
