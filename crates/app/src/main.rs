@@ -20,6 +20,7 @@ macro_rules! app_name {
 mod about;
 mod completion;
 mod crash_log;
+mod diagnostics;
 mod error_log;
 mod keychain;
 #[cfg(target_os = "macos")]

@@ -539,48 +539,73 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         let u = &self.updates;
+        let auto_label = "Check for updates on startup";
         let mut section = div()
             .flex()
             .flex_col()
             .gap(px(SPACE_2))
+            .border_t_1()
+            .border_color(theme.border)
+            .pt(px(SPACE_4))
             .child(form_label("Updates", theme))
             .child(
-                Checkbox::new("auto-check-updates")
-                    .label("Check for updates automatically on startup")
-                    .checked(u.prefs.auto_check)
-                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                        this.set_auto_check_updates(*checked);
-                        cx.notify();
-                    })),
+                settings::setting_row(
+                    auto_label,
+                    "At most once a day.",
+                    gpui_kit::component::switch::Switch::new("auto-check-updates")
+                        .accessibility_label(auto_label)
+                        .small()
+                        .checked(u.prefs.auto_check)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.set_auto_check_updates(*checked);
+                            cx.notify();
+                        })),
+                    theme,
+                )
+                .px(px(0.))
+                .min_h(px(32.)),
             )
             .child(
-                div().flex().flex_row().child(
+                settings::setting_row(
+                    "Manual update check",
+                    "",
                     Button::new("check-updates")
-                        .label("Check for Updates")
+                        .small()
+                        .label("Check for updates")
                         .icon(IconName::RefreshCw)
                         .on_click(
                             cx.listener(|this, _, window, cx| this.open_update_check(window, cx)),
                         ),
-                ),
+                    theme,
+                )
+                .px(px(0.))
+                .min_h(px(32.)),
             );
         if let Some(status) = &u.status {
             section = section.child(caption_text(status.clone(), theme));
         }
-        section = section
-            .child(div().h(px(SPACE_2)))
-            .child(form_label("Proxy", theme))
-            .child(Input::new(&self.settings.proxy_input).small().w_full())
-            .child(caption_text(
-                "Enter a proxy URL if your network requires one, for example http://proxy.example.com:8080 \
-                 (or http://user:pass@host:port; the password is kept in the system keychain, not in the settings file). Leave blank to use HTTPS_PROXY or ALL_PROXY \
-                 from the environment. Applies to update checks and downloads."
-                    .to_string(),
-                theme,
-            ));
-        section.child(caption_text(
-            "Automatic checks contact GitHub Releases at most once a day.".to_string(),
-            theme,
-        ))
+        section.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_2))
+                .mt(px(SPACE_2))
+                .pt(px(SPACE_4))
+                .border_t_1()
+                .border_color(theme.border)
+                .child(form_label("Network", theme))
+                .child(body_text("Update proxy".into(), theme))
+                .child(Input::new(&self.settings.proxy_input).small().w_full())
+                .child(caption_text(
+                    "Leave blank to use the environment proxy for update checks and downloads."
+                        .into(),
+                    theme,
+                ))
+                .child(caption_text(
+                    "Proxy passwords are stored in the system keychain.".into(),
+                    theme,
+                )),
+        )
     }
 
     pub(super) fn whats_new_active(&self) -> bool {
