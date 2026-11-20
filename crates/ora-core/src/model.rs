@@ -357,6 +357,8 @@ pub enum ObjectKind {
     Synonym,
     Type,
     DbLink,
+    /// A table constraint (primary/unique/foreign key, check).
+    Constraint,
     Other(String),
 }
 
@@ -375,6 +377,7 @@ impl ObjectKind {
             "SYNONYM" => ObjectKind::Synonym,
             "TYPE" => ObjectKind::Type,
             "DATABASE LINK" => ObjectKind::DbLink,
+            "CONSTRAINT" => ObjectKind::Constraint,
             other => ObjectKind::Other(other.to_string()),
         }
     }
@@ -394,6 +397,7 @@ impl ObjectKind {
             ObjectKind::Synonym => "Synonyms",
             ObjectKind::Type => "Types",
             ObjectKind::DbLink => "DB Links",
+            ObjectKind::Constraint => "Constraints",
             ObjectKind::Other(label) => label,
         }
     }
@@ -413,6 +417,7 @@ impl ObjectKind {
             ObjectKind::Synonym => "SYNONYM",
             ObjectKind::Type => "TYPE",
             ObjectKind::DbLink => "DATABASE LINK",
+            ObjectKind::Constraint => "CONSTRAINT",
             ObjectKind::Other(raw) => raw,
         }
     }
@@ -432,6 +437,10 @@ pub struct SchemaObject {
     pub owner: String,
     pub name: String,
     pub kind: ObjectKind,
+    /// The table a constraint belongs to.
+    pub parent: Option<String>,
+    /// Short extra text for the explorer row, e.g. `PRIMARY KEY, ENABLED`.
+    pub detail: Option<String>,
 }
 
 /// One column of a table or view, from `ALL_TAB_COLUMNS`.

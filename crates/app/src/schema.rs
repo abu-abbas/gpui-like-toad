@@ -12,6 +12,7 @@ pub enum ObjectCategory {
     Views,
     MaterializedViews,
     Indexes,
+    Constraints,
     Sequences,
     Programs,
     Triggers,
@@ -21,11 +22,12 @@ pub enum ObjectCategory {
 }
 
 impl ObjectCategory {
-    pub const ALL: [ObjectCategory; 10] = [
+    pub const ALL: [ObjectCategory; 11] = [
         ObjectCategory::Tables,
         ObjectCategory::Views,
         ObjectCategory::MaterializedViews,
         ObjectCategory::Indexes,
+        ObjectCategory::Constraints,
         ObjectCategory::Sequences,
         ObjectCategory::Programs,
         ObjectCategory::Triggers,
@@ -40,6 +42,7 @@ impl ObjectCategory {
             ObjectCategory::Views => "Views",
             ObjectCategory::MaterializedViews => "Materialized Views",
             ObjectCategory::Indexes => "Indexes",
+            ObjectCategory::Constraints => "Constraints",
             ObjectCategory::Sequences => "Sequences",
             ObjectCategory::Programs => "Procs",
             ObjectCategory::Triggers => "Triggers",
@@ -55,6 +58,7 @@ impl ObjectCategory {
             ObjectCategory::Views => *kind == ObjectKind::View,
             ObjectCategory::MaterializedViews => *kind == ObjectKind::MaterializedView,
             ObjectCategory::Indexes => *kind == ObjectKind::Index,
+            ObjectCategory::Constraints => *kind == ObjectKind::Constraint,
             ObjectCategory::Sequences => *kind == ObjectKind::Sequence,
             ObjectCategory::Programs => matches!(
                 kind,
@@ -214,6 +218,8 @@ mod tests {
             owner: owner.to_string(),
             name: name.to_string(),
             kind,
+            parent: None,
+            detail: None,
         }
     }
 
@@ -254,7 +260,8 @@ mod tests {
         assert!(ObjectCategory::MaterializedViews.contains(&ObjectKind::MaterializedView));
         assert!(!ObjectCategory::Views.contains(&ObjectKind::MaterializedView));
         assert!(!ObjectCategory::Tables.contains(&ObjectKind::MaterializedView));
-        assert_eq!(ObjectCategory::ALL.len(), 10);
+        assert_eq!(ObjectCategory::ALL.len(), 11);
+        assert!(ObjectCategory::Constraints.contains(&ObjectKind::Constraint));
     }
 
     #[test]

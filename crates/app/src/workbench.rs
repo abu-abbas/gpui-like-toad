@@ -71,6 +71,7 @@ mod db_events;
 mod db_icon;
 mod explorer;
 mod grid_clipboard;
+mod object_ops;
 mod profiles;
 mod query;
 mod quick_open;
@@ -85,6 +86,7 @@ mod ui_helpers;
 mod updates;
 use cell_edit::CellEditor;
 use data_tab::{DataTab, DataView};
+use object_ops::ObjectDialog;
 use profiles::{ConnectionForm, FORM_INCOMPLETE};
 use quick_open::QuickOpen;
 use ui_helpers::{
@@ -177,6 +179,15 @@ enum PendingOp {
         owner: String,
         name: String,
     },
+    /// An object operation of the explorer menus; `reload` refreshes the
+    /// object list afterwards (the operation added or removed objects).
+    ObjectOp {
+        reload: bool,
+        /// The change is not final until Commit (DELETE, any SQLite write).
+        uncommitted: bool,
+    },
+    /// Parameters of the function the Execute dialog is about to show.
+    RoutineSignature(ObjectRef),
     Commit,
     Rollback,
 }
@@ -309,6 +320,10 @@ struct ObjectRef {
     owner: String,
     name: String,
     kind: ObjectKind,
+    /// Constraints: the table they belong to.
+    parent: Option<String>,
+    /// Extra text shown after the name in the explorer.
+    detail: Option<String>,
 }
 
 /// One query tab: its own editor, grid, last result, and plan.
@@ -449,6 +464,7 @@ pub struct Workbench {
     quick_open: Option<QuickOpen>,
     /// The cell edit dialog, while it is showing.
     cell_editor: Option<CellEditor>,
+    object_dialog: Option<ObjectDialog>,
     /// "Save scripts before disconnect?" dialog, while it is showing.
     disconnect_prompt: Option<conns::DisconnectPrompt>,
     /// The Info panel under data / script tabs is folded to its header.
@@ -548,6 +564,7 @@ impl Workbench {
             object_scroll: UniformListScrollHandle::new(),
             quick_open: None,
             cell_editor: None,
+            object_dialog: None,
             disconnect_prompt: None,
             info_collapsed: layout.info_collapsed,
             side_conn_folded: false,
@@ -782,6 +799,9 @@ impl Render for Workbench {
             })
             .when(self.cell_editor.is_some(), |this| {
                 this.child(self.render_cell_editor(&theme, cx))
+            })
+            .when(self.object_dialog.is_some(), |this| {
+                this.child(self.render_object_dialog(&theme, cx))
             })
             .when(self.disconnect_prompt.is_some(), |this| {
                 this.child(self.render_disconnect_prompt(&theme, cx))

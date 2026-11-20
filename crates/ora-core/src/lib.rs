@@ -12,6 +12,7 @@ pub mod client;
 pub mod completion;
 pub mod copy;
 pub mod credentials;
+pub mod ddl;
 pub mod demo;
 pub mod dialect;
 pub mod edit;

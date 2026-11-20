@@ -83,6 +83,14 @@ pub struct Capabilities {
     pub sysdba: bool,
     /// Explain Plan as formatted text (DBMS_XPLAN), next to the plan tree.
     pub explain_text: bool,
+    /// `TRUNCATE TABLE`.
+    pub truncate: bool,
+    /// External and index-organized tables (New Table types).
+    pub special_tables: bool,
+    /// Stored programs: Compile, Execute Function.
+    pub programs: bool,
+    /// Sequences: Reset Sequence.
+    pub sequences: bool,
 }
 
 /// SQL text that differs per database. Identifiers are double-quoted in

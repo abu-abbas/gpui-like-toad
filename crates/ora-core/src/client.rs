@@ -313,6 +313,16 @@ pub trait DbClient: Send {
         Err(DbError::new("indexes are not supported by this backend"))
     }
 
+    /// Parameters and return type of a standalone function (empty return
+    /// type for a procedure), for Execute Function.
+    fn routine_signature(
+        &mut self,
+        _owner: &str,
+        _name: &str,
+    ) -> Result<(Vec<crate::ddl::RoutineArg>, String), DbError> {
+        Err(DbError::new("functions are not supported by this backend"))
+    }
+
     /// `EXPLAIN PLAN` output as formatted text lines (DBMS_XPLAN style), one
     /// string per line, without trailing newlines.
     fn explain_plan(&mut self, sql: &str) -> Result<Vec<String>, DbError>;
