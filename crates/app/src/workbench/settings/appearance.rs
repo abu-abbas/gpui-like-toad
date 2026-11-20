@@ -386,33 +386,6 @@ fn setting_group(
         }))
 }
 
-fn setting_row(
-    label: &'static str,
-    description: &'static str,
-    control: impl IntoElement,
-    theme: &gpui_kit::component::Theme,
-) -> gpui_kit::Div {
-    div()
-        .flex()
-        .items_center()
-        .min_h(px(48.))
-        .gap(px(SPACE_2))
-        .px(px(SPACE_4))
-        .py(px(SPACE_1))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w(px(0.))
-                .child(body_text(label.into(), theme))
-                .when(!description.is_empty(), |row| {
-                    row.child(caption_text(description.into(), theme))
-                }),
-        )
-        .child(div().flex_none().child(control))
-}
-
 fn color_value(color: Hsla, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
     let rgb = color.to_rgb();
     let channel = |value: f32| (value * 255.).round() as u8;

@@ -66,11 +66,16 @@ impl Workbench {
     /// columns and stage them.
     pub(super) fn stage_duplicates(
         &mut self,
+        cid: u64,
         rows: Vec<Vec<(String, String)>>,
         defs: &[ora_core::ColumnDef],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The rows are staged in the grid the user is looking at.
+        if cid != self.conn.id {
+            return;
+        }
         let Some(data) = self.data_mut() else {
             return;
         };

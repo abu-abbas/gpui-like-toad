@@ -336,6 +336,13 @@ pub fn apply_theme(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
             }
         }
         apply_accent(theme, &appearance.accent);
+        // Line numbers are muted so they do not compete with the code; the
+        // active one stays a step brighter. Derived from the theme's muted
+        // foreground so it follows every light/dark theme.
+        let muted = theme.muted_foreground;
+        let style = &mut std::sync::Arc::make_mut(&mut theme.highlight_theme).style;
+        style.editor_line_number = Some(muted.opacity(0.5));
+        style.editor_active_line_number = Some(muted.opacity(0.9));
         // UI text keeps the platform font (the Root would otherwise apply
         // the theme font to the whole window); mono is for code only.
         theme.font_family = ui_font.clone();

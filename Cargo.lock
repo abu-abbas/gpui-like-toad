@@ -2732,6 +2732,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "ora-core",
  "ora-driver",
+ "regex",
  "rodio",
  "rust-embed",
  "rustix",

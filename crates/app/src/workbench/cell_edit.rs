@@ -328,11 +328,12 @@ impl Workbench {
     /// The worker's answer: mark the edits that went through as applied.
     pub(super) fn edits_applied(
         &mut self,
+        cid: u64,
         done: usize,
         error: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab_ix) = self.target_ix() else {
+        let Some(tab_ix) = self.target_ix_for(cid) else {
             return;
         };
         let mut changed_rows = false;
@@ -353,24 +354,31 @@ impl Workbench {
         if changed_rows
             && error.is_none()
             && tab_ix == self.active_tab
-            && self.tabs[tab_ix].conn == Some(self.conn.id)
+            && cid == self.conn.id
+            && self.tabs[tab_ix].conn == Some(cid)
         {
             self.reload_data(cx);
         }
         self.sync_pending(tab_ix, cx);
         match error {
             None => {
-                self.push_message(format!(
-                    "Applied changes: {done}. Use Commit to keep them or Rollback to undo them."
-                ));
-                self.conn.status = format!("Applied changes: {done} (uncommitted).");
+                self.push_message_for(
+                    cid,
+                    format!(
+                        "Applied changes: {done}. Use Commit to keep them or Rollback to undo them."
+                    ),
+                );
+                self.set_status_for(cid, format!("Applied changes: {done} (uncommitted)."));
             }
             Some(err) => {
-                self.push_message(format!(
-                    "Failed to apply change #{} ({err}). Changes already applied: {done}.",
-                    done + 1
-                ));
-                self.conn.status = format!("Failed to apply changes: {err}");
+                self.push_message_for(
+                    cid,
+                    format!(
+                        "Failed to apply change #{} ({err}). Changes already applied: {done}.",
+                        done + 1
+                    ),
+                );
+                self.set_status_for(cid, format!("Failed to apply changes: {err}"));
             }
         }
     }
@@ -398,8 +406,8 @@ impl Workbench {
     }
 
     /// After Commit or Rollback: the tints go away in every data tab.
-    pub(super) fn clear_edit_marks(&mut self, cx: &mut Context<Self>) {
-        let conn = Some(self.conn.id);
+    pub(super) fn clear_edit_marks_for(&mut self, conn_id: u64, cx: &mut Context<Self>) {
+        let conn = Some(conn_id);
         for ix in 0..self.tabs.len() {
             if self.tabs[ix].conn != conn {
                 continue;

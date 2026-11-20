@@ -4,7 +4,7 @@
 //! report. Panics go to the separate `crash.log` (see `crash_log`).
 
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::PathBuf;
 
 const LOG_FILE: &str = "errors.log";
@@ -70,26 +70,43 @@ fn trim(path: &std::path::Path) {
     }
 }
 
-pub fn clear() -> std::io::Result<()> {
-    match fs::remove_file(log_path()) {
+pub fn clear(path: &std::path::Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
         Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
         _ => Ok(()),
     }
 }
 
 /// The newest part of a log file, or empty when there is none.
-fn tail_of(path: &std::path::Path) -> String {
-    let Ok(bytes) = fs::read(path) else {
+pub fn tail_of(path: &std::path::Path) -> String {
+    let Ok(mut file) = fs::File::open(path) else {
         return String::new();
     };
-    let tail = if bytes.len() > VIEW_BYTES {
-        let cut = &bytes[bytes.len() - VIEW_BYTES..];
-        let start = cut.iter().position(|&b| b == b'\n').map_or(0, |i| i + 1);
-        &cut[start..]
-    } else {
-        &bytes[..]
+    let Ok(end) = file.seek(SeekFrom::End(0)) else {
+        return String::new();
     };
-    String::from_utf8_lossy(tail).trim_end().to_string()
+    // Include the preceding byte so a cut at a newline keeps the whole next entry.
+    let start = end.saturating_sub(VIEW_BYTES as u64 + 1);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    if file
+        .take(VIEW_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return String::new();
+    }
+    let skip = if end > VIEW_BYTES as u64 {
+        bytes
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(bytes.len(), |i| i + 1)
+    } else {
+        0
+    };
+    crate::diagnostics::redact(String::from_utf8_lossy(&bytes[skip..]).trim_end())
 }
 
 /// The newest errors, for the Settings view.
@@ -171,7 +188,10 @@ mod tests {
             "Invalid proxy (http://bob:s3cret@proxy:8080): bad port",
         );
         let log = tail_of(&dir.join(LOG_FILE));
-        assert!(log.contains("http://bob:***@proxy:8080"), "{log}");
+        assert!(fs::read_to_string(dir.join(LOG_FILE))
+            .unwrap()
+            .contains("http://bob:***@proxy:8080"));
+        assert!(log.contains("http://[redacted]@proxy:8080"), "{log}");
         assert!(!log.contains("s3cret"));
         let _ = fs::remove_dir_all(&dir);
     }

@@ -208,7 +208,7 @@ impl Workbench {
                             .icon(icon(IconName::Search, 15., theme.muted_foreground))
                             .size(px(EXPLORER_CONTROL_HEIGHT))
                             .flex_none()
-                            .tooltip("Quick Open (Ctrl/Cmd+P)")
+                            .tooltip_with_action("Quick Open", &QuickOpenTable, Some("Workbench"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.toggle_quick_open(window, cx)
                             })),
@@ -350,23 +350,42 @@ impl Workbench {
     /// Reload the schema list, then the objects of the current schema
     /// (the session user's own schema on first load).
     pub(super) fn refresh_schema(&mut self, cx: &mut Context<Self>) {
-        if self.conn.busy {
+        self.refresh_schema_for(self.conn.id, cx);
+    }
+
+    pub(super) fn refresh_schema_for(&mut self, conn_id: u64, cx: &mut Context<Self>) {
+        let Some(conn) = self.conn_by_id(conn_id) else {
+            return;
+        };
+        if conn.busy {
             return;
         }
-        if self.conn.session.is_none() {
-            self.push_message("Not connected.".to_string());
+        if conn.session.is_none() {
+            self.push_message_for(conn_id, "Not connected.".to_string());
             return;
         }
-        self.conn.status = "Loading schemas…".to_string();
-        self.spawn_db(Job::ListSchemas, PendingOp::ListSchemas, cx);
+        self.set_status_for(conn_id, "Loading schemas…".to_string());
+        self.spawn_db_for(conn_id, Job::ListSchemas, PendingOp::ListSchemas, cx);
     }
 
     pub(super) fn load_objects(&mut self, cx: &mut Context<Self>) {
-        let Some(owner) = self.conn.current_schema.clone() else {
+        self.load_objects_for(self.conn.id, cx);
+    }
+
+    pub(super) fn load_objects_for(&mut self, conn_id: u64, cx: &mut Context<Self>) {
+        let Some(owner) = self
+            .conn_by_id(conn_id)
+            .and_then(|c| c.current_schema.clone())
+        else {
             return;
         };
-        self.conn.status = format!("Loading objects in {owner}…");
-        self.spawn_db(Job::ListObjects { owner }, PendingOp::ListObjects, cx);
+        self.set_status_for(conn_id, format!("Loading objects in {owner}…"));
+        self.spawn_db_for(
+            conn_id,
+            Job::ListObjects { owner },
+            PendingOp::ListObjects,
+            cx,
+        );
     }
 
     fn select_schema(&mut self, schema: String, cx: &mut Context<Self>) {
@@ -419,6 +438,17 @@ impl Workbench {
         self.open_table_data_in(owner, name, DataView::Data, window, cx);
     }
 
+    /// Index of the data tab already showing `owner.name` on connection
+    /// `conn_id`; tabs of other connections are never matched.
+    pub(super) fn find_data_tab(&self, conn_id: u64, owner: &str, name: &str) -> Option<usize> {
+        self.tabs.iter().position(|t| {
+            t.conn == Some(conn_id)
+                && t.data
+                    .as_ref()
+                    .is_some_and(|d| d.owner == owner && d.name == name)
+        })
+    }
+
     /// Like [`Self::open_table_data`], starting on `view` (Describe opens
     /// the Structure view; the rows load when Data is first shown).
     fn open_table_data_in(
@@ -431,6 +461,13 @@ impl Workbench {
     ) {
         if self.conn.session.is_none() {
             return;
+        }
+        // Same connection + schema + table already open: just show it.
+        if start_view == DataView::Data {
+            if let Some(ix) = self.find_data_tab(self.conn.id, owner, name) {
+                self.activate_tab(ix, cx);
+                return;
+            }
         }
         if self.conn.busy {
             self.conn.status = "An operation is already running.".to_string();
@@ -554,22 +591,27 @@ impl Workbench {
                 return;
             };
             let _ = view.update(cx, |this, cx| {
-                this.with_conn(conn_id, cx, |this, _, cx| {
-                    this.conn.status = format!("Export {}.{}...", object.owner, object.name);
-                    this.spawn_db(
-                        Job::ExportTable {
-                            owner: object.owner.clone(),
-                            name: object.name.clone(),
-                            path,
-                            format,
-                        },
-                        PendingOp::ExportTable {
-                            owner: object.owner,
-                            name: object.name,
-                        },
-                        cx,
-                    );
-                });
+                if this.conn_by_id(conn_id).is_none() {
+                    return;
+                }
+                this.set_status_for(
+                    conn_id,
+                    format!("Export {}.{}...", object.owner, object.name),
+                );
+                this.spawn_db_for(
+                    conn_id,
+                    Job::ExportTable {
+                        owner: object.owner.clone(),
+                        name: object.name.clone(),
+                        path,
+                        format,
+                    },
+                    PendingOp::ExportTable {
+                        owner: object.owner,
+                        name: object.name,
+                    },
+                    cx,
+                );
             });
         })
         .detach();
@@ -632,21 +674,26 @@ impl Workbench {
                 let Some(path) = path else {
                     return;
                 };
-                this.with_conn(conn_id, cx, |this, _, cx| {
-                    this.conn.status = format!("Importing into {}.{}…", object.owner, object.name);
-                    this.spawn_db(
-                        Job::ImportCsv {
-                            owner: object.owner.clone(),
-                            name: object.name.clone(),
-                            path,
-                        },
-                        PendingOp::ImportCsv {
-                            owner: object.owner,
-                            name: object.name,
-                        },
-                        cx,
-                    );
-                });
+                if this.conn_by_id(conn_id).is_none() {
+                    return;
+                }
+                this.set_status_for(
+                    conn_id,
+                    format!("Importing into {}.{}…", object.owner, object.name),
+                );
+                this.spawn_db_for(
+                    conn_id,
+                    Job::ImportCsv {
+                        owner: object.owner.clone(),
+                        name: object.name.clone(),
+                        path,
+                    },
+                    PendingOp::ImportCsv {
+                        owner: object.owner,
+                        name: object.name,
+                    },
+                    cx,
+                );
             });
         })
         .detach();

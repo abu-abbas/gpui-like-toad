@@ -13,14 +13,23 @@ impl Workbench {
     /// Index of the tab the running operation belongs to. `None` when that
     /// tab was closed while the operation ran.
     pub(super) fn target_ix(&self) -> Option<usize> {
-        match self.conn.pending_tab {
+        self.target_ix_for(self.conn.id)
+    }
+
+    /// Same for the operation running on connection `conn_id`.
+    pub(super) fn target_ix_for(&self, conn_id: u64) -> Option<usize> {
+        match self.conn_by_id(conn_id)?.pending_tab {
             Some(id) => self.tabs.iter().position(|t| t.id == id),
             None => (self.active_tab < self.tabs.len()).then_some(self.active_tab),
         }
     }
 
     pub(super) fn target_tab_mut(&mut self) -> &mut QueryTab {
-        match self.target_ix() {
+        self.target_tab_for_mut(self.conn.id)
+    }
+
+    pub(super) fn target_tab_for_mut(&mut self, conn_id: u64) -> &mut QueryTab {
+        match self.target_ix_for(conn_id) {
             Some(ix) => &mut self.tabs[ix],
             None => &mut self.scratch_tab,
         }
@@ -77,38 +86,69 @@ impl Workbench {
                 tab.conn = Some(id);
             }
         }
-        let access = self.conn.access();
-        if self.conn.session.is_some() {
+        self.send_db(self.conn.id, job, op, cx);
+    }
+
+    /// Like [`Workbench::spawn_db`] for a job that belongs to connection
+    /// `conn_id` and no tab (explorer lists, object actions), which need not
+    /// be the active one. Ops that land in a tab go through `spawn_db`.
+    pub(super) fn spawn_db_for(
+        &mut self,
+        conn_id: u64,
+        job: Job,
+        op: PendingOp,
+        cx: &mut Context<Self>,
+    ) {
+        if conn_id == self.conn.id {
+            return self.spawn_db(job, op, cx);
+        }
+        if self.conn_by_id(conn_id).is_none_or(|c| c.db.is_none()) {
+            self.push_message_for(conn_id, "Not connected.".to_string());
+            return;
+        }
+        self.send_db(conn_id, job, op, cx);
+    }
+
+    /// Ask for the production confirmation when the connection is
+    /// protected, then dispatch.
+    fn send_db(&mut self, conn_id: u64, job: Job, op: PendingOp, cx: &mut Context<Self>) {
+        let Some(conn) = self.conn_by_id(conn_id) else {
+            return;
+        };
+        let access = conn.access();
+        if conn.session.is_some() {
             if let Some(operation) = job.protected_operation() {
                 if access.protect_production && !access.read_only {
-                    self.confirm_production_job(job, op, operation, cx);
+                    self.confirm_production_job(conn_id, job, op, operation, cx);
                     return;
                 }
             }
         }
-        self.dispatch_db(job, op, false, cx);
+        self.dispatch_db(conn_id, job, op, false, cx);
     }
 
     fn confirm_production_job(
         &mut self,
+        conn_id: u64,
         job: Job,
         op: PendingOp,
         operation: &'static str,
         cx: &mut Context<Self>,
     ) {
-        self.conn.busy = true;
-        cx.notify();
-        let handle = self.window_handle;
-        let conn_id = self.conn.id;
-        let generation = self.conn.op_generation;
-        let tab_id = self.tabs.get(self.active_tab).map(|t| t.id);
-        let connection = self.conn.label();
-        let database = self
-            .conn
+        let Some(conn) = self.conn_mut(conn_id) else {
+            return;
+        };
+        conn.busy = true;
+        let generation = conn.op_generation;
+        let connection = conn.label();
+        let database = conn
             .session
             .as_ref()
             .map(|info| format!("{} @ {}", info.user, info.database))
             .unwrap_or_default();
+        cx.notify();
+        let handle = self.window_handle;
+        let tab_id = self.tabs.get(self.active_tab).map(|t| t.id);
         cx.spawn(async move |view, cx| {
             let prompt = cx.update_window(handle, |_, window, cx| {
                 window.prompt(
@@ -136,7 +176,7 @@ impl Workbench {
                     && this.conn.session.is_some();
                 if proceed {
                     this.conn.busy = false;
-                    this.dispatch_db(job, op, true, cx);
+                    this.dispatch_db(conn_id, job, op, true, cx);
                 } else if let Some(conn) = this.conn_mut(conn_id) {
                     conn.busy = false;
                     conn.pending_sql = None;
@@ -149,8 +189,19 @@ impl Workbench {
         .detach();
     }
 
-    fn dispatch_db(&mut self, job: Job, op: PendingOp, confirmed: bool, cx: &mut Context<Self>) {
-        let Some(db) = self.conn.db.as_ref() else {
+    fn dispatch_db(
+        &mut self,
+        conn_id: u64,
+        job: Job,
+        op: PendingOp,
+        confirmed: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let pending_tab = self.tabs.get(self.active_tab).map(|t| t.id);
+        let Some(conn) = self.conn_mut(conn_id) else {
+            return;
+        };
+        let Some(db) = conn.db.as_ref() else {
             return;
         };
         let rx: Receiver<Response> = if confirmed {
@@ -158,14 +209,13 @@ impl Workbench {
         } else {
             db.request(job)
         };
-        self.conn.op_generation += 1;
-        let generation = self.conn.op_generation;
-        self.conn.pending_op = Some(op);
-        self.conn.pending_tab = self.tabs.get(self.active_tab).map(|t| t.id);
-        self.conn.busy = true;
+        conn.op_generation += 1;
+        let generation = conn.op_generation;
+        conn.pending_op = Some(op);
+        conn.pending_tab = pending_tab;
+        conn.busy = true;
         cx.notify();
         let handle = self.window_handle;
-        let conn_id = self.conn.id;
         cx.spawn(async move |view, cx| {
             let resp = cx
                 .background_executor()
@@ -180,9 +230,7 @@ impl Workbench {
                     if !this.op_is_current(conn_id, generation) {
                         return;
                     }
-                    this.with_conn(conn_id, cx, |this, background, cx| {
-                        this.on_db_response(generation, resp, background, window, cx)
-                    })
+                    this.on_db_response(conn_id, generation, resp, window, cx)
                 })
             });
         })
@@ -217,9 +265,7 @@ impl Workbench {
                 if let Ok(Response::ConnectionLost(reason)) = result {
                     let _ = view.update(cx, |this, cx| {
                         if this.op_is_current(id, generation) {
-                            this.with_conn(id, cx, |this, _, cx| {
-                                this.connection_was_lost(reason, cx)
-                            });
+                            this.connection_was_lost(id, reason, cx);
                         }
                     });
                 }
@@ -228,13 +274,16 @@ impl Workbench {
         .detach();
     }
 
-    fn connection_was_lost(&mut self, error: String, cx: &mut Context<Self>) {
-        if self.conn.session.take().is_none() {
+    fn connection_was_lost(&mut self, cid: u64, error: String, cx: &mut Context<Self>) {
+        let Some(conn) = self.conn_mut(cid) else {
+            return;
+        };
+        if conn.session.take().is_none() {
             return;
         }
-        let had_writes = self.conn.uncommitted
+        let had_writes = conn.uncommitted
             || matches!(
-                self.conn.pending_op,
+                conn.pending_op,
                 Some(
                     PendingOp::ApplyEdits
                         | PendingOp::ImportCsv { .. }
@@ -243,34 +292,35 @@ impl Workbench {
                         | PendingOp::Run
                 )
             );
-        let connection = self.conn.label();
-        self.conn.connection_lost = true;
-        self.conn.db = None;
-        self.conn.busy = false;
-        self.conn.abandoned = false;
-        self.conn.pending_op = None;
-        self.conn.pending_tab = None;
-        self.conn.pending_sql = None;
-        self.conn.op_generation += 1;
-        self.conn.uncommitted = false;
-        self.conn.current_schema = None;
-        self.conn.selected_object = None;
-        self.conn.objects.clear();
-        self.conn.schemas.clear();
-        self.reset_catalog(None);
+        let connection = conn.label();
+        conn.connection_lost = true;
+        conn.db = None;
+        conn.busy = false;
+        conn.abandoned = false;
+        conn.pending_op = None;
+        conn.pending_tab = None;
+        conn.pending_sql = None;
+        conn.op_generation += 1;
+        conn.uncommitted = false;
+        conn.current_schema = None;
+        conn.selected_object = None;
+        conn.objects.clear();
+        conn.schemas.clear();
+        self.reset_catalog_for(cid, None);
         if self
             .tabs
             .get(self.active_tab)
-            .is_some_and(|tab| tab.conn == Some(self.conn.id))
+            .is_some_and(|tab| tab.conn == Some(cid))
         {
             self.cell_editor = None;
         }
-        self.clear_edit_marks(cx);
-        self.invalidate_connection_results(cx);
-        self.conn.status = "Connection lost. Reconnect to continue.".to_string();
-        self.push_message(format!("Connection lost ({connection}): {error}"));
+        self.clear_edit_marks_for(cid, cx);
+        self.invalidate_connection_results_for(cid, cx);
+        self.set_status_for(cid, "Connection lost. Reconnect to continue.".to_string());
+        self.push_message_for(cid, format!("Connection lost ({connection}): {error}"));
         if had_writes {
-            self.push_message(
+            self.push_message_for(
+                cid,
                 "Check the database before retrying. The last operation may have reached Oracle."
                     .into(),
             );
@@ -281,23 +331,31 @@ impl Workbench {
     /// The worker finally answered an operation the user stopped waiting
     /// for: free the connection, ignore the data, but remember a write may
     /// have happened.
-    fn on_abandoned_response(&mut self, resp: Result<Response, RecvError>, cx: &mut Context<Self>) {
+    fn on_abandoned_response(
+        &mut self,
+        cid: u64,
+        resp: Result<Response, RecvError>,
+        cx: &mut Context<Self>,
+    ) {
         if let Ok(Response::ConnectionLost(error)) = resp {
-            self.connection_was_lost(error, cx);
+            self.connection_was_lost(cid, error, cx);
             return;
         }
-        let pending = self.conn.pending_op.take();
-        self.conn.pending_tab = None;
-        self.conn.busy = false;
-        if matches!(
-            (&pending, &resp),
-            (Some(PendingOp::Run), Ok(Response::Executed(_)))
-                | (Some(PendingOp::ImportCsv { .. }), Ok(Response::Imported(_)))
-        ) {
-            self.conn.uncommitted = true;
-        }
-        self.conn.status = "The stopped operation finished; its result was ignored.".to_string();
-        self.push_message(
+        self.set_conn_state(cid, |conn| {
+            let pending = conn.pending_op.take();
+            conn.pending_tab = None;
+            conn.busy = false;
+            if matches!(
+                (&pending, &resp),
+                (Some(PendingOp::Run), Ok(Response::Executed(_)))
+                    | (Some(PendingOp::ImportCsv { .. }), Ok(Response::Imported(_)))
+            ) {
+                conn.uncommitted = true;
+            }
+            conn.status = "The stopped operation finished; its result was ignored.".to_string();
+        });
+        self.push_message_for(
+            cid,
             "The operation you stopped has finished on the server. Its result was ignored."
                 .to_string(),
         );
@@ -306,33 +364,36 @@ impl Workbench {
 
     fn on_db_response(
         &mut self,
+        cid: u64,
         generation: u64,
         resp: Result<Response, RecvError>,
-        background: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // A superseded operation (after Stop, or a newer op) drops its
         // response entirely: stale data must never overwrite fresh state.
-        if generation != self.conn.op_generation {
+        let Some(conn) = self.conn_mut(cid) else {
+            return;
+        };
+        if generation != conn.op_generation {
             return;
         }
-        self.conn.cancel_script = None;
-        if std::mem::take(&mut self.conn.abandoned) {
-            return self.on_abandoned_response(resp, cx);
+        conn.cancel_script = None;
+        if std::mem::take(&mut conn.abandoned) {
+            return self.on_abandoned_response(cid, resp, cx);
         }
         if let Ok(Response::ConnectionLost(error)) = resp {
-            self.connection_was_lost(error, cx);
+            self.connection_was_lost(cid, error, cx);
             return;
         }
-        let pending = self.conn.pending_op.take();
-        let pending_sql = self.conn.pending_sql.take();
-        self.conn.busy = false;
+        let pending = conn.pending_op.take();
+        let pending_sql = conn.pending_sql.take();
+        conn.busy = false;
         let resp = match resp {
             Ok(resp) => resp,
             Err(_) => {
-                self.push_message("The database worker stopped.".to_string());
-                self.conn.status = "Worker error".to_string();
+                conn.status = "Worker error".to_string();
+                self.push_message_for(cid, "The database worker stopped.".to_string());
                 cx.notify();
                 return;
             }
@@ -342,23 +403,23 @@ impl Workbench {
             (Some(PendingOp::Run), Response::Executed(_))
                 | (Some(PendingOp::ImportCsv { .. }), Response::Imported(_))
         ) {
-            self.conn.uncommitted = true;
+            conn.uncommitted = true;
         }
         if let Response::Failed(message) = resp {
-            self.on_db_failed(pending, message, window, cx);
+            self.on_db_failed(cid, pending, message, window, cx);
             return;
         }
         match (pending, resp) {
             // Connect and Test (connect.rs).
             (Some(PendingOp::Connect), Response::Connected(info)) => {
-                self.on_connected(info, window, cx)
+                self.on_connected(cid, info, window, cx)
             }
             (Some(PendingOp::TestConnect), Response::Tested(outcome)) => {
-                self.on_connection_tested(outcome)
+                self.on_connection_tested(cid, outcome)
             }
             // SQL tabs: Run and Explain (query.rs).
             (Some(PendingOp::Run), Response::ScriptDone(results)) => {
-                self.on_script_done(results, cx)
+                self.on_script_done(cid, results, cx)
             }
             (
                 Some(PendingOp::LoadCell),
@@ -367,27 +428,27 @@ impl Workbench {
                     column,
                     value,
                 },
-            ) => self.on_cell_loaded(rowid, column, value, cx),
+            ) => self.on_cell_loaded(cid, rowid, column, value, cx),
             (Some(PendingOp::Run), Response::QueryDone(result)) => {
-                self.on_query_done(result, pending_sql, cx)
+                self.on_query_done(cid, result, pending_sql, cx)
             }
             (Some(PendingOp::Run), Response::Executed(affected)) => {
-                self.on_statement_executed(affected, pending_sql)
+                self.on_statement_executed(cid, affected, pending_sql)
             }
             (Some(PendingOp::Explain), Response::PlanTree(nodes, lines)) => {
-                self.on_plan_tree(nodes, lines)
+                self.on_plan_tree(cid, nodes, lines)
             }
-            (Some(PendingOp::Explain), Response::Plan(lines)) => self.on_plan_text(lines),
+            (Some(PendingOp::Explain), Response::Plan(lines)) => self.on_plan_text(cid, lines),
             // Explorer schema and object lists (catalog.rs).
             (Some(PendingOp::ListSchemas), Response::Schemas(schemas)) => {
-                self.on_schemas(schemas, cx)
+                self.on_schemas(cid, schemas, cx)
             }
             (Some(PendingOp::ListObjects), Response::Objects(objects)) => {
-                self.on_objects(objects, cx)
+                self.on_objects(cid, objects, cx)
             }
             // Explorer object actions and data tab views (objects.rs).
             (Some(PendingOp::Ddl { owner, name }), Response::Ddl(ddl)) => {
-                self.on_object_script(owner, name, ddl, window, cx)
+                self.on_object_script(cid, owner, name, ddl, window, cx)
             }
             (
                 Some(PendingOp::ExportTable { owner, name }),
@@ -397,32 +458,32 @@ impl Workbench {
                     truncated,
                     clipped,
                 },
-            ) => self.on_table_exported(owner, name, path, rows, truncated, clipped),
+            ) => self.on_table_exported(cid, (owner, name), path, rows, truncated, clipped),
             (Some(PendingOp::RefreshMaterializedView { owner, name }), Response::Executed(_)) => {
-                self.on_materialized_view_refreshed(owner, name, cx)
+                self.on_materialized_view_refreshed(cid, owner, name, cx)
             }
             (Some(PendingOp::ImportCsv { owner, name }), Response::Imported(rows)) => {
-                self.on_csv_imported(owner, name, rows)
+                self.on_csv_imported(cid, owner, name, rows)
             }
             (Some(PendingOp::DataStructure), Response::Described(defs)) => {
-                self.on_data_structure(defs, cx)
+                self.on_data_structure(cid, defs, cx)
             }
             (Some(PendingOp::DataIndexes), Response::Indexes(indexes)) => {
-                self.on_data_indexes(indexes, cx)
+                self.on_data_indexes(cid, indexes, cx)
             }
-            (Some(PendingOp::DataDdl), Response::Ddl(ddl)) => self.on_data_ddl(ddl, window, cx),
+            (Some(PendingOp::DataDdl), Response::Ddl(ddl)) => {
+                self.on_data_ddl(cid, ddl, window, cx)
+            }
             // Grid edits (edits.rs).
             (Some(PendingOp::DuplicateRows(rows)), Response::Described(defs)) => {
-                self.stage_duplicates(rows, &defs, window, cx)
+                self.stage_duplicates(cid, rows, &defs, window, cx)
             }
             (Some(PendingOp::ApplyEdits), Response::CellsUpdated { done, error }) => {
-                self.on_cells_updated(done, error, cx)
+                self.on_cells_updated(cid, done, error, cx)
             }
             // Commit and Rollback (transaction.rs).
-            (Some(PendingOp::Commit), Response::Committed) => self.on_committed(cx),
-            (Some(PendingOp::Rollback), Response::RolledBack) => {
-                self.on_rolled_back(background, cx)
-            }
+            (Some(PendingOp::Commit), Response::Committed) => self.on_committed(cid, cx),
+            (Some(PendingOp::Rollback), Response::RolledBack) => self.on_rolled_back(cid, cx),
             _ => {}
         }
         cx.notify();
@@ -432,6 +493,7 @@ impl Workbench {
     /// opens the profile's dialog so the password can be fixed.
     fn on_db_failed(
         &mut self,
+        cid: u64,
         pending: Option<PendingOp>,
         message: String,
         window: &mut Window,
@@ -442,20 +504,23 @@ impl Workbench {
             // missing password): open the dialog so it can be fixed.
             if !self.connection_form.show_connection_form {
                 if let Some(ix) = self
-                    .conn
-                    .last_connection
-                    .as_ref()
+                    .conn_by_id(cid)
+                    .and_then(|c| c.last_connection.as_ref())
                     .filter(|l| !l.demo)
                     .and_then(|l| l.profile_ix)
                 {
-                    self.edit_profile(ix, window, cx);
+                    // Only for the connection the user is working on; a
+                    // background one must not pop a dialog over other work.
+                    if cid == self.conn.id {
+                        self.edit_profile(ix, window, cx);
+                    }
                 }
             }
-            self.conn.connect_error = Some(message.clone());
+            self.set_conn_state(cid, |c| c.connect_error = Some(message.clone()));
         }
-        self.push_message(message);
-        self.conn.status = "Error (see Messages).".to_string();
-        self.target_tab_mut().results_tab = ResultsTab::Messages;
+        self.push_message_for(cid, message);
+        self.set_status_for(cid, "Error (see Messages).".to_string());
+        self.target_tab_for_mut(cid).results_tab = ResultsTab::Messages;
         cx.notify();
     }
 }

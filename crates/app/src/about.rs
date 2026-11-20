@@ -10,6 +10,7 @@ use gpui_kit::{
 
 use ora_core::store::AppIcon;
 
+const DESCRIPTION: &str = "Lightweight database client built with GPUI and Rust";
 const FOLDED_ICON_PATH: &str = "kilat-app-icon.png";
 const BOLT_ICON_PATH: &str = "kilat-bolt.png";
 
@@ -70,7 +71,7 @@ pub(crate) fn app_icon(size: f32, icon: AppIcon) -> impl IntoElement {
     img(path).size(px(size)).flex_none()
 }
 
-pub(crate) fn content(theme: &gpui_kit::component::Theme, cx: &App) -> impl IntoElement {
+fn content(theme: &gpui_kit::component::Theme, cx: &App) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
@@ -95,7 +96,40 @@ pub(crate) fn content(theme: &gpui_kit::component::Theme, cx: &App) -> impl Into
                 .text_size(crate::theme::ui_size(theme, 13.))
                 .text_color(theme.muted_foreground)
                 .child(concat!("Version ", env!("CARGO_PKG_VERSION")))
-                .child("Lightweight database client built with GPUI and Rust"),
+                .child(DESCRIPTION),
+        )
+}
+
+pub(crate) fn settings_header(theme: &gpui_kit::component::Theme, cx: &App) -> impl IntoElement {
+    use crate::theme::{ui_size, FONT_HEADING_MD, FONT_LABEL, SPACE_2, SPACE_3};
+    div()
+        .flex()
+        .items_center()
+        .gap(px(SPACE_3))
+        .child(app_icon(48., crate::theme::appearance(cx).app_icon))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .min_w(px(0.))
+                .text_size(ui_size(theme, FONT_LABEL))
+                .text_color(theme.muted_foreground)
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(SPACE_2))
+                        .child(
+                            div()
+                                .text_size(ui_size(theme, FONT_HEADING_MD))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.foreground)
+                                .child(app_name!()),
+                        )
+                        .child(env!("CARGO_PKG_VERSION")),
+                )
+                .child(DESCRIPTION),
         )
 }
 

@@ -268,7 +268,10 @@ impl Workbench {
                 dialog.connections,
                 dialog.subfolders,
                 if dialog.open > 0 {
-                    format!(" Disconnect the {} open connection(s) before deleting them.", dialog.open)
+                    format!(
+                        " Disconnect the {} open connection(s) before deleting them.",
+                        dialog.open
+                    )
                 } else {
                     String::new()
                 }
@@ -606,13 +609,8 @@ impl Workbench {
                     ),
             );
         }
-        let mut branches = div()
-            .flex()
-            .flex_col()
-            .ml(px(12.))
-            .pl(px(10.))
-            .border_l_1()
-            .border_color(theme.muted_foreground.opacity(0.30));
+        let mut branches = div().flex().flex_col().ml(px(12.)).pl(px(10.));
+        let mut root_profiles = Vec::new();
         let mut folders = std::collections::BTreeMap::<Vec<&str>, Vec<usize>>::new();
         for (folder, profile) in self
             .profiles
@@ -632,24 +630,17 @@ impl Workbench {
             }
             if let Some(ix) = profile {
                 if parts.is_empty() {
-                    branches = branches.child(self.render_profile_row(ix, keyboard, theme, cx));
+                    root_profiles.push(ix);
                 } else {
                     folders.entry(parts).or_default().push(ix);
                 }
             }
         }
-        let mut folded_path: Option<Vec<&str>> = None;
+        let mut headers = std::collections::BTreeMap::<Vec<&str>, FolderNode>::new();
         for (parts, entries) in folders {
-            if folded_path
-                .as_ref()
-                .is_some_and(|prefix| parts.starts_with(prefix))
-            {
-                continue;
-            }
             let folder = parts.join("/");
             let name = folder.clone();
             let label = parts.last().unwrap().to_string();
-            let indent = 12. * (parts.len() - 1) as f32;
             let collapsed = self.collapsed_connection_folders.contains(&name);
             let drop_folder = name.clone();
             let drop_into = name.clone();
@@ -662,128 +653,121 @@ impl Workbench {
                     .map_or("", String::as_str),
                 theme,
             );
-            branches = branches.child(
-                div()
-                    .id(format!("folder-drop-{folder}"))
-                    .ml(px(indent))
-                    .rounded(px(RADIUS_MD))
-                    .drag_over::<ProfileDrag>(move |style, _, _, _| style.bg(drop_highlight))
-                    .on_drop(cx.listener(move |this, drag: &ProfileDrag, _, cx| {
-                        this.move_profile_to_folder(&drag.id, &drop_folder, cx);
-                    }))
-                    .on_drag(FolderDrag { path: drag_path }, |drag, _, _, cx| {
-                        let preview = drag.clone();
-                        cx.new(|_| preview)
-                    })
-                    .drag_over::<FolderDrag>(move |style, _, _, _| style.bg(drop_highlight))
-                    .on_drop(cx.listener(move |this, drag: &FolderDrag, _, cx| {
-                        this.move_folder(&drag.path, &drop_into, cx);
-                    }))
-                    .context_menu(move |menu, window, cx| {
-                        let folder = menu_folder.clone();
-                        let view = view.clone();
-                        let rename_view = view.clone();
-                        let rename_path = folder.clone();
-                        let delete_view = view.clone();
-                        let delete_path = folder.clone();
-                        menu.item(new_folder_item(&view, &folder))
-                            .item(
-                                PopupMenuItem::new("Rename folder…")
-                                    .icon(Icon::new(IconName::SquarePen))
-                                    .on_click(move |_, window, cx| {
-                                        rename_view.update(cx, |this, cx| {
-                                            this.start_rename_folder(&rename_path, window, cx)
-                                        })
-                                    }),
-                            )
-                            .item(
-                                PopupMenuItem::new("Delete folder…")
-                                    .icon(Icon::new(IconName::Trash))
-                                    .on_click(move |_, _, cx| {
-                                        delete_view.update(cx, |this, cx| {
-                                            this.request_delete_folder(&delete_path, cx)
-                                        })
-                                    }),
-                            )
-                            .submenu("Folder color", window, cx, move |mut menu, _, cx| {
-                                let current = view
-                                    .read(cx)
-                                    .connection_folder_colors
-                                    .get(&folder)
-                                    .map_or("", String::as_str);
-                                for label in std::iter::once("Default")
-                                    .chain(theme::ACCENTS.iter().map(|(label, _, _)| *label))
-                                {
-                                    let value = if label == "Default" { "" } else { label };
-                                    let view = view.clone();
-                                    let folder = folder.clone();
-                                    menu = menu.item(
-                                        PopupMenuItem::new(label)
-                                            .icon(
-                                                Icon::new(IconName::Folder)
-                                                    .text_color(folder_color(value, cx.theme())),
-                                            )
-                                            .checked(current == value)
-                                            .on_click(move |_, _, cx| {
-                                                view.update(cx, |this, cx| {
-                                                    this.set_connection_folder_color(
-                                                        &folder, value, cx,
-                                                    )
-                                                })
-                                            }),
-                                    );
-                                }
-                                menu
-                            })
-                    })
-                    .child(match &self.folder_rename {
-                        Some((path, field)) if *path == folder => {
-                            folder_rename_row(field, color, cx).into_any_element()
-                        }
-                        _ => sidebar::tree_button(
-                            Button::new(format!("connection-folder-{folder}")),
-                            keyboard,
-                            cx,
+            let header = div()
+                .id(format!("folder-drop-{folder}"))
+                .rounded(px(RADIUS_MD))
+                .drag_over::<ProfileDrag>(move |style, _, _, _| style.bg(drop_highlight))
+                .on_drop(cx.listener(move |this, drag: &ProfileDrag, _, cx| {
+                    this.move_profile_to_folder(&drag.id, &drop_folder, cx);
+                }))
+                .on_drag(FolderDrag { path: drag_path }, |drag, _, _, cx| {
+                    let preview = drag.clone();
+                    cx.new(|_| preview)
+                })
+                .drag_over::<FolderDrag>(move |style, _, _, _| style.bg(drop_highlight))
+                .on_drop(cx.listener(move |this, drag: &FolderDrag, _, cx| {
+                    this.move_folder(&drag.path, &drop_into, cx);
+                }))
+                .context_menu(move |menu, window, cx| {
+                    let folder = menu_folder.clone();
+                    let view = view.clone();
+                    let rename_view = view.clone();
+                    let rename_path = folder.clone();
+                    let delete_view = view.clone();
+                    let delete_path = folder.clone();
+                    menu.item(new_folder_item(&view, &folder))
+                        .item(
+                            PopupMenuItem::new("Rename folder…")
+                                .icon(Icon::new(IconName::SquarePen))
+                                .on_click(move |_, window, cx| {
+                                    rename_view.update(cx, |this, cx| {
+                                        this.start_rename_folder(&rename_path, window, cx)
+                                    })
+                                }),
                         )
-                        .small()
-                        .w_full()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.collapsed_connection_folders.remove(&name) {
-                                this.collapsed_connection_folders.insert(name.clone());
+                        .item(
+                            PopupMenuItem::new("Delete folder…")
+                                .icon(Icon::new(IconName::Trash))
+                                .on_click(move |_, _, cx| {
+                                    delete_view.update(cx, |this, cx| {
+                                        this.request_delete_folder(&delete_path, cx)
+                                    })
+                                }),
+                        )
+                        .submenu("Folder color", window, cx, move |mut menu, _, cx| {
+                            let current = view
+                                .read(cx)
+                                .connection_folder_colors
+                                .get(&folder)
+                                .map_or("", String::as_str);
+                            for label in std::iter::once("Default")
+                                .chain(theme::ACCENTS.iter().map(|(label, _, _)| *label))
+                            {
+                                let value = if label == "Default" { "" } else { label };
+                                let view = view.clone();
+                                let folder = folder.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(label)
+                                        .icon(
+                                            Icon::new(IconName::Folder)
+                                                .text_color(folder_color(value, cx.theme())),
+                                        )
+                                        .checked(current == value)
+                                        .on_click(move |_, _, cx| {
+                                            view.update(cx, |this, cx| {
+                                                this.set_connection_folder_color(&folder, value, cx)
+                                            })
+                                        }),
+                                );
                             }
-                            cx.notify();
-                        }))
-                        .child(tree_label(
-                            if collapsed {
-                                IconName::Folder
-                            } else {
-                                IconName::FolderOpen
-                            },
-                            label,
-                            None,
-                            color,
-                            theme,
-                        ))
-                        .into_any_element(),
-                    }),
+                            menu
+                        })
+                })
+                .child(match &self.folder_rename {
+                    Some((path, field)) if *path == folder => {
+                        folder_rename_row(field, color, cx).into_any_element()
+                    }
+                    _ => sidebar::tree_button(
+                        Button::new(format!("connection-folder-{folder}")),
+                        keyboard,
+                        cx,
+                    )
+                    .small()
+                    .w_full()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.collapsed_connection_folders.remove(&name) {
+                            this.collapsed_connection_folders.insert(name.clone());
+                        }
+                        cx.notify();
+                    }))
+                    .child(tree_label(
+                        Icon::new(if collapsed {
+                            IconName::Folder
+                        } else {
+                            IconName::FolderOpen
+                        })
+                        .size(px(14.))
+                        .text_color(color),
+                        label,
+                        None,
+                        theme,
+                    ))
+                    .into_any_element(),
+                })
+                .into_any_element();
+            headers.insert(
+                parts,
+                FolderNode {
+                    header,
+                    entries,
+                    collapsed,
+                },
             );
-            folded_path = collapsed.then_some(parts);
-            if !collapsed {
-                branches = branches.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .ml(px(12. + indent))
-                        .pl(px(10.))
-                        .border_l_1()
-                        .border_color(theme.muted_foreground.opacity(0.30))
-                        .children(
-                            entries
-                                .into_iter()
-                                .map(|ix| self.render_profile_row(ix, keyboard, theme, cx)),
-                        ),
-                );
-            }
+        }
+        let root_nodes = self.render_branch(&[], root_profiles, &mut headers, keyboard, theme, cx);
+        let root_last = root_nodes.len().saturating_sub(1);
+        for (i, node) in root_nodes.into_iter().enumerate() {
+            branches = branches.child(guide_child(node, i == root_last, theme));
         }
         tree = tree.child(branches);
         if self.show_demo {
@@ -923,12 +907,13 @@ impl Workbench {
                         }
                     }))
                     .child(
-                        connection_tree_label(
-                            IconName::Database,
+                        tree_label(
+                            db_icon::icon(profile.kind, connected, theme),
                             profile.name.clone(),
                             None,
                             theme,
                         )
+                        .gap(px(8.))
                         .when(active || focused, |row| {
                             row.font_weight(FontWeight::SEMIBOLD)
                         })
@@ -956,19 +941,25 @@ impl Workbench {
 }
 
 fn connection_tree_label(
-    symbol: IconName,
+    symbol: impl Into<Icon>,
     text: String,
     count: Option<usize>,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::Div {
-    tree_label(symbol, text, count, theme.muted_foreground, theme)
+    tree_label(
+        Icon::new(symbol)
+            .size(px(14.))
+            .text_color(theme.muted_foreground),
+        text,
+        count,
+        theme,
+    )
 }
 
 fn tree_label(
-    symbol: IconName,
+    symbol: Icon,
     text: String,
     count: Option<usize>,
-    icon_color: Hsla,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::Div {
     div()
@@ -977,7 +968,7 @@ fn tree_label(
         .w_full()
         .min_w(px(0.))
         .gap(px(6.))
-        .child(icon(symbol, 14., icon_color))
+        .child(symbol)
         .child(
             div()
                 // With a count the text pushes it to the right edge; without
@@ -1031,4 +1022,102 @@ fn folder_rename_row(
                     cx.notify();
                 })),
         )
+}
+
+struct FolderNode {
+    header: gpui_kit::AnyElement,
+    entries: Vec<usize>,
+    collapsed: bool,
+}
+
+/// One child of a tree node with its guide: a vertical line on the left
+/// that stops at the elbow for the last child, plus the short horizontal stub.
+fn guide_child(
+    el: gpui_kit::AnyElement,
+    last: bool,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::AnyElement {
+    let color = theme.muted_foreground.opacity(0.30);
+    let mut line = div()
+        .absolute()
+        .left(px(-10.))
+        .top(px(0.))
+        .w(px(1.))
+        .bg(color);
+    line = if last {
+        line.h(px(15.))
+    } else {
+        line.bottom(px(0.))
+    };
+    div()
+        .relative()
+        .child(line)
+        .child(
+            div()
+                .absolute()
+                .left(px(-10.))
+                .top(px(15.))
+                .w(px(8.))
+                .h(px(1.))
+                .bg(color),
+        )
+        .child(el)
+        .into_any_element()
+}
+
+impl Workbench {
+    /// Children of the folder `prefix` (its profiles, then subfolders),
+    /// each wrapped with its guide line. Collapsed folders show no children.
+    fn render_branch<'a>(
+        &self,
+        prefix: &[&'a str],
+        profiles: Vec<usize>,
+        headers: &mut std::collections::BTreeMap<Vec<&'a str>, FolderNode>,
+        keyboard: bool,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui_kit::AnyElement> {
+        let mut nodes: Vec<gpui_kit::AnyElement> = profiles
+            .into_iter()
+            .map(|ix| {
+                self.render_profile_row(ix, keyboard, theme, cx)
+                    .into_any_element()
+            })
+            .collect();
+        let subfolders: Vec<Vec<&'a str>> = headers
+            .keys()
+            .filter(|key| key.len() == prefix.len() + 1 && key.starts_with(prefix))
+            .cloned()
+            .collect();
+        for key in subfolders {
+            let Some(node) = headers.remove(&key) else {
+                continue;
+            };
+            let children = if node.collapsed {
+                Vec::new()
+            } else {
+                self.render_branch(&key, node.entries, headers, keyboard, theme, cx)
+            };
+            let count = children.len();
+            let last = count.saturating_sub(1);
+            nodes.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(node.header)
+                    .when(count > 0, |folder| {
+                        folder.child(
+                            div().flex().flex_col().ml(px(12.)).pl(px(10.)).children(
+                                children
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(i, el)| guide_child(el, i == last, theme)),
+                            ),
+                        )
+                    })
+                    .into_any_element(),
+            );
+        }
+        nodes
+    }
 }

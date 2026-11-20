@@ -79,7 +79,9 @@ pub(super) struct SettingsState {
     pub(super) search: Entity<InputState>,
     pub(super) proxy_input: Entity<InputState>,
     /// What Settings > Logs shows; read from disk when the page opens.
-    pub(super) log_text: String,
+    log_entries: Vec<crate::diagnostics::Entry>,
+    expanded_entry: Option<usize>,
+    log_tab: logs::LogTab,
     previous_focus: Option<gpui_kit::FocusHandle>,
 }
 
@@ -97,7 +99,9 @@ impl SettingsState {
             page: SettingsPage::Appearance,
             search,
             proxy_input,
-            log_text: String::new(),
+            log_entries: Vec::new(),
+            expanded_entry: None,
+            log_tab: logs::LogTab::Errors,
             previous_focus: None,
         }
     }
@@ -110,7 +114,8 @@ impl Workbench {
         }
         self.settings.previous_focus = window.focused(cx);
         self.settings.open = true;
-        self.reload_error_log();
+        self.settings.log_tab = logs::LogTab::Errors;
+        self.reload_settings_log();
         Self::set_input(&self.settings.search, String::new(), window, cx);
         self.settings
             .search
@@ -190,7 +195,7 @@ impl Workbench {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.settings.page = entry;
                         if entry == SettingsPage::Logs {
-                            this.reload_error_log();
+                            this.reload_settings_log();
                         }
                         cx.notify();
                     }))
@@ -224,13 +229,23 @@ impl Workbench {
                 div()
                     .flex()
                     .flex_col()
+                    .when(page == Some(SettingsPage::Logs), |pane| {
+                        pane.h_full().min_h(px(0.))
+                    })
                     .p(px(SPACE_6))
                     .gap(px(SPACE_4))
                     .child(
                         div()
                             .pr(px(36.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(theme::ui_size(theme, FONT_HEADING_XL))
+                            .text_size(theme::ui_size(
+                                theme,
+                                if page == Some(SettingsPage::Appearance) {
+                                    FONT_HEADING_XL
+                                } else {
+                                    theme::FONT_HEADING_LG
+                                },
+                            ))
                             .child(page.map_or("No matching settings", SettingsPage::label)),
                     )
                     .children(match page {
@@ -245,7 +260,7 @@ impl Workbench {
                                 .flex()
                                 .flex_col()
                                 .gap(px(SPACE_4))
-                                .child(crate::about::content(theme, cx))
+                                .child(crate::about::settings_header(theme, cx))
                                 .child(self.render_update_settings(theme, cx))
                                 .into_any_element(),
                         ),
@@ -307,4 +322,31 @@ impl Workbench {
                     ),
             )
     }
+}
+
+pub(super) fn setting_row(
+    label: &'static str,
+    description: &'static str,
+    control: impl IntoElement,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
+    div()
+        .flex()
+        .items_center()
+        .min_h(px(48.))
+        .gap(px(SPACE_2))
+        .px(px(SPACE_4))
+        .py(px(SPACE_1))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.))
+                .child(body_text(label.into(), theme))
+                .when(!description.is_empty(), |row| {
+                    row.child(caption_text(description.into(), theme))
+                }),
+        )
+        .child(div().flex_none().child(control))
 }
