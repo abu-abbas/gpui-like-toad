@@ -484,7 +484,11 @@ impl Workbench {
                         .primary()
                         .icon(IconName::Play)
                         .loading(busy)
-                        .tooltip("Run (Cmd/Ctrl+Enter or F5)")
+                        .tooltip(if cfg!(target_os = "macos") {
+                            "Run (⌘↩ or F5)"
+                        } else {
+                            "Run (Ctrl+Enter or F5)"
+                        })
                         .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
                 );
         }

@@ -208,7 +208,11 @@ impl Workbench {
                             .icon(icon(IconName::Search, 15., theme.muted_foreground))
                             .size(px(EXPLORER_CONTROL_HEIGHT))
                             .flex_none()
-                            .tooltip("Quick Open (Ctrl/Cmd+P)")
+                            .tooltip(if cfg!(target_os = "macos") {
+                                "Quick Open (⌘P)"
+                            } else {
+                                "Quick Open (Ctrl+P)"
+                            })
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.toggle_quick_open(window, cx)
                             })),

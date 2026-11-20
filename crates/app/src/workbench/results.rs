@@ -674,8 +674,10 @@ impl Workbench {
                         .child(empty_state_text(
                             if self.conn.session.is_none() {
                                 "Connect first, then run a query to see results here."
+                            } else if cfg!(target_os = "macos") {
+                                "Run a query to see results here. ⌘↩ or F5 runs the active tab."
                             } else {
-                                "Run a query to see results here. Cmd/Ctrl+Enter or F5 runs the active tab."
+                                "Run a query to see results here. Ctrl+Enter or F5 runs the active tab."
                             }
                             .to_string(),
                             theme,
