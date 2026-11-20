@@ -34,3 +34,11 @@ pub(super) fn icon(kind: DbKind, size: f32, theme: &Theme) -> Icon {
         .size(gpui_kit::px(size))
         .text_color(color(kind, theme))
 }
+
+// Artwork for engines that are not supported yet. When `DbKind` gets
+// `Mysql` / `Postgres`, move these into the `match`es above (suggested tints:
+// MySQL teal ~190deg, PostgreSQL indigo ~225deg).
+#[allow(dead_code)]
+const MYSQL_SVG: &[u8] = include_bytes!("../../assets/db/mysql.svg");
+#[allow(dead_code)]
+const POSTGRES_SVG: &[u8] = include_bytes!("../../assets/db/postgres.svg");
