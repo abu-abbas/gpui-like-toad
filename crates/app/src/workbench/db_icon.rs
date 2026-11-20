@@ -19,12 +19,13 @@ fn svg(kind: DbKind) -> &'static [u8] {
 /// on dark themes so it stays readable.
 pub(super) fn color(kind: DbKind, theme: &Theme) -> Hsla {
     let dark = theme.background.l < 0.5;
-    let lightness = if dark { 0.65 } else { 0.5 };
-    let hue = match kind {
-        DbKind::Oracle => 6. / 360.,
-        DbKind::Sqlite => 210. / 360.,
+    let (hue, saturation, lightness) = match (kind, dark) {
+        (DbKind::Oracle, true) => (8., 0.62, 0.66),
+        (DbKind::Oracle, false) => (8., 0.68, 0.56),
+        (DbKind::Sqlite, true) => (212., 0.80, 0.68),
+        (DbKind::Sqlite, false) => (212., 0.80, 0.52),
     };
-    hsla(hue, 0.78, lightness, 1.)
+    hsla(hue / 360., saturation, lightness, 1.)
 }
 
 pub(super) fn icon(kind: DbKind, size: f32, theme: &Theme) -> Icon {

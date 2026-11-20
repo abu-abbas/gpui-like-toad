@@ -738,11 +738,12 @@ impl Workbench {
                         cx.notify();
                     }))
                     .child(tree_label(
-                        if collapsed {
+                        Icon::new(if collapsed {
                             IconName::Folder
                         } else {
                             IconName::FolderOpen
-                        },
+                        })
+                        .size(px(14.)),
                         label,
                         None,
                         color,
@@ -904,7 +905,7 @@ impl Workbench {
                     }))
                     .child(
                         tree_label(
-                            db_icon::icon(profile.kind, 14., theme),
+                            db_icon::icon(profile.kind, 18., theme),
                             profile.name.clone(),
                             None,
                             db_icon::color(profile.kind, theme),
@@ -942,7 +943,13 @@ fn connection_tree_label(
     count: Option<usize>,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::Div {
-    tree_label(symbol, text, count, theme.muted_foreground, theme)
+    tree_label(
+        Icon::new(symbol).size(px(14.)),
+        text,
+        count,
+        theme.muted_foreground,
+        theme,
+    )
 }
 
 fn tree_label(
@@ -958,7 +965,7 @@ fn tree_label(
         .w_full()
         .min_w(px(0.))
         .gap(px(6.))
-        .child(Icon::new(symbol).size(px(14.)).text_color(icon_color))
+        .child(Icon::new(symbol).text_color(icon_color))
         .child(
             div()
                 // With a count the text pushes it to the right edge; without
