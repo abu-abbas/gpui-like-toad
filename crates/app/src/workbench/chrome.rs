@@ -469,7 +469,11 @@ impl Workbench {
                         .small()
                         .ghost()
                         .icon(IconName::WandSparkles)
-                        .tooltip("Beautify SQL (Cmd/Ctrl+Shift+F)")
+                        .tooltip(if cfg!(target_os = "macos") {
+                            "Beautify SQL (⌃⇧F)"
+                        } else {
+                            "Beautify SQL (Ctrl+Shift+F)"
+                        })
                         .on_click(
                             cx.listener(|this, _, window, cx| this.format_editor(window, cx)),
                         ),

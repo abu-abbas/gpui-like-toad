@@ -119,7 +119,9 @@ fn main() {
             KeyBinding::new("f5", workbench::RunQuery, Some("Workbench")),
             KeyBinding::new("cmd-/", workbench::ToggleComment, Some("Workbench")),
             KeyBinding::new("ctrl-/", workbench::ToggleComment, Some("Workbench")),
-            KeyBinding::new("cmd-shift-f", workbench::FormatSql, Some("Workbench")),
+            // Beautify is Ctrl+Shift+F on every OS. Cmd+Shift+F is not usable
+            // on macOS: the editor binds it to Replace (and Cmd+F to Find)
+            // in a more specific context, so it would win over ours.
             KeyBinding::new("ctrl-shift-f", workbench::FormatSql, Some("Workbench")),
             KeyBinding::new("cmd-p", workbench::QuickOpenTable, Some("Workbench")),
             KeyBinding::new("ctrl-p", workbench::QuickOpenTable, Some("Workbench")),
