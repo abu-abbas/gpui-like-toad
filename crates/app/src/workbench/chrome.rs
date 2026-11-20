@@ -469,11 +469,7 @@ impl Workbench {
                         .small()
                         .ghost()
                         .icon(IconName::WandSparkles)
-                        .tooltip(if cfg!(target_os = "macos") {
-                            "Beautify SQL (⌃⇧F)"
-                        } else {
-                            "Beautify SQL (Ctrl+Shift+F)"
-                        })
+                        .tooltip_with_action("Beautify SQL", &FormatSql, Some("Workbench"))
                         .on_click(
                             cx.listener(|this, _, window, cx| this.format_editor(window, cx)),
                         ),
@@ -484,11 +480,7 @@ impl Workbench {
                         .primary()
                         .icon(IconName::Play)
                         .loading(busy)
-                        .tooltip(if cfg!(target_os = "macos") {
-                            "Run (⌘↩ or F5)"
-                        } else {
-                            "Run (Ctrl+Enter or F5)"
-                        })
+                        .tooltip_with_action("Run", &RunQuery, Some("Workbench"))
                         .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
                 );
         }
