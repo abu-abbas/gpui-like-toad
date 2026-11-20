@@ -441,4 +441,24 @@ mod tests {
             })
             .unwrap();
     }
+
+    #[gpui_kit::test]
+    fn finds_existing_data_tab_only_on_same_connection(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let window = cx.add_window(Workbench::new);
+        window
+            .update(cx, |this, window, cx| {
+                this.add_tab(window, cx);
+                let data = DataTab::new("MAIN", "TASK_LOGS", ObjectKind::Table, window, cx);
+                let tab = this.active_tab_mut();
+                tab.conn = Some(7);
+                tab.data = Some(data);
+                assert_eq!(this.find_data_tab(7, "MAIN", "TASK_LOGS"), Some(0));
+                // Another connection, schema or table must not match.
+                assert_eq!(this.find_data_tab(8, "MAIN", "TASK_LOGS"), None);
+                assert_eq!(this.find_data_tab(7, "OTHER", "TASK_LOGS"), None);
+                assert_eq!(this.find_data_tab(7, "MAIN", "TASK_LOG_COMMITS"), None);
+            })
+            .unwrap();
+    }
 }

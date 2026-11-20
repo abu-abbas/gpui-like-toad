@@ -419,6 +419,17 @@ impl Workbench {
         self.open_table_data_in(owner, name, DataView::Data, window, cx);
     }
 
+    /// Index of the data tab already showing `owner.name` on connection
+    /// `conn_id`; tabs of other connections are never matched.
+    pub(super) fn find_data_tab(&self, conn_id: u64, owner: &str, name: &str) -> Option<usize> {
+        self.tabs.iter().position(|t| {
+            t.conn == Some(conn_id)
+                && t.data
+                    .as_ref()
+                    .is_some_and(|d| d.owner == owner && d.name == name)
+        })
+    }
+
     /// Like [`Self::open_table_data`], starting on `view` (Describe opens
     /// the Structure view; the rows load when Data is first shown).
     fn open_table_data_in(
@@ -431,6 +442,13 @@ impl Workbench {
     ) {
         if self.conn.session.is_none() {
             return;
+        }
+        // Same connection + schema + table already open: just show it.
+        if start_view == DataView::Data {
+            if let Some(ix) = self.find_data_tab(self.conn.id, owner, name) {
+                self.activate_tab(ix, cx);
+                return;
+            }
         }
         if self.conn.busy {
             self.conn.status = "An operation is already running.".to_string();
