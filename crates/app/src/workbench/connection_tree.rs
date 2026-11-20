@@ -923,10 +923,11 @@ impl Workbench {
                         }
                     }))
                     .child(
-                        connection_tree_label(
-                            IconName::Database,
+                        tree_label(
+                            db_icon::icon(profile.kind, 14., theme),
                             profile.name.clone(),
                             None,
+                            db_icon::color(profile.kind, theme),
                             theme,
                         )
                         .when(active || focused, |row| {
@@ -956,7 +957,7 @@ impl Workbench {
 }
 
 fn connection_tree_label(
-    symbol: IconName,
+    symbol: impl Into<Icon>,
     text: String,
     count: Option<usize>,
     theme: &gpui_kit::component::Theme,
@@ -965,7 +966,7 @@ fn connection_tree_label(
 }
 
 fn tree_label(
-    symbol: IconName,
+    symbol: impl Into<Icon>,
     text: String,
     count: Option<usize>,
     icon_color: Hsla,
@@ -977,7 +978,7 @@ fn tree_label(
         .w_full()
         .min_w(px(0.))
         .gap(px(6.))
-        .child(icon(symbol, 14., icon_color))
+        .child(Icon::new(symbol).size(px(14.)).text_color(icon_color))
         .child(
             div()
                 // With a count the text pushes it to the right edge; without
