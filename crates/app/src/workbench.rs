@@ -565,19 +565,27 @@ impl Workbench {
     }
 
     pub(crate) fn push_message(&mut self, message: String) {
-        self.push_message_with(message, false);
+        self.push_message_with(self.conn.id, message, false);
+    }
+
+    /// Log a message from connection `conn_id`, active or not.
+    pub(crate) fn push_message_for(&mut self, conn_id: u64, message: String) {
+        self.push_message_with(conn_id, message, false);
     }
 
     /// A message that quotes user data (cell values): shown in the Info
     /// panel, never written to `errors.log`.
     pub(crate) fn push_private_message(&mut self, message: String) {
-        self.push_message_with(message, true);
+        self.push_message_with(self.conn.id, message, true);
     }
 
-    fn push_message_with(&mut self, message: String, private: bool) {
+    fn push_message_with(&mut self, conn_id: u64, message: String, private: bool) {
         // With several connections open, say which one a message is from.
         let message = if self.open_conn_count() > 1 {
-            format!("[{}] {message}", self.conn.label())
+            let label = self
+                .conn_by_id(conn_id)
+                .map_or_else(String::new, ConnState::label);
+            format!("[{label}] {message}")
         } else {
             message
         };
