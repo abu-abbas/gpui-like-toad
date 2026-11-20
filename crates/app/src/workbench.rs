@@ -87,7 +87,8 @@ use data_tab::{DataTab, DataView};
 use profiles::{ConnectionForm, FORM_INCOMPLETE};
 use quick_open::QuickOpen;
 use ui_helpers::{
-    body_text, caption_text, empty_state_text, form_label, icon, select_trigger, status_dot,
+    body_text, caption_text, empty_state_text, form_label, icon, loading_overlay, loading_state,
+    select_trigger, status_dot,
 };
 use updates::UpdateState;
 

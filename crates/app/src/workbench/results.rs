@@ -26,6 +26,31 @@ impl Workbench {
         }
     }
 
+    /// Spinner filling the area of a data tab view while that view's
+    /// dictionary query runs; `None` once it has finished.
+    fn view_loader(
+        &self,
+        op: PendingOp,
+        theme: &gpui_kit::component::Theme,
+    ) -> Option<gpui_kit::AnyElement> {
+        let running = self.conn.busy
+            && matches!(
+                (&self.conn.pending_op, &op),
+                (Some(PendingOp::DataStructure), PendingOp::DataStructure)
+                    | (Some(PendingOp::DataIndexes), PendingOp::DataIndexes)
+                    | (Some(PendingOp::DataDdl), PendingOp::DataDdl)
+            );
+        running.then(|| {
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(loading_state("Loading…", theme))
+                .into_any_element()
+        })
+    }
+
     /// Full-area grid of a data tab, with pagination under it.
     pub(super) fn render_data_grid(
         &self,
@@ -114,15 +139,28 @@ impl Workbench {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(empty_state_text(
-                    if self.conn.busy {
-                        "Loading data…".to_string()
-                    } else {
-                        "No data. See the Info panel for errors.".to_string()
-                    },
-                    theme,
-                ))
+                .child(if self.conn.busy {
+                    loading_state("Loading data…", theme)
+                } else {
+                    empty_state_text("No data. See the Info panel for errors.".to_string(), theme)
+                })
                 .into_any_element()
+        };
+        let reloading = self.conn.busy
+            && matches!(self.conn.pending_op, Some(PendingOp::Run))
+            && tab.last_result.as_ref().is_some_and(|r| r.row_count() > 0);
+        let grid = if reloading {
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.))
+                .child(grid)
+                .child(loading_overlay(theme))
+                .into_any_element()
+        } else {
+            grid
         };
         let grid = if tab.data.as_ref().is_some_and(|d| d.show_details) {
             div()
@@ -147,9 +185,13 @@ impl Workbench {
                 .min_h(px(0.))
                 .overflow_hidden()
                 .child(
-                    div()
-                        .flex_1()
-                        .child(results_grid::ResultsGrid::new(&data.structure, theme)),
+                    self.view_loader(PendingOp::DataStructure, theme)
+                        .unwrap_or_else(|| {
+                            div()
+                                .flex_1()
+                                .child(results_grid::ResultsGrid::new(&data.structure, theme))
+                                .into_any_element()
+                        }),
                 )
                 .into_any_element(),
             (DataView::Index, Some(data)) => div()
@@ -159,9 +201,13 @@ impl Workbench {
                 .min_h(px(0.))
                 .overflow_hidden()
                 .child(
-                    div()
-                        .flex_1()
-                        .child(results_grid::ResultsGrid::new(&data.indexes, theme)),
+                    self.view_loader(PendingOp::DataIndexes, theme)
+                        .unwrap_or_else(|| {
+                            div()
+                                .flex_1()
+                                .child(results_grid::ResultsGrid::new(&data.indexes, theme))
+                                .into_any_element()
+                        }),
                 )
                 .into_any_element(),
             (DataView::Ddl, Some(data)) => div()
@@ -170,7 +216,14 @@ impl Workbench {
                 .flex_1()
                 .min_h(px(0.))
                 .overflow_hidden()
-                .child(query::sql_editor(&data.ddl).readonly(true))
+                .child(
+                    self.view_loader(PendingOp::DataDdl, theme)
+                        .unwrap_or_else(|| {
+                            query::sql_editor(&data.ddl)
+                                .readonly(true)
+                                .into_any_element()
+                        }),
+                )
                 .into_any_element(),
             _ => div()
                 .flex()

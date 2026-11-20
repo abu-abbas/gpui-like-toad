@@ -124,11 +124,11 @@ impl Workbench {
             })
             .collect();
         let list = if visible.is_empty() {
-            let message = if self.conn.busy && self.conn.objects.is_empty() {
-                "Loading objects…"
-            } else {
-                "No objects in this category."
-            };
+            let loading = self.conn.busy
+                && matches!(
+                    self.conn.pending_op,
+                    Some(PendingOp::ListObjects | PendingOp::ListSchemas | PendingOp::Connect)
+                );
             div()
                 .flex_1()
                 .flex()
@@ -136,13 +136,21 @@ impl Workbench {
                 .items_center()
                 .justify_center()
                 .p(px(SPACE_4))
-                .child(empty_state_text(message.to_string(), theme))
+                .child(if loading {
+                    loading_state("Loading objects…", theme)
+                } else {
+                    empty_state_text("No objects in this category.".to_string(), theme)
+                })
                 .into_any_element()
         } else {
             let count = visible.len();
             let selected = self.conn.selected_object.clone();
+            let reloading =
+                self.conn.busy && matches!(self.conn.pending_op, Some(PendingOp::ListObjects));
             let theme = theme.clone();
+            let cover = reloading.then(|| loading_overlay(&theme));
             div()
+                .relative()
                 .flex_1()
                 .px(px(SPACE_2))
                 .child(
@@ -163,6 +171,7 @@ impl Workbench {
                     .track_scroll(&self.object_scroll)
                     .size_full(),
                 )
+                .children(cover)
                 .into_any_element()
         };
 
