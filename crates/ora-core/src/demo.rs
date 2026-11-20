@@ -473,6 +473,8 @@ impl DbClient for DemoClient {
                 owner: owner.clone(),
                 name: name.to_string(),
                 kind,
+                parent: None,
+                detail: None,
             })
             .collect())
     }

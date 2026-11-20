@@ -45,6 +45,8 @@ pub(crate) fn list_objects(conn: &Connection, schema: &str) -> Result<Vec<Schema
             owner: schema.to_string(),
             name,
             kind: object_kind(&kind),
+            parent: None,
+            detail: None,
         });
     }
     Ok(out)

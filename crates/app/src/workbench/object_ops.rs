@@ -23,6 +23,8 @@ pub(super) enum ObjectAction {
     Compile { debug: bool },
     Execute,
     Trigger { enable: bool },
+    ConstraintState { enable: bool },
+    DropConstraint,
 }
 
 impl ObjectAction {
@@ -31,7 +33,7 @@ impl ObjectAction {
     fn destructive(self) -> bool {
         matches!(
             self,
-            Self::Drop | Self::Empty | Self::Truncate | Self::ResetSequence
+            Self::Drop | Self::Empty | Self::Truncate | Self::ResetSequence | Self::DropConstraint
         )
     }
 
@@ -39,13 +41,14 @@ impl ObjectAction {
         match self {
             Self::Rename => "cannot rename tables",
             Self::Duplicate => "cannot duplicate tables",
-            Self::Drop => "cannot delete tables",
+            Self::Drop => "cannot delete objects",
             Self::Empty => "cannot empty tables",
             Self::Truncate => "cannot truncate tables",
             Self::ResetSequence => "cannot reset sequences",
             Self::Compile { .. } => "cannot compile objects",
             Self::Execute => "cannot execute functions",
             Self::Trigger { .. } => "cannot change triggers",
+            Self::ConstraintState { .. } | Self::DropConstraint => "cannot change constraints",
         }
     }
 }
@@ -188,6 +191,31 @@ impl Workbench {
                 );
                 return;
             }
+            ObjectAction::ConstraintState { enable } => {
+                let Some(table) = object.parent.clone() else {
+                    return;
+                };
+                let sql = ddl::constraint_state_sql(
+                    self.active_dialect(),
+                    &object.owner,
+                    &table,
+                    &object.name,
+                    enable,
+                );
+                let word = if enable { "Enabled" } else { "Disabled" };
+                self.conn.status = format!("{word} {}…", object.name);
+                let summary = format!("{word} constraint {} on {table}.", object.name);
+                self.run_object_op(
+                    ObjectOp::Statements {
+                        sql: vec![sql],
+                        summary,
+                    },
+                    true,
+                    false,
+                    cx,
+                );
+                return;
+            }
             ObjectAction::Execute => {
                 self.conn.status = format!("Reading parameters of {}…", object.name);
                 self.spawn_db(
@@ -208,7 +236,10 @@ impl Workbench {
                 cx,
             )),
             ObjectAction::ResetSequence => inputs.push(text_input("Restart at", "1", window, cx)),
-            ObjectAction::Drop | ObjectAction::Empty | ObjectAction::Truncate => {}
+            ObjectAction::Drop
+            | ObjectAction::Empty
+            | ObjectAction::Truncate
+            | ObjectAction::DropConstraint => {}
         }
         for input in &inputs {
             subs.push(
@@ -235,6 +266,18 @@ impl Workbench {
         });
         self.focus_dialog_input(first, window, cx);
         cx.notify();
+    }
+
+    /// Toolbar button: recompile every INVALID object of the schema.
+    pub(super) fn compile_invalid(&mut self, cx: &mut Context<Self>) {
+        if !self.object_op_ready("cannot compile objects", cx) {
+            return;
+        }
+        let Some(owner) = self.conn.current_schema.clone() else {
+            return;
+        };
+        self.conn.status = format!("Compiling invalid objects of {owner}…");
+        self.run_object_op(ObjectOp::CompileInvalid { owner }, true, false, cx);
     }
 
     fn prod_confirm(
@@ -519,15 +562,29 @@ fn build_object_op(
                 format!("Copying {name}…"),
             )
         }
-        ObjectAction::Drop => (
-            statements(
-                vec![ddl::drop_table_sql(dialect, owner, name)],
-                format!("Deleted table {owner}.{name}."),
-            ),
-            true,
-            sqlite,
-            format!("Deleting {name}…"),
-        ),
+        ObjectAction::Drop => {
+            let sql = ddl::drop_object_sql(dialect, owner, name, &object.kind)
+                .ok_or_else(|| "This kind of object cannot be deleted here.".to_string())?;
+            let noun = ddl::kind_noun(&object.kind);
+            (
+                statements(vec![sql], format!("Deleted {noun} {owner}.{name}.")),
+                true,
+                sqlite,
+                format!("Deleting {name}…"),
+            )
+        }
+        ObjectAction::DropConstraint => {
+            let table = object.parent.clone().unwrap_or_default();
+            (
+                statements(
+                    vec![ddl::drop_constraint_sql(dialect, owner, &table, name)],
+                    format!("Deleted constraint {name} of {table}."),
+                ),
+                true,
+                sqlite,
+                format!("Deleting {name}…"),
+            )
+        }
         ObjectAction::Empty => (
             statements(
                 vec![ddl::empty_table_sql(dialect, owner, name)],
@@ -573,7 +630,9 @@ fn build_object_op(
             false,
             format!("Executing {name}…"),
         ),
-        ObjectAction::Compile { .. } | ObjectAction::Trigger { .. } => {
+        ObjectAction::Compile { .. }
+        | ObjectAction::Trigger { .. }
+        | ObjectAction::ConstraintState { .. } => {
             return Err("Nothing to ask for.".to_string())
         }
     })
@@ -582,11 +641,20 @@ fn build_object_op(
 fn confirm_text(action: ObjectAction, object: &ObjectRef, sqlite: bool) -> String {
     let target = format!("{}.{}", object.owner, object.name);
     match action {
-        ObjectAction::Drop if sqlite => format!(
+        ObjectAction::Drop if object.kind == ObjectKind::Table && sqlite => format!(
             "Delete table {target} with all its rows? The change is not final until you Commit."
         ),
-        ObjectAction::Drop => format!(
+        ObjectAction::Drop if object.kind == ObjectKind::Table => format!(
             "Delete table {target} with all its rows? Oracle commits this at once; the table may stay in the recycle bin (FLASHBACK TABLE) until purged."
+        ),
+        ObjectAction::Drop => format!(
+            "Delete {} {target}? Anything that uses it stops working{}.",
+            ddl::kind_noun(&object.kind),
+            if sqlite { "; not final until you Commit" } else { ", and Oracle commits this at once" }
+        ),
+        ObjectAction::DropConstraint => format!(
+            "Delete constraint {target} from table {}? The rule is no longer enforced.",
+            object.parent.clone().unwrap_or_default()
         ),
         ObjectAction::Empty => format!(
             "Delete every row of {target}? Nothing is final until you press Commit; Rollback undoes it."
@@ -600,7 +668,9 @@ fn confirm_text(action: ObjectAction, object: &ObjectRef, sqlite: bool) -> Strin
         ObjectAction::Rename => format!("Rename table {target}. Views and code that use the old name stop working."),
         ObjectAction::Duplicate => format!("Copy table {target} into a new table in the same schema."),
         ObjectAction::Execute => format!("Run {target} with these parameter values. Leave a box empty for NULL."),
-        ObjectAction::Compile { .. } | ObjectAction::Trigger { .. } => String::new(),
+        ObjectAction::Compile { .. }
+        | ObjectAction::Trigger { .. }
+        | ObjectAction::ConstraintState { .. } => String::new(),
     }
 }
 
@@ -634,12 +704,16 @@ impl Workbench {
                 let title = match action {
                     ObjectAction::Rename => format!("Rename {}", object.name),
                     ObjectAction::Duplicate => format!("Duplicate {}", object.name),
-                    ObjectAction::Drop => format!("Delete {}?", object.name),
+                    ObjectAction::Drop | ObjectAction::DropConstraint => {
+                        format!("Delete {}?", object.name)
+                    }
                     ObjectAction::Empty => format!("Empty {}?", object.name),
                     ObjectAction::Truncate => format!("Truncate {}?", object.name),
                     ObjectAction::ResetSequence => format!("Reset {}", object.name),
                     ObjectAction::Execute => format!("Execute {}", object.name),
-                    ObjectAction::Compile { .. } | ObjectAction::Trigger { .. } => String::new(),
+                    ObjectAction::Compile { .. }
+                    | ObjectAction::Trigger { .. }
+                    | ObjectAction::ConstraintState { .. } => String::new(),
                 };
                 let mut col = div().flex().flex_col().gap(px(SPACE_2));
                 col = col.child(body_muted(confirm_text(*action, object, sqlite), theme));
@@ -681,14 +755,16 @@ impl Workbench {
                     );
                 }
                 let (ok, danger) = match action {
-                    ObjectAction::Drop => ("Delete", true),
+                    ObjectAction::Drop | ObjectAction::DropConstraint => ("Delete", true),
                     ObjectAction::Empty => ("Empty", true),
                     ObjectAction::Truncate => ("Truncate", true),
                     ObjectAction::ResetSequence => ("Reset", true),
                     ObjectAction::Execute => ("Execute", false),
                     ObjectAction::Rename => ("Rename", false),
                     ObjectAction::Duplicate => ("Duplicate", false),
-                    ObjectAction::Compile { .. } | ObjectAction::Trigger { .. } => ("OK", false),
+                    ObjectAction::Compile { .. }
+                    | ObjectAction::Trigger { .. }
+                    | ObjectAction::ConstraintState { .. } => ("OK", false),
                 };
                 (title, col.into_any_element(), ok, danger, 460.)
             }

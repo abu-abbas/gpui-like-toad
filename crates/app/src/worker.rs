@@ -220,6 +220,7 @@ impl Job {
                 ora_core::ddl::ObjectOp::Compile { .. } => "Compile object",
                 ora_core::ddl::ObjectOp::ResetSequence { .. } => "Reset sequence",
                 ora_core::ddl::ObjectOp::CallFunction { .. } => "Execute function",
+                ora_core::ddl::ObjectOp::CompileInvalid { .. } => "Compile invalid objects",
             }),
             Self::Commit => Some("Commit changes"),
             Self::Rollback => Some("Roll back changes"),

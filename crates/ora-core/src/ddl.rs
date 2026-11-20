@@ -95,6 +95,8 @@ pub enum ObjectOp {
         name: String,
         args: Vec<String>,
     },
+    /// Compile every INVALID object of the schema ("Compile Invalid").
+    CompileInvalid { owner: String },
 }
 
 /// `'text'` with quotes doubled; line breaks are refused.
@@ -264,6 +266,96 @@ pub fn truncate_table_sql(dialect: &dyn Dialect, owner: &str, name: &str) -> Str
     format!("TRUNCATE TABLE {}", dialect.table_ref(owner, name))
 }
 
+/// Lower-case name of an object kind, for messages.
+pub fn kind_noun(kind: &ObjectKind) -> &'static str {
+    match kind {
+        ObjectKind::Table => "table",
+        ObjectKind::View => "view",
+        ObjectKind::MaterializedView => "materialized view",
+        ObjectKind::Index => "index",
+        ObjectKind::Sequence => "sequence",
+        ObjectKind::Procedure => "procedure",
+        ObjectKind::Function => "function",
+        ObjectKind::Package => "package",
+        ObjectKind::Trigger => "trigger",
+        ObjectKind::Synonym => "synonym",
+        ObjectKind::Type => "type",
+        ObjectKind::DbLink => "database link",
+        ObjectKind::Constraint => "constraint",
+        ObjectKind::Other(_) => "object",
+    }
+}
+
+/// `DROP <kind> owner.name` for the kinds the explorer can delete.
+pub fn drop_object_sql(
+    dialect: &dyn Dialect,
+    owner: &str,
+    name: &str,
+    kind: &ObjectKind,
+) -> Option<String> {
+    let noun = match kind {
+        ObjectKind::Table
+        | ObjectKind::View
+        | ObjectKind::MaterializedView
+        | ObjectKind::Index
+        | ObjectKind::Sequence
+        | ObjectKind::Procedure
+        | ObjectKind::Function
+        | ObjectKind::Package
+        | ObjectKind::Trigger
+        | ObjectKind::Synonym
+        | ObjectKind::Type => kind_noun(kind).to_ascii_uppercase(),
+        _ => return None,
+    };
+    Some(format!("DROP {noun} {}", dialect.table_ref(owner, name)))
+}
+
+/// `ALTER TABLE ... ENABLE|DISABLE CONSTRAINT`.
+pub fn constraint_state_sql(
+    dialect: &dyn Dialect,
+    owner: &str,
+    table: &str,
+    name: &str,
+    enable: bool,
+) -> String {
+    format!(
+        "ALTER TABLE {} {} CONSTRAINT {}",
+        dialect.table_ref(owner, table),
+        if enable { "ENABLE" } else { "DISABLE" },
+        dialect.quote_ident(name)
+    )
+}
+
+pub fn drop_constraint_sql(dialect: &dyn Dialect, owner: &str, table: &str, name: &str) -> String {
+    format!(
+        "ALTER TABLE {} DROP CONSTRAINT {}",
+        dialect.table_ref(owner, table),
+        dialect.quote_ident(name)
+    )
+}
+
+/// Statement that recompiles one INVALID object of dictionary type
+/// `object_type` (`PACKAGE BODY` and `TYPE BODY` included).
+pub fn compile_invalid_sql(
+    dialect: &dyn Dialect,
+    owner: &str,
+    name: &str,
+    object_type: &str,
+) -> Option<String> {
+    let target = dialect.table_ref(owner, name);
+    match object_type {
+        "PACKAGE BODY" => Some(format!("ALTER PACKAGE {target} COMPILE BODY")),
+        "TYPE BODY" => Some(format!("ALTER TYPE {target} COMPILE BODY")),
+        other => compile_sql(
+            dialect,
+            owner,
+            name,
+            &ObjectKind::from_oracle_type(other),
+            false,
+        ),
+    }
+}
+
 /// `ALTER TRIGGER ... ENABLE|DISABLE`.
 pub fn trigger_state_sql(dialect: &dyn Dialect, owner: &str, name: &str, enable: bool) -> String {
     format!(
@@ -420,6 +512,7 @@ pub fn run(client: &mut dyn DbClient, op: &ObjectOp) -> Result<Vec<String>, DbEr
         ObjectOp::ResetSequence { owner, name, value } => {
             reset_sequence(client, owner, name, *value)
         }
+        ObjectOp::CompileInvalid { owner } => compile_invalid(client, owner),
         ObjectOp::CallFunction { owner, name, args } => {
             let sql = call_function_sql(client.dialect(), owner, name, args.len());
             let result = client.query_binds(&sql, args, FetchLimits::rows(1))?;
@@ -441,6 +534,86 @@ pub fn run(client: &mut dyn DbClient, op: &ObjectOp) -> Result<Vec<String>, DbEr
             ])
         }
     }
+}
+
+fn invalid_objects(
+    client: &mut dyn DbClient,
+    owner: &str,
+) -> Result<Vec<(String, String)>, DbError> {
+    let result = client.query_binds(
+        "SELECT object_name, object_type FROM all_objects \
+         WHERE owner = :1 AND status = 'INVALID' \
+         AND object_type IN ('PROCEDURE','FUNCTION','PACKAGE','PACKAGE BODY','TRIGGER','VIEW',\
+                             'TYPE','TYPE BODY','SYNONYM','MATERIALIZED VIEW') \
+         ORDER BY object_type, object_name",
+        &[owner.to_ascii_uppercase()],
+        FetchLimits::rows(2000),
+    )?;
+    Ok(result
+        .rows
+        .iter()
+        .map(|r| (r[0].display(), r[1].display()))
+        .collect())
+}
+
+/// Recompile the schema's INVALID objects. Objects depend on each other,
+/// so it makes up to four passes, as long as a pass fixes something.
+fn compile_invalid(client: &mut dyn DbClient, owner: &str) -> Result<Vec<String>, DbError> {
+    let mut remaining = invalid_objects(client, owner)?;
+    let total = remaining.len();
+    if total == 0 {
+        return Ok(vec![format!("No invalid objects in {owner}.")]);
+    }
+    let mut failures: Vec<String> = Vec::new();
+    for _ in 0..4 {
+        let before = remaining.len();
+        failures.clear();
+        for (name, object_type) in &remaining {
+            let Some(sql) = compile_invalid_sql(client.dialect(), owner, name, object_type) else {
+                continue;
+            };
+            if let Err(err) = client.execute(&sql) {
+                failures.push(format!("  {object_type} {name}: {err}"));
+            }
+        }
+        remaining = invalid_objects(client, owner)?;
+        if remaining.is_empty() || remaining.len() >= before {
+            break;
+        }
+    }
+    let mut lines = vec![format!(
+        "Compiled {} of {total} invalid objects in {owner}.",
+        total - remaining.len()
+    )];
+    if !remaining.is_empty() {
+        lines.push(format!("Still invalid ({}):", remaining.len()));
+        let errors = client
+            .query_binds(
+                "SELECT name, type, text FROM all_errors \
+                 WHERE owner = :1 AND attribute = 'ERROR' AND sequence = 1",
+                &[owner.to_ascii_uppercase()],
+                FetchLimits::rows(2000),
+            )
+            .map(|r| r.rows)
+            .unwrap_or_default();
+        for (name, object_type) in remaining.iter().take(30) {
+            let why = errors
+                .iter()
+                .find(|r| r[0].display() == *name && r[1].display() == *object_type)
+                .map(|r| r[2].display().trim().to_string())
+                .unwrap_or_default();
+            lines.push(
+                format!("  {object_type} {name} {why}")
+                    .trim_end()
+                    .to_string(),
+            );
+        }
+        if remaining.len() > 30 {
+            lines.push(format!("  ... and {} more", remaining.len() - 30));
+        }
+    }
+    lines.extend(failures.into_iter().take(10));
+    Ok(lines)
 }
 
 /// Restart a sequence so the next `NEXTVAL` is `value`. Oracle 18c has
@@ -635,6 +808,29 @@ mod tests {
         assert!(compile_sql(o, "HR", "T", &ObjectKind::Table, false).is_none());
         assert_eq!(compile_support(&ObjectKind::Package), (true, true));
         assert_eq!(compile_support(&ObjectKind::Synonym), (true, false));
+    }
+
+    #[test]
+    fn drop_and_constraint_statements() {
+        let o = &OracleDialect;
+        assert_eq!(
+            drop_object_sql(o, "HR", "V", &ObjectKind::MaterializedView).unwrap(),
+            "DROP MATERIALIZED VIEW \"HR\".\"V\""
+        );
+        assert!(drop_object_sql(o, "HR", "L", &ObjectKind::DbLink).is_none());
+        assert_eq!(
+            constraint_state_sql(o, "HR", "T", "C\"1", false),
+            "ALTER TABLE \"HR\".\"T\" DISABLE CONSTRAINT \"C\"\"1\""
+        );
+        assert_eq!(
+            drop_constraint_sql(o, "HR", "T", "C1"),
+            "ALTER TABLE \"HR\".\"T\" DROP CONSTRAINT \"C1\""
+        );
+        assert_eq!(
+            compile_invalid_sql(o, "HR", "P", "PACKAGE BODY").unwrap(),
+            "ALTER PACKAGE \"HR\".\"P\" COMPILE BODY"
+        );
+        assert!(compile_invalid_sql(o, "HR", "J", "JAVA CLASS").is_none());
     }
 
     #[test]

@@ -320,6 +320,10 @@ struct ObjectRef {
     owner: String,
     name: String,
     kind: ObjectKind,
+    /// Constraints: the table they belong to.
+    parent: Option<String>,
+    /// Extra text shown after the name in the explorer.
+    detail: Option<String>,
 }
 
 /// One query tab: its own editor, grid, last result, and plan.
