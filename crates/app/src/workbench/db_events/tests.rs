@@ -196,3 +196,47 @@ fn background_commit_and_failure_leave_active_connection_alone(cx: &mut TestAppC
         })
         .unwrap();
 }
+
+/// A schema list and a lost connection on a parked connection touch only
+/// that connection and its own catalog, never the active one's.
+#[gpui_kit::test]
+fn background_schemas_and_connection_loss_stay_on_their_connection(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let window = cx.add_window(Workbench::new);
+    window
+        .update(cx, |this, window, cx| {
+            this.conn.session = Some(session("ALPHA"));
+            this.conn.op_generation = 5;
+            this.conn.pending_op = Some(PendingOp::ListSchemas);
+            this.conn.busy = true;
+            let mut b = ConnState::new(2);
+            b.session = Some(session("BETA"));
+            b.schemas = vec!["BETA".to_string()];
+            let a = std::mem::replace(&mut this.conn, b);
+            this.parked.push(a);
+
+            let schemas = vec!["ALPHA".to_string(), "HR".to_string()];
+            this.on_db_response(1, 5, Ok(Response::Schemas(schemas)), window, cx);
+            let a = this.conn_by_id(1).unwrap();
+            assert_eq!(a.schemas, ["ALPHA", "HR"]);
+            assert_eq!(a.current_schema.as_deref(), Some("ALPHA"));
+            assert_eq!(this.conn.schemas, ["BETA"], "B untouched");
+
+            let a = this.conn_mut(1).unwrap();
+            a.op_generation = 6;
+            a.pending_op = Some(PendingOp::Run);
+            a.busy = true;
+            this.on_db_response(
+                1,
+                6,
+                Ok(Response::ConnectionLost("gone".into())),
+                window,
+                cx,
+            );
+            let a = this.conn_by_id(1).unwrap();
+            assert!(a.connection_lost && a.session.is_none() && a.schemas.is_empty());
+            assert!(this.conn.session.is_some(), "B stays connected");
+            assert_eq!(this.conn.id, 2);
+        })
+        .unwrap();
+}

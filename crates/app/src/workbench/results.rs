@@ -1146,10 +1146,6 @@ mod tests {
 impl Workbench {
     /// Show a fresh result in the target tab. The tab and the grid share
     /// one `Arc`: no cell is copied.
-    pub(super) fn set_grid_result(&mut self, result: QueryResult, cx: &mut Context<Self>) {
-        self.set_grid_result_for(self.conn.id, result, cx);
-    }
-
     pub(super) fn set_grid_result_for(
         &mut self,
         conn_id: u64,

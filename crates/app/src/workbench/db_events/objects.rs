@@ -27,8 +27,7 @@ impl Workbench {
     pub(super) fn on_table_exported(
         &mut self,
         cid: u64,
-        owner: String,
-        name: String,
+        (owner, name): (String, String),
         path: std::path::PathBuf,
         rows: usize,
         truncated: bool,

@@ -6,10 +6,10 @@
 //! bar and autocomplete always show the active one. Every tab is bound to
 //! the connection it runs on, and picking a tab activates its connection.
 //!
-//! A response that arrives for a parked connection is applied with that
-//! connection swapped in for the duration of the handler
-//! ([`Workbench::with_conn`]), so the handlers never need to know which
-//! connection is active.
+//! A response that arrives is routed to its connection by id
+//! ([`Workbench::conn_mut`], `push_message_for`, `target_tab_for_mut`, ...);
+//! the active connection is never swapped for it. A handler that only makes
+//! sense for what the user looks at checks `cid == self.conn.id`.
 
 use super::*;
 
@@ -80,8 +80,7 @@ impl Workbench {
     }
 
     /// Mutable access to the connection with this id, active or parked,
-    /// without making it active. Prefer this over [`Workbench::with_conn`]
-    /// for state that lives in `ConnState` alone.
+    /// without making it active.
     pub(super) fn conn_mut(&mut self, id: u64) -> Option<&mut ConnState> {
         if self.conn.id == id {
             Some(&mut self.conn)
@@ -95,6 +94,22 @@ impl Workbench {
         if let Some(conn) = self.conn_mut(id) {
             f(conn);
         }
+    }
+
+    /// Run `f` on connection `id`'s autocomplete catalog: the live one for
+    /// the active connection, its parked copy otherwise.
+    pub(super) fn with_catalog_for<R>(
+        &mut self,
+        id: u64,
+        f: impl FnOnce(&mut Catalog) -> R,
+    ) -> Option<R> {
+        if self.conn.id == id {
+            return Some(f(&mut self.catalog.borrow_mut()));
+        }
+        self.parked
+            .iter_mut()
+            .find(|c| c.id == id)
+            .map(|c| f(&mut c.catalog))
     }
 
     /// Set connection `id`'s status line.
@@ -136,37 +151,6 @@ impl Workbench {
         if !prev.is_open() && !prev.busy && !prev.connection_lost {
             self.parked.remove(ix);
         }
-        cx.notify();
-    }
-
-    /// Run `f` with connection `id` active. Used for responses: one that
-    /// arrives for a parked connection is applied to that connection, then
-    /// the user's active connection is restored. `f` is told whether it
-    /// runs in the background, so it can skip UI moves (focus, tab
-    /// switches) that only make sense for what the user is looking at.
-    /// Responses for a connection that is gone are dropped.
-    pub(super) fn with_conn(
-        &mut self,
-        id: u64,
-        cx: &mut Context<Self>,
-        f: impl FnOnce(&mut Self, bool, &mut Context<Self>),
-    ) {
-        if self.conn.id == id {
-            f(self, false, cx);
-            return;
-        }
-        let Some(ix) = self.parked_ix(id) else {
-            return;
-        };
-        let user_conn = self.conn.id;
-        self.swap_active(ix);
-        f(self, true, cx);
-        if let Some(ix) = self.parked_ix(user_conn) {
-            self.swap_active(ix);
-        }
-        // The handler may have opened a tab for its connection (View
-        // Script): follow it.
-        self.follow_tab_conn(cx);
         cx.notify();
     }
 
@@ -293,7 +277,14 @@ impl Workbench {
     }
 
     pub(super) fn invalidate_connection_results(&mut self, cx: &mut Context<Self>) {
-        let closed = self.conn.id;
+        self.invalidate_connection_results_for(self.conn.id, cx);
+    }
+
+    pub(super) fn invalidate_connection_results_for(
+        &mut self,
+        closed: u64,
+        cx: &mut Context<Self>,
+    ) {
         for tab in &mut self.tabs {
             if tab.conn == Some(closed) {
                 tab.statement_results.clear();
