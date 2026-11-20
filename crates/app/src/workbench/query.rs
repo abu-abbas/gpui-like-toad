@@ -206,7 +206,7 @@ impl Workbench {
             && self.active_tab().data.is_none()
     }
 
-    /// Cmd/Ctrl+/: toggle `-- ` comments on the cursor line or selected
+    /// Cmd+/ (macOS) or Ctrl+/: toggle `-- ` comments on the cursor line or selected
     /// lines. One undo step; the selection stays on the same text.
     pub(super) fn toggle_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.sql_editor_usable() {

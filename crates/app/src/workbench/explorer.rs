@@ -208,7 +208,7 @@ impl Workbench {
                             .icon(icon(IconName::Search, 15., theme.muted_foreground))
                             .size(px(EXPLORER_CONTROL_HEIGHT))
                             .flex_none()
-                            .tooltip("Quick Open (Ctrl/Cmd+P)")
+                            .tooltip_with_action("Quick Open", &QuickOpenTable, Some("Workbench"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.toggle_quick_open(window, cx)
                             })),
