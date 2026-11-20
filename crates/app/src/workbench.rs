@@ -67,6 +67,7 @@ mod connections_ui;
 mod conns;
 mod data_tab;
 mod db_events;
+mod db_icon;
 mod explorer;
 mod grid_clipboard;
 mod profiles;
