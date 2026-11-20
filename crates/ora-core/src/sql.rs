@@ -295,6 +295,101 @@ fn is_keyword(word: &str) -> bool {
     )
 }
 
+/// Result of [`toggle_line_comment`]: replace `range` of the original text
+/// with `text`, then select `selection` (offsets into the new full text).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentEdit {
+    pub range: std::ops::Range<usize>,
+    pub text: String,
+    pub selection: std::ops::Range<usize>,
+}
+
+/// Toggle `-- ` line comments on the lines touched by `sel` (byte offsets).
+///
+/// If every non-empty line is already commented they are all uncommented
+/// (the `--` and one following space are removed); otherwise every
+/// non-empty line is commented at the shallowest indentation of the block.
+/// A selection ending at column 0 of a line does not include that line.
+/// Returns `None` when `sel` is outside `text`.
+pub fn toggle_line_comment(text: &str, sel: std::ops::Range<usize>) -> Option<CommentEdit> {
+    let (start, end) = (sel.start.min(sel.end), sel.start.max(sel.end));
+    if end > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return None;
+    }
+    let block_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
+    let mut last = end;
+    if end > start && text[..end].ends_with('\n') {
+        last = end - 1;
+    }
+    let block_end = text[last..].find('\n').map_or(text.len(), |i| last + i);
+
+    let lines: Vec<&str> = text[block_start..block_end].split('\n').collect();
+    let indent_of = |l: &str| l.len() - l.trim_start_matches([' ', '\t']).len();
+    let is_blank = |l: &str| l.trim().is_empty();
+    let all_blank = lines.iter().all(|l| is_blank(l));
+    let uncomment = !all_blank
+        && lines
+            .iter()
+            .filter(|l| !is_blank(l))
+            .all(|l| l[indent_of(l)..].starts_with("--"));
+    let min_indent = lines
+        .iter()
+        .filter(|l| all_blank || !is_blank(l))
+        .map(|l| indent_of(l))
+        .min()
+        .unwrap_or(0);
+
+    // (position in original text, bytes removed, bytes inserted)
+    let mut edits: Vec<(usize, usize, usize)> = Vec::new();
+    let mut out = String::new();
+    let mut pos = block_start;
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if uncomment && !is_blank(line) {
+            let at = indent_of(line);
+            let rest = &line[at + 2..];
+            let removed = 2 + usize::from(rest.starts_with(' '));
+            out.push_str(&line[..at]);
+            out.push_str(&line[at + removed..]);
+            edits.push((pos + at, removed, 0));
+        } else if !uncomment && (all_blank || !is_blank(line)) {
+            let at = if is_blank(line) {
+                line.len().min(min_indent)
+            } else {
+                min_indent
+            };
+            out.push_str(&line[..at]);
+            out.push_str("-- ");
+            out.push_str(&line[at..]);
+            edits.push((pos + at, 0, 3));
+        } else {
+            out.push_str(line);
+        }
+        pos += line.len() + 1;
+    }
+
+    let map = |o: usize| -> usize {
+        let mut n = o as isize;
+        for &(p, rem, ins) in &edits {
+            if o >= p + rem && (rem > 0 || o >= p) {
+                n += ins as isize - rem as isize;
+            } else if o > p {
+                n -= (o - p) as isize; // inside a removed run: clamp to its start
+            }
+        }
+        n.max(block_start as isize) as usize
+    };
+    let hi = block_start + out.len();
+    let selection = map(start).min(hi)..map(end).min(hi);
+    Some(CommentEdit {
+        range: block_start..block_end,
+        text: out,
+        selection,
+    })
+}
+
 /// Common Oracle built-in function names, uppercased like keywords but
 /// kept distinct from them: a function name before `(` hugs it
 /// (`COUNT(*)`), while a keyword before `(` keeps a space (`IN (`).
@@ -961,5 +1056,67 @@ mod tests {
         assert_eq!(format_sql(""), "");
         assert_eq!(format_sql("   \n  "), "");
         assert_eq!(format_sql("select 1"), "SELECT\n    1");
+    }
+
+    fn toggled(text: &str, sel: std::ops::Range<usize>) -> (String, std::ops::Range<usize>) {
+        let e = toggle_line_comment(text, sel).unwrap();
+        let mut t = text.to_string();
+        t.replace_range(e.range.clone(), &e.text);
+        (t, e.selection)
+    }
+
+    #[test]
+    fn toggle_comment_single_line_and_back() {
+        let (t, sel) = toggled("select 1", 3..3);
+        assert_eq!(t, "-- select 1");
+        assert_eq!(sel, 6..6);
+        let (t, sel) = toggled(&t, sel);
+        assert_eq!(t, "select 1");
+        assert_eq!(sel, 3..3);
+    }
+
+    #[test]
+    fn toggle_comment_block_uses_shallowest_indent_and_skips_blank() {
+        let src = "a\n    b\n\n  c";
+        let (t, _) = toggled(src, 0..src.len());
+        assert_eq!(t, "-- a\n--     b\n\n--   c");
+        let (back, _) = toggled(&t, 0..t.len());
+        assert_eq!(back, src);
+    }
+
+    #[test]
+    fn toggle_comment_mixed_comments_all_lines() {
+        let (t, _) = toggled("-- a\nb", 0..6);
+        assert_eq!(t, "-- -- a\n-- b");
+    }
+
+    #[test]
+    fn toggle_comment_keeps_indent_and_handles_no_space() {
+        let (t, _) = toggled("  --x\n\t-- y", 0..11);
+        assert_eq!(t, "  x\n\ty");
+    }
+
+    #[test]
+    fn toggle_comment_selection_ending_at_line_start_excludes_that_line() {
+        let (t, _) = toggled("a\nb\nc", 0..4);
+        assert_eq!(t, "-- a\n-- b\nc");
+    }
+
+    #[test]
+    fn toggle_comment_empty_line_and_bounds() {
+        let (t, sel) = toggled("a\n\nb", 2..2);
+        assert_eq!(t, "a\n-- \nb");
+        assert_eq!(sel, 5..5);
+        assert!(toggle_line_comment("abc", 0..9).is_none());
+        assert!(toggle_line_comment("é", 1..1).is_none());
+        let (t, _) = toggled("", 0..0);
+        assert_eq!(t, "-- ");
+    }
+
+    #[test]
+    fn toggle_comment_selection_follows_text() {
+        let (t, sel) = toggled("ab\ncd", 1..4);
+        assert_eq!(t, "-- ab\n-- cd");
+        assert_eq!(&t[sel], "b\n-- c");
     }
 }

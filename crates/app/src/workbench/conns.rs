@@ -16,9 +16,33 @@ use super::*;
 /// The "save scripts before disconnect?" dialog: which connection, and
 /// the SQL tabs (id, title) that would be closed with text in them.
 pub(super) struct DisconnectPrompt {
-    id: u64,
+    after: PromptAfter,
     label: String,
     scripts: Vec<(u64, String)>,
+}
+
+/// What happens once the scripts were saved or discarded.
+enum PromptAfter {
+    Disconnect(u64),
+    CloseTabs(Vec<u64>),
+}
+
+impl DisconnectPrompt {
+    /// The same dialog for closing tabs (X button, tab menu).
+    pub(super) fn close_tabs(ids: Vec<u64>, scripts: Vec<(u64, String)>) -> Self {
+        DisconnectPrompt {
+            after: PromptAfter::CloseTabs(ids),
+            label: String::new(),
+            scripts,
+        }
+    }
+
+    fn heading(&self) -> String {
+        match self.after {
+            PromptAfter::Disconnect(_) => format!("Disconnect {}?", self.label),
+            PromptAfter::CloseTabs(_) => "Close tabs with unsaved SQL?".to_string(),
+        }
+    }
 }
 
 impl Workbench {
@@ -455,8 +479,7 @@ impl Workbench {
         let scripts: Vec<(u64, String)> = self
             .tabs
             .iter()
-            .filter(|t| t.conn == Some(id) && t.data.is_none())
-            .filter(|t| !t.editor.read(cx).value().trim().is_empty())
+            .filter(|t| t.conn == Some(id) && t.has_unsaved_script(cx))
             .map(|t| (t.id, t.title.clone()))
             .collect();
         if scripts.is_empty() {
@@ -464,7 +487,11 @@ impl Workbench {
             return;
         }
         let label = self.conn_by_id(id).map_or_else(String::new, |c| c.label());
-        self.disconnect_prompt = Some(DisconnectPrompt { id, label, scripts });
+        self.disconnect_prompt = Some(DisconnectPrompt {
+            after: PromptAfter::Disconnect(id),
+            label,
+            scripts,
+        });
         cx.notify();
     }
 
@@ -477,7 +504,7 @@ impl Workbench {
     /// picks, then disconnect. Cancelling a file dialog stops there and
     /// keeps the connection.
     fn save_scripts_then_disconnect(&mut self, cx: &mut Context<Self>) {
-        let Some(DisconnectPrompt { id, scripts, .. }) = self.disconnect_prompt.take() else {
+        let Some(DisconnectPrompt { after, scripts, .. }) = self.disconnect_prompt.take() else {
             return;
         };
         cx.notify();
@@ -501,15 +528,20 @@ impl Workbench {
                     // No file dialog on this platform.
                     _ => fallback,
                 };
-                let written = std::fs::write(&path, text);
+                let written = std::fs::write(&path, &text);
                 let ok = written.is_ok();
                 let _ = view.update(cx, |this, cx| {
+                    if ok {
+                        if let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) {
+                            tab.saved_text = text;
+                        }
+                    }
                     match written {
                         Ok(()) => {
                             this.push_message(format!("Saved SQL for {title}: {}", path.display()))
                         }
                         Err(err) => this.push_message(format!(
-                            "Failed to save {title}: {err}. Disconnect canceled."
+                            "Failed to save {title}: {err}. Nothing was closed."
                         )),
                     }
                     cx.notify();
@@ -518,7 +550,7 @@ impl Workbench {
                     return;
                 }
             }
-            let _ = view.update(cx, |this, cx| this.finish_disconnect(id, cx));
+            let _ = view.update(cx, |this, cx| this.finish_prompt(after, cx));
         })
         .detach();
     }
@@ -526,7 +558,14 @@ impl Workbench {
     /// Dialog answer "Don't Save": disconnect and drop the scripts.
     fn discard_scripts_then_disconnect(&mut self, cx: &mut Context<Self>) {
         if let Some(prompt) = self.disconnect_prompt.take() {
-            self.finish_disconnect(prompt.id, cx);
+            self.finish_prompt(prompt.after, cx);
+        }
+    }
+
+    fn finish_prompt(&mut self, after: PromptAfter, cx: &mut Context<Self>) {
+        match after {
+            PromptAfter::Disconnect(id) => self.finish_disconnect(id, cx),
+            PromptAfter::CloseTabs(ids) => self.close_tabs_where(|_, t, _| ids.contains(&t.id), cx),
         }
     }
 
@@ -575,7 +614,7 @@ impl Workbench {
                             .line_height(crate::theme::ui_size(&theme, LEADING_HEADING_MD))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
-                            .child(format!("Disconnect {}?", prompt.label)),
+                            .child(prompt.heading()),
                     )
                     .child(
                         div()

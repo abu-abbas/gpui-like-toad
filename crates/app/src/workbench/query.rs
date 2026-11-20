@@ -45,7 +45,9 @@ impl Workbench {
 impl Workbench {
     pub(super) fn save_active_script(&mut self, cx: &mut Context<Self>) {
         let tab = self.active_tab();
+        let tab_id = tab.id;
         let sql = tab.editor.read(cx).value().to_string();
+        let saved_sql = sql.clone();
         let name = conns::script_filename(&tab.title);
         let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let prompt = cx.prompt_for_new_path(&dir, Some(&name));
@@ -67,6 +69,11 @@ impl Workbench {
                 .spawn(async move { std::fs::write(path, sql) })
                 .await;
             let _ = view.update(cx, |this, cx| {
+                if written.is_ok() {
+                    if let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        tab.saved_text = saved_sql;
+                    }
+                }
                 this.push_message(match written {
                     Ok(()) => format!("SQL saved: {display}"),
                     Err(err) => format!("Failed to save SQL: {err}"),
@@ -185,7 +192,42 @@ impl Workbench {
         let sql = self.editor_text(cx);
         let formatted = format_sql(&sql);
         let editor = self.active_tab().editor.clone();
-        editor.update(cx, |state, cx| state.set_value(formatted, window, cx));
+        // `replace_all` keeps the undo history, so Cmd/Ctrl+Z reverts a
+        // beautify done by mistake.
+        editor.update(cx, |state, cx| state.replace_all(formatted, window, cx));
+        cx.notify();
+    }
+
+    /// True when the active tab is a SQL editor and no dialog owns the keyboard.
+    pub(super) fn sql_editor_usable(&self) -> bool {
+        !self.show_empty_workspace
+            && !self.settings.open
+            && !self.update_check_open()
+            && self.active_tab().data.is_none()
+    }
+
+    /// Cmd/Ctrl+/: toggle `-- ` comments on the cursor line or selected
+    /// lines. One undo step; the selection stays on the same text.
+    pub(super) fn toggle_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.sql_editor_usable() {
+            return;
+        }
+        let editor = self.active_tab().editor.clone();
+        if !editor.read(cx).focus_handle(cx).is_focused(window) {
+            return;
+        }
+        let (text, range) = {
+            let state = editor.read(cx);
+            (state.value().to_string(), state.selected_range())
+        };
+        let Some(edit) = ora_core::sql::toggle_line_comment(&text, range) else {
+            return;
+        };
+        editor.update(cx, |state, cx| {
+            state.set_selected_range(edit.range.clone(), cx);
+            state.replace(edit.text.clone(), window, cx);
+            state.set_selected_range(edit.selection.clone(), cx);
+        });
         cx.notify();
     }
 
