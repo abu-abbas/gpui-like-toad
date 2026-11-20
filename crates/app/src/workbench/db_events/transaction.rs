@@ -3,20 +3,25 @@
 use super::*;
 
 impl Workbench {
-    pub(super) fn on_committed(&mut self, cx: &mut Context<Self>) {
-        self.conn.uncommitted = false;
-        self.push_message("Commit succeeded.".to_string());
-        self.conn.status = "Commit succeeded.".to_string();
-        self.clear_edit_marks(cx);
+    pub(super) fn on_committed(&mut self, cid: u64, cx: &mut Context<Self>) {
+        self.set_conn_state(cid, |c| {
+            c.uncommitted = false;
+            c.status = "Commit succeeded.".to_string();
+        });
+        self.push_message_for(cid, "Commit succeeded.".to_string());
+        self.clear_edit_marks_for(cid, cx);
     }
 
-    pub(super) fn on_rolled_back(&mut self, background: bool, cx: &mut Context<Self>) {
-        self.conn.uncommitted = false;
-        self.push_message("Rollback succeeded.".to_string());
-        self.conn.status = "Rollback succeeded.".to_string();
-        self.clear_edit_marks(cx);
-        // The grid still shows the rolled-back values.
-        if !background
+    pub(super) fn on_rolled_back(&mut self, cid: u64, cx: &mut Context<Self>) {
+        self.set_conn_state(cid, |c| {
+            c.uncommitted = false;
+            c.status = "Rollback succeeded.".to_string();
+        });
+        self.push_message_for(cid, "Rollback succeeded.".to_string());
+        self.clear_edit_marks_for(cid, cx);
+        // The grid still shows the rolled-back values. Only the tab the
+        // user is looking at reloads; others refresh when opened.
+        if cid == self.conn.id
             && self
                 .tabs
                 .get(self.active_tab)

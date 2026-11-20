@@ -90,6 +90,18 @@ impl Workbench {
         }
     }
 
+    /// Update connection `id`'s own state in place (no-op when it is gone).
+    pub(super) fn set_conn_state(&mut self, id: u64, f: impl FnOnce(&mut ConnState)) {
+        if let Some(conn) = self.conn_mut(id) {
+            f(conn);
+        }
+    }
+
+    /// Set connection `id`'s status line.
+    pub(super) fn set_status_for(&mut self, id: u64, status: String) {
+        self.set_conn_state(id, |c| c.status = status);
+    }
+
     /// Whether operation `generation` is still the one connection `id`
     /// waits for. False for a superseded operation (Stop, a newer op) or a
     /// connection that is gone: its response must be dropped.

@@ -52,18 +52,13 @@ fn query_finishes_after_switching_connection(cx: &mut TestAppContext) {
             assert_eq!(this.active_tab().conn, Some(2));
 
             // A's response arrives.
-            let mut ran_in_background = None;
-            this.with_conn(1, cx, |this, background, cx| {
-                ran_in_background = Some(background);
-                this.on_db_response(
-                    7,
-                    Ok(Response::QueryDone(result_with_rows(3))),
-                    background,
-                    window,
-                    cx,
-                );
-            });
-            assert_eq!(ran_in_background, Some(true));
+            this.on_db_response(
+                1,
+                7,
+                Ok(Response::QueryDone(result_with_rows(3))),
+                window,
+                cx,
+            );
 
             // B is still the active connection, on its own tab.
             assert_eq!(this.conn.id, 2);
@@ -109,7 +104,7 @@ fn stop_keeps_connection_busy_until_worker_answers(cx: &mut TestAppContext) {
             assert!(this.conn.busy);
 
             // The worker answers; the result is dropped, a write is noted.
-            this.on_db_response(3, Ok(Response::Executed(1)), false, window, cx);
+            this.on_db_response(this.conn.id, 3, Ok(Response::Executed(1)), window, cx);
             assert!(!this.conn.busy);
             assert!(!this.conn.abandoned);
             assert!(this.conn.pending_op.is_none());
@@ -160,6 +155,44 @@ fn parked_connection_is_reached_without_activating_it(cx: &mut TestAppContext) {
             assert_eq!(this.conn.id, 2, "B stays active");
             assert_eq!(this.conn_by_id(1).unwrap().status, "touched");
             assert!(this.conn_mut(7).is_none());
+        })
+        .unwrap();
+}
+
+/// A commit and a failure finishing on a parked connection update only that
+/// connection; the active one keeps its state and stays active.
+#[gpui_kit::test]
+fn background_commit_and_failure_leave_active_connection_alone(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let window = cx.add_window(Workbench::new);
+    window
+        .update(cx, |this, window, cx| {
+            this.conn.session = Some(session("ALPHA"));
+            this.conn.uncommitted = true;
+            this.conn.op_generation = 3;
+            this.conn.pending_op = Some(PendingOp::Commit);
+            this.conn.busy = true;
+            let mut b = ConnState::new(2);
+            b.session = Some(session("BETA"));
+            b.status = "B is idle.".to_string();
+            let a = std::mem::replace(&mut this.conn, b);
+            this.parked.push(a);
+
+            this.on_db_response(1, 3, Ok(Response::Committed), window, cx);
+            let a = this.conn_by_id(1).unwrap();
+            assert!(!a.uncommitted && !a.busy);
+            assert_eq!(a.status, "Commit succeeded.");
+
+            let a = this.conn_mut(1).unwrap();
+            a.op_generation = 4;
+            a.pending_op = Some(PendingOp::Rollback);
+            a.busy = true;
+            this.on_db_response(1, 4, Ok(Response::Failed("boom".into())), window, cx);
+            assert_eq!(this.conn_by_id(1).unwrap().status, "Error (see Messages).");
+            assert!(!this.conn_by_id(1).unwrap().busy);
+
+            assert_eq!(this.conn.id, 2);
+            assert_eq!(this.conn.status, "B is idle.");
         })
         .unwrap();
 }

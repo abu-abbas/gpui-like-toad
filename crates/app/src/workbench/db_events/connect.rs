@@ -25,22 +25,22 @@ impl Workbench {
         self.refresh_schema(cx);
     }
 
-    pub(super) fn on_connection_tested(&mut self, outcome: Result<DbInfo, String>) {
+    pub(super) fn on_connection_tested(&mut self, cid: u64, outcome: Result<DbInfo, String>) {
         match outcome {
             Ok(info) => {
                 let text = format!(
                     "Connection test succeeded: {} @ {} ({})",
                     info.user, info.database, info.version
                 );
-                self.push_message(text.clone());
+                self.push_message_for(cid, text.clone());
                 self.connection_form.form_notice = Some((false, text));
-                self.conn.status = "Connection test succeeded.".to_string();
+                self.set_conn_state(cid, |c| c.status = "Connection test succeeded.".to_string());
             }
             Err(message) => {
-                self.push_message(format!("Connection test failed: {message}"));
+                self.push_message_for(cid, format!("Connection test failed: {message}"));
                 self.connection_form.form_notice =
                     Some((true, format!("Connection test failed: {message}")));
-                self.conn.status = "Connection test failed.".to_string();
+                self.set_conn_state(cid, |c| c.status = "Connection test failed.".to_string());
             }
         }
     }

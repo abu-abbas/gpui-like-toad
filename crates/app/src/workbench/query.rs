@@ -88,14 +88,17 @@ impl Workbench {
         self.active_tab().editor.read(cx).value().to_string()
     }
 
-    pub(super) fn record_run(&mut self, sql: &str) {
+    pub(super) fn record_run_for(&mut self, conn_id: u64, sql: &str) {
         // The connection's "Record query history" option is off.
-        if self.conn.access().skip_history {
+        if self
+            .conn_by_id(conn_id)
+            .is_some_and(|c| c.access().skip_history)
+        {
             return;
         }
         store::record_history(&mut self.history, sql, store::now_unix_secs());
         if let Err(err) = store::save_history(&self.history) {
-            self.push_message(format!("Failed to save query history: {err}"));
+            self.push_message_for(conn_id, format!("Failed to save query history: {err}"));
         }
     }
 

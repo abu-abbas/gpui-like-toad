@@ -399,7 +399,11 @@ impl Workbench {
 
     /// After Commit or Rollback: the tints go away in every data tab.
     pub(super) fn clear_edit_marks(&mut self, cx: &mut Context<Self>) {
-        let conn = Some(self.conn.id);
+        self.clear_edit_marks_for(self.conn.id, cx);
+    }
+
+    pub(super) fn clear_edit_marks_for(&mut self, conn_id: u64, cx: &mut Context<Self>) {
+        let conn = Some(conn_id);
         for ix in 0..self.tabs.len() {
             if self.tabs[ix].conn != conn {
                 continue;

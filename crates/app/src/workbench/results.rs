@@ -1147,8 +1147,17 @@ impl Workbench {
     /// Show a fresh result in the target tab. The tab and the grid share
     /// one `Arc`: no cell is copied.
     pub(super) fn set_grid_result(&mut self, result: QueryResult, cx: &mut Context<Self>) {
+        self.set_grid_result_for(self.conn.id, result, cx);
+    }
+
+    pub(super) fn set_grid_result_for(
+        &mut self,
+        conn_id: u64,
+        result: QueryResult,
+        cx: &mut Context<Self>,
+    ) {
         let result = Arc::new(result);
-        let tab = self.target_tab_mut();
+        let tab = self.target_tab_for_mut(conn_id);
         tab.last_result = Some(result.clone());
         tab.table_state.update(cx, |state, cx| {
             state.delegate_mut().set_result(result);
