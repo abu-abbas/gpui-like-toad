@@ -17,22 +17,26 @@ fn svg(kind: DbKind) -> &'static [u8] {
 
 /// Brand-like tint: coral red for Oracle, blue for SQLite. Slightly lighter
 /// on dark themes so it stays readable.
-pub(super) fn color(kind: DbKind, theme: &Theme) -> Hsla {
+fn color(kind: DbKind, theme: &Theme) -> Hsla {
     let dark = theme.background.l < 0.5;
     let (hue, saturation, lightness) = match (kind, dark) {
-        (DbKind::Oracle, true) => (8., 0.62, 0.66),
-        (DbKind::Oracle, false) => (8., 0.68, 0.56),
-        (DbKind::Sqlite, true) => (212., 0.80, 0.68),
-        (DbKind::Sqlite, false) => (212., 0.80, 0.52),
+        (DbKind::Oracle, true) => (2., 0.85, 0.67),
+        (DbKind::Oracle, false) => (2., 0.72, 0.47),
+        (DbKind::Sqlite, true) => (200., 0.92, 0.58),
+        (DbKind::Sqlite, false) => (200., 0.85, 0.39),
     };
     hsla(hue / 360., saturation, lightness, 1.)
 }
 
-pub(super) fn icon(kind: DbKind, size: f32, theme: &Theme) -> Icon {
+pub(super) fn icon(kind: DbKind, connected: bool, theme: &Theme) -> Icon {
     Icon::default()
         .data(svg(kind))
-        .size(gpui_kit::px(size))
-        .text_color(color(kind, theme))
+        .size(gpui_kit::px(16.))
+        .text_color(if connected {
+            color(kind, theme)
+        } else {
+            theme.muted_foreground
+        })
 }
 
 // Artwork for engines that are not supported yet. When `DbKind` gets

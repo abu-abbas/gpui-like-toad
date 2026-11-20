@@ -60,7 +60,11 @@ impl Workbench {
                         .items_center()
                         .w_full()
                         .gap(px(8.))
-                        .child(db_icon::icon(self.active_kind(), 16., theme))
+                        .child(db_icon::icon(
+                            self.active_kind(),
+                            self.conn.session.is_some(),
+                            theme,
+                        ))
                         .child(
                             div()
                                 .flex_1()

@@ -268,7 +268,10 @@ impl Workbench {
                 dialog.connections,
                 dialog.subfolders,
                 if dialog.open > 0 {
-                    format!(" Disconnect the {} open connection(s) before deleting them.", dialog.open)
+                    format!(
+                        " Disconnect the {} open connection(s) before deleting them.",
+                        dialog.open
+                    )
                 } else {
                     String::new()
                 }
@@ -743,10 +746,10 @@ impl Workbench {
                         } else {
                             IconName::FolderOpen
                         })
-                        .size(px(14.)),
+                        .size(px(14.))
+                        .text_color(color),
                         label,
                         None,
-                        color,
                         theme,
                     ))
                     .into_any_element(),
@@ -905,12 +908,12 @@ impl Workbench {
                     }))
                     .child(
                         tree_label(
-                            db_icon::icon(profile.kind, 18., theme),
+                            db_icon::icon(profile.kind, connected, theme),
                             profile.name.clone(),
                             None,
-                            db_icon::color(profile.kind, theme),
                             theme,
                         )
+                        .gap(px(8.))
                         .when(active || focused, |row| {
                             row.font_weight(FontWeight::SEMIBOLD)
                         })
@@ -944,19 +947,19 @@ fn connection_tree_label(
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::Div {
     tree_label(
-        Icon::new(symbol).size(px(14.)),
+        Icon::new(symbol)
+            .size(px(14.))
+            .text_color(theme.muted_foreground),
         text,
         count,
-        theme.muted_foreground,
         theme,
     )
 }
 
 fn tree_label(
-    symbol: impl Into<Icon>,
+    symbol: Icon,
     text: String,
     count: Option<usize>,
-    icon_color: Hsla,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::Div {
     div()
@@ -965,7 +968,7 @@ fn tree_label(
         .w_full()
         .min_w(px(0.))
         .gap(px(6.))
-        .child(Icon::new(symbol).text_color(icon_color))
+        .child(symbol)
         .child(
             div()
                 // With a count the text pushes it to the right edge; without
