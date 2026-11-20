@@ -7,7 +7,7 @@
 //! driver's own guide, and the `DbClient` trait isolates the GUI from it.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ora_core::completion::CatalogObject;
 use ora_core::sql::clean_statement;
@@ -157,6 +157,53 @@ const MAX_PREVIEW_READS: usize = 3;
 struct LobBudget<'a> {
     collector: &'a RowCollector,
     previews_left: usize,
+    timing: &'a mut FetchTiming,
+}
+
+/// Per-stage timing of one fetch. Only written out when timing is switched
+/// on (see [`timing_enabled`]); counting is cheap enough to always run.
+#[derive(Default)]
+struct FetchTiming {
+    /// Time spent waiting in the cursor for the next row (the server round
+    /// trips that bring row arrays, `fetch_array_size` rows each).
+    next_row: Duration,
+    /// Time converting cells that are not LOBs.
+    cells: Duration,
+    /// Time inside LOB cells: size lookup and preview/full reads.
+    lob_total: Duration,
+    /// Time spent only in `Lob::read` calls (one server round trip each).
+    lob_reads_time: Duration,
+    lob_cells: u64,
+    lob_read_calls: u64,
+    lob_size_calls_ms_max: u128,
+    lob_read_ms_max: u128,
+    rows: u64,
+}
+
+/// Timing is opt-in: set the environment variable `KILAT_TIMING=1`, or
+/// create an empty file named `timing-on` in the config directory (handy
+/// for a macOS `.app` started from Finder).
+fn timing_enabled() -> bool {
+    std::env::var_os("KILAT_TIMING").is_some_and(|v| !v.is_empty() && v != "0")
+        || ora_core::store::config_dir().join("timing-on").exists()
+}
+
+/// Append one line to `timing.log` in the config directory. Carries only
+/// counts and durations: no SQL text, no cell contents, no names.
+fn write_timing_line(line: &str) {
+    use std::io::Write as _;
+    let dir = ora_core::store::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("timing.log"))
+    {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let _ = writeln!(f, "{secs} {line}");
+    }
 }
 
 /// A CLOB/BLOB cell from its locator. The length is known without a
@@ -169,7 +216,10 @@ fn lob_value(
     is_char: bool,
     budget: &mut LobBudget<'_>,
 ) -> Result<Value, DbError> {
+    let t_size = Instant::now();
     let size = lob.get_size().map_err(db_err)?;
+    let size_ms = t_size.elapsed().as_millis();
+    budget.timing.lob_size_calls_ms_max = budget.timing.lob_size_calls_ms_max.max(size_ms);
     let unit = if is_char {
         ora_core::LenUnit::Chars
     } else {
@@ -205,7 +255,11 @@ fn lob_value(
         // only their length.
         return Ok(clipped(empty));
     };
-    let out = read_lob_bytes(lob, size, is_char, max, max_reads)?;
+    let t_read = Instant::now();
+    let out = read_lob_bytes(lob, size, is_char, max, max_reads, budget.timing)?;
+    let read_elapsed = t_read.elapsed();
+    budget.timing.lob_reads_time += read_elapsed;
+    budget.timing.lob_read_ms_max = budget.timing.lob_read_ms_max.max(read_elapsed.as_millis());
     if is_char {
         let text = String::from_utf8_lossy(&out).into_owned();
         if text.encode_utf16().count() >= size {
@@ -228,6 +282,7 @@ fn read_lob_bytes(
     is_char: bool,
     max: usize,
     max_reads: usize,
+    timing: &mut FetchTiming,
 ) -> Result<Vec<u8>, DbError> {
     use std::io::Read as _;
     // Enough for the whole value, never more than `max`.
@@ -243,6 +298,7 @@ fn read_lob_bytes(
             break;
         }
         let mut buf = vec![0u8; room.min(whole - out.len()).clamp(4, READ_CHUNK)];
+        timing.lob_read_calls += 1;
         match lob.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => out.extend_from_slice(&buf[..n]),
@@ -295,24 +351,79 @@ fn fetch_rows(
         })
         .collect();
     let db_types: Vec<&oracledb::DbType> = cursor.columns().iter().map(|m| m.db_type()).collect();
+    let t_executed = started.elapsed();
     let mut previews_left = MAX_LOB_PREVIEWS;
-    for row in cursor {
+    let mut timing = FetchTiming::default();
+    let mut cursor = cursor;
+    loop {
+        let t_next = Instant::now();
+        let Some(row) = cursor.next() else { break };
+        timing.next_row += t_next.elapsed();
         let mut row = row.map_err(db_err)?;
         if collector.is_full() {
             break;
         }
-        let mut budget = LobBudget {
-            collector: &collector,
-            previews_left,
-        };
         let mut values = Vec::with_capacity(db_types.len());
-        for (ix, db_type) in db_types.iter().enumerate() {
-            values.push(cell_value(&mut row, ix, db_type, &mut budget)?);
+        let t_cells = Instant::now();
+        let mut lob_time = Duration::ZERO;
+        {
+            let mut budget = LobBudget {
+                collector: &collector,
+                previews_left,
+                timing: &mut timing,
+            };
+            for (ix, db_type) in db_types.iter().enumerate() {
+                let is_lob = *db_type == oracledb::DB_TYPE_CLOB
+                    || *db_type == oracledb::DB_TYPE_NCLOB
+                    || *db_type == oracledb::DB_TYPE_BLOB;
+                let t_cell = Instant::now();
+                values.push(cell_value(&mut row, ix, db_type, &mut budget)?);
+                if is_lob {
+                    lob_time += t_cell.elapsed();
+                    budget.timing.lob_cells += 1;
+                }
+            }
+            previews_left = budget.previews_left;
         }
-        previews_left = budget.previews_left;
+        timing.lob_total += lob_time;
+        timing.cells += t_cells.elapsed().saturating_sub(lob_time);
+        timing.rows += 1;
         if !collector.push(values) {
             break;
         }
+    }
+    if timing_enabled() {
+        let n = db_types.len();
+        // One bare round trip to the server, for comparison.
+        let t_ping = Instant::now();
+        let ping_ms = conn.ping().ok().map(|()| t_ping.elapsed().as_millis());
+        let lobs = db_types
+            .iter()
+            .filter(|t| {
+                **t == oracledb::DB_TYPE_CLOB
+                    || **t == oracledb::DB_TYPE_NCLOB
+                    || **t == oracledb::DB_TYPE_BLOB
+            })
+            .count();
+        write_timing_line(&format!(
+            "fetch total_ms={} execute_ms={} next_row_ms={} cells_ms={} lob_cells_ms={} \
+             lob_read_ms={} rows={} columns={} lob_columns={} lob_cells={} lob_read_calls={} \
+             lob_size_max_ms={} lob_read_max_ms={} fetch_array_size=100 ping_ms={}",
+            started.elapsed().as_millis(),
+            t_executed.as_millis(),
+            timing.next_row.as_millis(),
+            timing.cells.as_millis(),
+            timing.lob_total.as_millis(),
+            timing.lob_reads_time.as_millis(),
+            timing.rows,
+            n,
+            lobs,
+            timing.lob_cells,
+            timing.lob_read_calls,
+            timing.lob_size_calls_ms_max,
+            timing.lob_read_ms_max,
+            ping_ms.map_or_else(|| "-".to_string(), |m| m.to_string()),
+        ));
     }
     Ok(collector.finish(columns))
 }

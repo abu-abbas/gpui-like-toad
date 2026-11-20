@@ -41,6 +41,43 @@ pub(super) fn empty_state_text(text: String, theme: &gpui_kit::component::Theme)
         .child(text)
 }
 
+/// Centered spinner with a short caption, for areas whose content is
+/// still being fetched. Same footprint as the empty-state text it replaces,
+/// so the layout does not jump when the data arrives.
+pub(super) fn loading_state(text: &str, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(SPACE_2))
+        .child(
+            gpui_kit::component::spinner::Spinner::new()
+                .large()
+                .color(theme.primary),
+        )
+        .child(empty_state_text(text.to_string(), theme))
+}
+
+/// Dimmed cover with a spinner over content that is already on screen
+/// (grid being reloaded). Absolute, so the content keeps its size.
+pub(super) fn loading_overlay(theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(theme.background.opacity(0.55))
+        .child(
+            gpui_kit::component::spinner::Spinner::new()
+                .large()
+                .color(theme.primary),
+        )
+}
+
 /// Content of a select-style dropdown button: the value left aligned and a
 /// chevron on the right, like a native select (Button centers its label).
 pub(super) fn select_trigger(text: String, theme: &gpui_kit::component::Theme) -> gpui_kit::Div {
