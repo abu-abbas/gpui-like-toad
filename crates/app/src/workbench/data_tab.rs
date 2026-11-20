@@ -86,6 +86,8 @@ pub(super) struct DataTab {
     pub(super) show_filters: bool,
     /// The row Details panel on the right of the grid.
     pub(super) show_details: bool,
+    /// Details fields (by column name) shown pretty-printed.
+    pub(super) pretty_fields: HashSet<String>,
     /// Redraws the workbench when the grid's selected row changes.
     pub(super) _grid_observe: Option<Subscription>,
     next_row_id: u64,
@@ -171,6 +173,7 @@ impl DataTab {
             show_sql: false,
             show_filters: false,
             show_details: false,
+            pretty_fields: HashSet::new(),
             _grid_observe: None,
             next_row_id: 0,
             page,
@@ -787,8 +790,68 @@ impl Workbench {
                 theme,
             ));
         }
+        let pretty_on = tab.data.as_ref().map(|d| &d.pretty_fields);
         for (name, value) in fields {
             let is_null = value.is_null();
+            // Only fully loaded text can be pretty-printed; a clipped value
+            // would parse as broken JSON.
+            let pretty = match &value {
+                ora_core::Value::Text(t) => ora_core::pretty::pretty_print(t),
+                _ => None,
+            };
+            let active = pretty.is_some() && pretty_on.is_some_and(|set| set.contains(&name));
+            let mut label_row = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(SPACE_2))
+                .child(caption_text(name.clone(), theme));
+            if let Some(p) = &pretty {
+                let field = name.clone();
+                label_row = label_row.child(
+                    div()
+                        .id(format!("pretty-{name}"))
+                        .cursor_pointer()
+                        .text_size(crate::theme::ui_size(theme, FONT_CAPTION))
+                        .line_height(crate::theme::ui_size(theme, LEADING_CAPTION))
+                        .text_color(theme.primary)
+                        .child(if active {
+                            "Raw".to_string()
+                        } else {
+                            p.kind.link_label().to_string()
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(data) = this.data_mut() {
+                                if !data.pretty_fields.remove(&field) {
+                                    data.pretty_fields.insert(field.clone());
+                                }
+                            }
+                            cx.notify();
+                        })),
+                );
+            }
+            let mut body = div()
+                .id(format!("pretty-body-{name}"))
+                .text_size(crate::theme::ui_size(theme, FONT_GRID))
+                .line_height(crate::theme::ui_size(theme, LEADING_GRID))
+                .text_color(if is_null {
+                    theme.muted_foreground.opacity(0.6)
+                } else {
+                    theme.foreground
+                });
+            let shown = match (&pretty, active) {
+                (Some(p), true) => {
+                    // Monospace, no wrapping, scrolls sideways so indents
+                    // stay readable in the narrow panel.
+                    body = body
+                        .font_family(theme.mono_font_family.clone())
+                        .whitespace_nowrap()
+                        .overflow_x_scroll();
+                    p.text.clone()
+                }
+                _ if is_null => "NULL".to_string(),
+                _ => value.display(),
+            };
             list = list.child(
                 div()
                     .flex()
@@ -797,22 +860,8 @@ impl Workbench {
                     .pb(px(SPACE_2))
                     .border_b_1()
                     .border_color(theme.border.opacity(0.5))
-                    .child(caption_text(name, theme))
-                    .child(
-                        div()
-                            .text_size(crate::theme::ui_size(&theme, FONT_GRID))
-                            .line_height(crate::theme::ui_size(&theme, LEADING_GRID))
-                            .text_color(if is_null {
-                                theme.muted_foreground.opacity(0.6)
-                            } else {
-                                theme.foreground
-                            })
-                            .child(if is_null {
-                                "NULL".to_string()
-                            } else {
-                                value.display()
-                            }),
-                    ),
+                    .child(label_row)
+                    .child(body.child(shown)),
             );
         }
         div()
