@@ -58,6 +58,10 @@ impl Workbench {
         self.set_grid_result_for(cid, result, cx);
         self.target_tab_for_mut(cid).results_tab = ResultsTab::Results;
         let is_data = self.target_tab_for_mut(cid).data.is_some();
+        if is_data {
+            let tab_id = self.target_tab_for_mut(cid).id;
+            self.clob_result_changed(tab_id, cx);
+        }
         self.set_status_for(
             cid,
             if truncated && is_data && limit_note.is_empty() {

@@ -504,6 +504,8 @@ impl Workbench {
         tab.data = Some(data);
         let edit_view = view.clone();
         let load_view = view.clone();
+        let visible_view = view.clone();
+        let tab_id = tab.id;
 
         tab.table_state.update(cx, |state, _| {
             let mut delegate = ResultsDelegate::empty()
@@ -514,6 +516,15 @@ impl Workbench {
                 }))
                 .with_load_cell(Rc::new(move |rowid, column, _, cx| {
                     let _ = load_view.update(cx, |this, cx| this.load_full_cell(rowid, column, cx));
+                }))
+                .with_visible_rows(Rc::new(move |rows, _, cx| {
+                    // Deferred: this runs while the grid is being drawn.
+                    let view = visible_view.clone();
+                    cx.defer(move |cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            this.clob_rows_changed(tab_id, Some(rows), cx)
+                        });
+                    });
                 }));
             // Only tables have a stable ROWID to find a row by.
             if editable {

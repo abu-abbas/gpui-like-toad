@@ -157,6 +157,14 @@ pub enum Job {
         owner: String,
         name: String,
     },
+    /// The starts of the CLOB cells of some rows of a data tab (lazy
+    /// previews for the rows on screen), in one query.
+    ClobPreviews {
+        owner: String,
+        name: String,
+        columns: Vec<String>,
+        rowids: Vec<String>,
+    },
     /// "Load full value": one cell of a data tab, by ROWID, fetched with
     /// the full-value limit instead of the grid's per-cell limit.
     LoadCell {
@@ -231,6 +239,8 @@ pub enum Response {
         /// Cells longer than the export's per-cell limit (written cut).
         clipped: usize,
     },
+    /// The CLOB starts asked for by [`Job::ClobPreviews`].
+    ClobPreviews(Vec<ora_core::ClobPreview>),
     /// The full value of one cell ("Load full value").
     CellLoaded {
         rowid: String,
@@ -665,6 +675,18 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
         Job::Describe { owner, name } => match client.as_mut() {
             Some(client) => match client.describe_table(&owner, &name) {
                 Ok(defs) => Response::Described(defs),
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
+        Job::ClobPreviews {
+            owner,
+            name,
+            columns,
+            rowids,
+        } => match client.as_mut() {
+            Some(client) => match client.fetch_clob_previews(&owner, &name, &columns, &rowids) {
+                Ok(previews) => Response::ClobPreviews(previews),
                 Err(err) => Response::Failed(err.to_string()),
             },
             None => Response::Failed("not connected".to_string()),

@@ -102,6 +102,8 @@ pub(super) struct DataTab {
     pub(super) deletes: Vec<String>,
     pub(super) insert_rows: crate::results::InsertRows,
     _page_subs: Vec<Subscription>,
+    /// Lazy CLOB previews of the rows on screen (see `clob_preview`).
+    pub(super) preview: super::clob_preview::PreviewState,
 }
 
 impl DataTab {
@@ -184,6 +186,7 @@ impl DataTab {
             deletes: Vec::new(),
             insert_rows: Default::default(),
             _page_subs: page_subs,
+            preview: super::clob_preview::PreviewState::new(),
         }
     }
 
