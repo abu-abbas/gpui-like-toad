@@ -24,6 +24,23 @@ pub struct ThinClient {
 }
 
 impl ThinClient {
+    /// Run `f` on the connection; on a Read Only profile inside a read
+    /// only transaction that is rolled back afterwards.
+    fn in_read_scope<T>(
+        &mut self,
+        f: impl FnOnce(&oracledb::Connection) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        let conn = self.conn()?;
+        if !self.read_only {
+            return f(conn);
+        }
+        conn.execute("SET TRANSACTION READ ONLY", &[])
+            .map_err(db_err)?;
+        let result = f(conn);
+        let rollback = conn.rollback().map_err(db_err);
+        result.and_then(|rows| rollback.map(|()| rows))
+    }
+
     pub fn new() -> Self {
         ThinClient {
             conn: None,
@@ -315,11 +332,40 @@ fn read_lob_bytes(
 /// Bytes asked of the server per LOB read.
 const READ_CHUNK: usize = 1024 * 1024;
 
+/// Rows asked of the server per round trip. A result of LOB columns has no
+/// row prefetch, so every batch is a trip of its own (about 0.3-0.7 s on a
+/// VPN); fewer, larger batches matter more than the memory of a few
+/// hundred rows. Half the row cap, so the cap plus the one extra row that
+/// reveals "more rows exist" is two batches, never three.
+fn array_size_for(max_rows: usize) -> u32 {
+    (max_rows / 2 + 1).clamp(2, MAX_FETCH_ARRAY_SIZE) as u32
+}
+
+/// Upper bound of [`array_size_for`]. Rows are converted (and byte-limited)
+/// only after a batch arrived, so this also bounds the transient memory.
+const MAX_FETCH_ARRAY_SIZE: usize = 500;
+
+/// How one fetch treats CLOB previews and how it is named in `timing.log`.
+#[derive(Clone, Copy)]
+struct FetchPlan {
+    /// CLOB cells whose start is read with the cursor (one round trip each).
+    max_previews: usize,
+    label: &'static str,
+}
+
+impl FetchPlan {
+    const DEFAULT: FetchPlan = FetchPlan {
+        max_previews: MAX_LOB_PREVIEWS,
+        label: "fetch",
+    };
+}
+
 fn fetch_rows(
     conn: &oracledb::Connection,
     sql: &str,
     binds: &[String],
     limits: FetchLimits,
+    plan: FetchPlan,
 ) -> Result<QueryResult, DbError> {
     let sql = clean_statement(sql);
     let started = Instant::now();
@@ -333,6 +379,7 @@ fn fetch_rows(
         .statement(sql)
         .map_err(db_err)?
         .fetch_lobs()
+        .fetch_array_size(array_size_for(limits.max_rows))
         .build()
         .map_err(db_err)?
         .query(&params)
@@ -352,7 +399,7 @@ fn fetch_rows(
         .collect();
     let db_types: Vec<&oracledb::DbType> = cursor.columns().iter().map(|m| m.db_type()).collect();
     let t_executed = started.elapsed();
-    let mut previews_left = MAX_LOB_PREVIEWS;
+    let mut previews_left = plan.max_previews;
     let mut timing = FetchTiming::default();
     let mut cursor = cursor;
     loop {
@@ -406,9 +453,10 @@ fn fetch_rows(
             })
             .count();
         write_timing_line(&format!(
-            "fetch total_ms={} execute_ms={} next_row_ms={} cells_ms={} lob_cells_ms={} \
+            "{} total_ms={} execute_ms={} next_row_ms={} cells_ms={} lob_cells_ms={} \
              lob_read_ms={} rows={} columns={} lob_columns={} lob_cells={} lob_read_calls={} \
-             lob_size_max_ms={} lob_read_max_ms={} fetch_array_size=100 ping_ms={}",
+             lob_size_max_ms={} lob_read_max_ms={} fetch_array_size={} ping_ms={}",
+            plan.label,
             started.elapsed().as_millis(),
             t_executed.as_millis(),
             timing.next_row.as_millis(),
@@ -422,10 +470,184 @@ fn fetch_rows(
             timing.lob_read_calls,
             timing.lob_size_calls_ms_max,
             timing.lob_read_ms_max,
+            array_size_for(limits.max_rows),
             ping_ms.map_or_else(|| "-".to_string(), |m| m.to_string()),
         ));
     }
     Ok(collector.finish(columns))
+}
+
+/// Characters of a CLOB the data tab shows before "Load full value":
+/// [`PREVIEW_PIECES`] SQL-side substrings of [`PREVIEW_PIECE_CHARS`] each
+/// (a SQL string result is at most 4000 bytes, and a character takes up to
+/// 4).
+const PREVIEW_PIECE_CHARS: usize = 1000;
+const PREVIEW_PIECES: usize = 2;
+
+/// ROWIDs per preview query (an `IN` list holds at most 1000 entries).
+const PREVIEW_ROWIDS_PER_QUERY: usize = 400;
+
+/// A CLOB cell the cursor left without a preview: clipped, empty, counted
+/// in characters.
+fn is_unread_clob(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Clipped(c)
+            if c.unit == ora_core::LenUnit::Chars
+                && matches!(&c.preview, Value::Text(t) if t.is_empty())
+    )
+}
+
+/// `SELECT ROWIDTOCHAR(ROWID), <pieces of each column> FROM owner.table
+/// WHERE ROWID IN (...)`: the starts of many CLOB cells in one round trip,
+/// instead of one `LOB.read` trip per cell.
+fn preview_sql(
+    dialect: &dyn ora_core::Dialect,
+    owner: &str,
+    table: &str,
+    columns: &[&str],
+    rowids: usize,
+) -> String {
+    let mut select = String::from("ROWIDTOCHAR(ROWID)");
+    for column in columns {
+        let q = dialect.quote_ident(column);
+        for piece in 0..PREVIEW_PIECES {
+            select.push_str(&format!(
+                ", DBMS_LOB.SUBSTR({q}, {PREVIEW_PIECE_CHARS}, {})",
+                piece * PREVIEW_PIECE_CHARS + 1
+            ));
+        }
+    }
+    let ids: Vec<String> = (1..=rowids).map(|i| format!("CHARTOROWID(:{i})")).collect();
+    format!(
+        "SELECT {select} FROM {} WHERE ROWID IN ({})",
+        dialect.table_ref(owner, table),
+        ids.join(", ")
+    )
+}
+
+/// Put the previews read by [`preview_sql`] into the clipped cells of
+/// `result`. `rows` are the preview query's rows: ROWID text, then
+/// [`PREVIEW_PIECES`] pieces per column in `columns` order. Cells whose
+/// start would push the result over `max_bytes` stay empty.
+fn merge_previews(
+    result: &mut QueryResult,
+    rowid_ix: usize,
+    columns: &[usize],
+    rows: Vec<Vec<Value>>,
+    max_bytes: usize,
+) {
+    let mut found: HashMap<String, Vec<Vec<Value>>> = HashMap::new();
+    for mut row in rows {
+        if row.is_empty() {
+            continue;
+        }
+        if let Value::Text(id) = row.remove(0) {
+            found.insert(id, vec![row]);
+        }
+    }
+    let mut used = result.heap_bytes();
+    for row in &mut result.rows {
+        let Some(Value::Text(id)) = row.get(rowid_ix) else {
+            continue;
+        };
+        let Some(pieces) = found.get(id).and_then(|v| v.first()) else {
+            continue;
+        };
+        for (n, &col) in columns.iter().enumerate() {
+            let Value::Clipped(clipped) = &row[col] else {
+                continue;
+            };
+            if !is_unread_clob(&row[col]) {
+                continue;
+            }
+            let mut text = String::new();
+            for piece in &pieces[n * PREVIEW_PIECES..(n + 1) * PREVIEW_PIECES] {
+                if let Value::Text(t) = piece {
+                    text.push_str(t);
+                }
+            }
+            if text.is_empty() || used + text.len() > max_bytes {
+                continue;
+            }
+            used += text.len();
+            let full_len = clipped.full_len;
+            let unit = clipped.unit;
+            row[col] = if text.encode_utf16().count() as u64 >= full_len {
+                Value::Text(text)
+            } else {
+                Value::Clipped(Box::new(ora_core::ClippedValue {
+                    preview: Value::Text(text),
+                    full_len,
+                    unit,
+                }))
+            };
+        }
+    }
+}
+
+/// Fill in the CLOB previews a data tab fetch left out, with one query per
+/// [`PREVIEW_ROWIDS_PER_QUERY`] rows (not one trip per cell). Best effort:
+/// when it fails the cells simply keep showing their length.
+fn fill_previews(
+    conn: &oracledb::Connection,
+    dialect: &dyn ora_core::Dialect,
+    owner: &str,
+    table: &str,
+    result: &mut QueryResult,
+    limits: FetchLimits,
+) {
+    let Some(rowid_ix) = result
+        .columns
+        .iter()
+        .position(|c| c.name == ora_core::ROWID_COLUMN)
+    else {
+        return;
+    };
+    let columns: Vec<usize> = (0..result.columns.len())
+        .filter(|&ix| {
+            ix != rowid_ix
+                && result
+                    .rows
+                    .iter()
+                    .any(|r| r.get(ix).is_some_and(is_unread_clob))
+        })
+        .collect();
+    if columns.is_empty() {
+        return;
+    }
+    let names: Vec<&str> = columns
+        .iter()
+        .map(|&ix| result.columns[ix].name.as_str())
+        .collect();
+    let ids: Vec<String> = result
+        .rows
+        .iter()
+        .filter(|r| columns.iter().any(|&ix| is_unread_clob(&r[ix])))
+        .filter_map(|r| match r.get(rowid_ix) {
+            Some(Value::Text(id)) => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut fetched: Vec<Vec<Value>> = Vec::new();
+    for chunk in ids.chunks(PREVIEW_ROWIDS_PER_QUERY) {
+        let sql = preview_sql(dialect, owner, table, &names, chunk.len());
+        let plan = FetchPlan {
+            max_previews: 0,
+            label: "preview-fetch",
+        };
+        match fetch_rows(
+            conn,
+            &sql,
+            chunk,
+            FetchLimits::unlimited_bytes(chunk.len()),
+            plan,
+        ) {
+            Ok(part) => fetched.extend(part.rows),
+            Err(_) => return,
+        }
+    }
+    merge_previews(result, rowid_ix, &columns, fetched, limits.max_result_bytes);
 }
 
 impl DbClient for ThinClient {
@@ -496,15 +718,34 @@ impl DbClient for ThinClient {
         binds: &[String],
         limits: FetchLimits,
     ) -> Result<QueryResult, DbError> {
-        let conn = self.conn()?;
-        if !self.read_only {
-            return fetch_rows(conn, sql, binds, limits);
-        }
-        conn.execute("SET TRANSACTION READ ONLY", &[])
-            .map_err(db_err)?;
-        let result = fetch_rows(conn, sql, binds, limits);
-        let rollback = conn.rollback().map_err(db_err);
-        result.and_then(|rows| rollback.map(|()| rows))
+        self.in_read_scope(|conn| fetch_rows(conn, sql, binds, limits, FetchPlan::DEFAULT))
+    }
+
+    /// The data tab's page. CLOB cells are not read one by one while the
+    /// cursor runs (a trip each, painfully slow over a VPN): the page comes
+    /// back with their lengths and [`fill_previews`] then reads the starts
+    /// of all of them in a few queries by ROWID.
+    fn query_table(
+        &mut self,
+        owner: &str,
+        table: &str,
+        filter: &ora_core::TableFilter,
+        page: ora_core::TablePage,
+    ) -> Result<QueryResult, DbError> {
+        let dialect = self.dialect();
+        let query = ora_core::filter::select_sql(dialect, owner, table, filter, page);
+        let limits = FetchLimits::rows(page.limit);
+        let plan = FetchPlan {
+            max_previews: if page.rowid { 0 } else { MAX_LOB_PREVIEWS },
+            label: "fetch",
+        };
+        self.in_read_scope(|conn| {
+            let mut result = fetch_rows(conn, &query.sql, &query.binds, limits, plan)?;
+            if page.rowid {
+                fill_previews(conn, dialect, owner, table, &mut result, limits);
+            }
+            Ok(result)
+        })
     }
 
     fn execute(&mut self, sql: &str) -> Result<u64, DbError> {
@@ -858,6 +1099,81 @@ fn number_to_i64(n: oracledb::OracleNumber) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn clob(full_len: u64, preview: &str) -> Value {
+        Value::Clipped(Box::new(ora_core::ClippedValue {
+            preview: Value::Text(preview.to_string()),
+            full_len,
+            unit: ora_core::LenUnit::Chars,
+        }))
+    }
+
+    fn page_result(rows: Vec<Vec<Value>>) -> QueryResult {
+        let col = |name: &str| ColumnInfo {
+            name: name.to_string(),
+            data_type: "X".to_string(),
+        };
+        QueryResult {
+            columns: vec![col(ora_core::ROWID_COLUMN), col("ID"), col("BODY")],
+            rows,
+            truncated: false,
+            elapsed: Duration::ZERO,
+            fetch_time: None,
+            byte_limited: false,
+        }
+    }
+
+    fn text(s: &str) -> Value {
+        Value::Text(s.to_string())
+    }
+
+    #[test]
+    fn array_size_is_half_the_row_cap_and_bounded() {
+        assert_eq!(array_size_for(1000), 500);
+        assert_eq!(array_size_for(100), 51);
+        assert_eq!(array_size_for(1), 2);
+        assert_eq!(array_size_for(1_000_000), 500);
+    }
+
+    #[test]
+    fn preview_sql_reads_pieces_of_every_clob_column_by_rowid() {
+        let sql = preview_sql(&ora_core::dialect::OracleDialect, "HR", "DOC", &["BODY"], 2);
+        assert_eq!(
+            sql,
+            "SELECT ROWIDTOCHAR(ROWID), DBMS_LOB.SUBSTR(\"BODY\", 1000, 1), \
+             DBMS_LOB.SUBSTR(\"BODY\", 1000, 1001) FROM \"HR\".\"DOC\" \
+             WHERE ROWID IN (CHARTOROWID(:1), CHARTOROWID(:2))"
+        );
+    }
+
+    #[test]
+    fn merged_previews_keep_clipped_semantics() {
+        let mut result = page_result(vec![
+            vec![text("R1"), Value::Integer(1), clob(5, "")],
+            vec![text("R2"), Value::Integer(2), clob(5000, "")],
+            vec![text("R3"), Value::Integer(3), clob(7, "")],
+        ]);
+        let rows = vec![
+            vec![text("R2"), text("abc"), text("def")],
+            vec![text("R1"), text("hello"), Value::Null],
+        ];
+        merge_previews(&mut result, 0, &[2], rows, usize::MAX);
+        // Whole value fitted: a plain text cell.
+        assert_eq!(result.rows[0][2], text("hello"));
+        // Longer than the preview: still clipped, full length kept.
+        assert_eq!(result.rows[1][2], clob(5000, "abcdef"));
+        // Row the preview query did not return: untouched.
+        assert_eq!(result.rows[2][2], clob(7, ""));
+    }
+
+    #[test]
+    fn merged_previews_respect_the_result_byte_budget() {
+        let mut result = page_result(vec![vec![text("R1"), Value::Integer(1), clob(9, "")]]);
+        let rows = vec![vec![text("R1"), text("123456789"), Value::Null]];
+        let used = result.heap_bytes();
+        merge_previews(&mut result, 0, &[2], rows, used + 3);
+        assert_eq!(result.rows[0][2], clob(9, ""));
+    }
 
     #[test]
     fn thin_client_starts_disconnected() {
