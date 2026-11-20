@@ -796,7 +796,6 @@ impl DbClient for ThinClient {
                         &[&owner_param, &name_param],
                     )
                     .map_err(db_err)?
-                    .into_iter()
                     .next()
                     .and_then(|row| row.ok())
                     .and_then(|row| row.get::<Option<String>>(0).ok().flatten())
