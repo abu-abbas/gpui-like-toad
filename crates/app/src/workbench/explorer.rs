@@ -1,3 +1,6 @@
+use ora_core::ddl;
+
+use super::object_ops::ObjectAction;
 use super::*;
 
 pub(super) const EXPLORER_CONTROL_HEIGHT: f32 = 30.;
@@ -148,6 +151,7 @@ impl Workbench {
             let reloading =
                 self.conn.busy && matches!(self.conn.pending_op, Some(PendingOp::ListObjects));
             let theme = theme.clone();
+            let caps = self.active_kind().capabilities();
             let cover = reloading.then(|| loading_overlay(&theme));
             div()
                 .relative()
@@ -163,7 +167,7 @@ impl Workbench {
                                     let object = visible[ix].clone();
                                     let is_selected =
                                         selected.as_deref() == Some(object.name.as_str());
-                                    render_object_row(ix, object, is_selected, &theme, cx)
+                                    render_object_row(ix, object, is_selected, caps, &theme, cx)
                                 })
                                 .collect::<Vec<_>>()
                         }),
@@ -212,6 +216,21 @@ impl Workbench {
                             .min_w(px(0.))
                             .child(category_button),
                     )
+                    .when(
+                        current_category == ObjectCategory::Tables && self.conn.session.is_some(),
+                        |row| {
+                            row.child(
+                                control("explorer-new-table", theme)
+                                    .icon(icon(IconName::Plus, 15., theme.muted_foreground))
+                                    .size(px(EXPLORER_CONTROL_HEIGHT))
+                                    .flex_none()
+                                    .tooltip("New Table")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_new_table(window, cx)
+                                    })),
+                            )
+                        },
+                    )
                     .child(
                         control("explorer-quick-open", theme)
                             .icon(icon(IconName::Search, 15., theme.muted_foreground))
@@ -234,6 +253,7 @@ fn render_object_row(
     ix: usize,
     object: ObjectRef,
     selected: bool,
+    caps: ora_core::Capabilities,
     theme: &gpui_kit::component::Theme,
     cx: &mut Context<Workbench>,
 ) -> impl IntoElement {
@@ -276,14 +296,20 @@ fn render_object_row(
     let view = cx.entity();
     row.child(icon(icon_name, 14., theme.muted_foreground))
         .child(div().flex_1().truncate().child(object.name.clone()))
-        .context_menu(move |menu, _, _| object_menu(menu, &view, &object))
+        .context_menu(move |menu, _, _| object_menu(menu, &view, &object, caps))
 }
 
 /// The right-click menu for an explorer object.
-fn object_menu(menu: PopupMenu, view: &Entity<Workbench>, object: &ObjectRef) -> PopupMenu {
+fn object_menu(
+    menu: PopupMenu,
+    view: &Entity<Workbench>,
+    object: &ObjectRef,
+    caps: ora_core::Capabilities,
+) -> PopupMenu {
     let has_data = schema::has_data(&object.kind);
     let is_table = object.kind == ObjectKind::Table;
     let is_mview = object.kind == ObjectKind::MaterializedView;
+    let (compile_normal, compile_debug) = ddl::compile_support(&object.kind);
     let item =
         |label: &str,
          icon_name: IconName,
@@ -353,6 +379,106 @@ fn object_menu(menu: PopupMenu, view: &Entity<Workbench>, object: &ObjectRef) ->
             is_table,
             |this, o, _, cx| this.import_table(o, cx),
         ))
+        .when(is_table, |menu| {
+            menu.separator()
+                .item(item(
+                    "Rename Table…",
+                    IconName::Pencil,
+                    true,
+                    |this, o, w, cx| this.object_action(o, ObjectAction::Rename, w, cx),
+                ))
+                .item(item(
+                    "Duplicate Table…",
+                    IconName::Copy,
+                    true,
+                    |this, o, w, cx| this.object_action(o, ObjectAction::Duplicate, w, cx),
+                ))
+                .item(item(
+                    "Empty Table…",
+                    IconName::Eraser,
+                    true,
+                    |this, o, w, cx| this.object_action(o, ObjectAction::Empty, w, cx),
+                ))
+                .when(caps.truncate, |menu| {
+                    menu.item(item(
+                        "Truncate Table…",
+                        IconName::Eraser,
+                        true,
+                        |this, o, w, cx| this.object_action(o, ObjectAction::Truncate, w, cx),
+                    ))
+                })
+                .item(item(
+                    "Delete Table…",
+                    IconName::Trash,
+                    true,
+                    |this, o, w, cx| this.object_action(o, ObjectAction::Drop, w, cx),
+                ))
+        })
+        .when(caps.programs && compile_normal, |menu| {
+            menu.separator()
+                .item(item(
+                    "Maintain: Compile",
+                    IconName::Hammer,
+                    true,
+                    |this, o, w, cx| {
+                        this.object_action(o, ObjectAction::Compile { debug: false }, w, cx)
+                    },
+                ))
+                .when(compile_debug, |menu| {
+                    menu.item(item(
+                        "Maintain: Compile for Debug",
+                        IconName::Bug,
+                        true,
+                        |this, o, w, cx| {
+                            this.object_action(o, ObjectAction::Compile { debug: true }, w, cx)
+                        },
+                    ))
+                })
+        })
+        .when(
+            caps.programs && object.kind == ObjectKind::Trigger,
+            |menu| {
+                menu.separator()
+                    .item(item(
+                        "Enable Trigger",
+                        IconName::Zap,
+                        true,
+                        |this, o, w, cx| {
+                            this.object_action(o, ObjectAction::Trigger { enable: true }, w, cx)
+                        },
+                    ))
+                    .item(item(
+                        "Disable Trigger",
+                        IconName::Ban,
+                        true,
+                        |this, o, w, cx| {
+                            this.object_action(o, ObjectAction::Trigger { enable: false }, w, cx)
+                        },
+                    ))
+            },
+        )
+        .when(
+            caps.programs && object.kind == ObjectKind::Function,
+            |menu| {
+                menu.item(item(
+                    "Execute Function…",
+                    IconName::Play,
+                    true,
+                    |this, o, w, cx| this.object_action(o, ObjectAction::Execute, w, cx),
+                ))
+            },
+        )
+        .when(
+            caps.sequences && object.kind == ObjectKind::Sequence,
+            |menu| {
+                menu.separator().item(item(
+                    "Reset Sequence…",
+                    IconName::RotateCcw,
+                    true,
+                    |this, o, w, cx| this.object_action(o, ObjectAction::ResetSequence, w, cx),
+                ))
+            },
+        )
 }
 
 impl Workbench {

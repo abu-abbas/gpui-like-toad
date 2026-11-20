@@ -349,6 +349,13 @@ impl Workbench {
                 (&pending, &resp),
                 (Some(PendingOp::Run), Ok(Response::Executed(_)))
                     | (Some(PendingOp::ImportCsv { .. }), Ok(Response::Imported(_)))
+                    | (
+                        Some(PendingOp::ObjectOp {
+                            uncommitted: true,
+                            ..
+                        }),
+                        Ok(Response::ObjectOp(_))
+                    )
             ) {
                 conn.uncommitted = true;
             }
@@ -402,6 +409,13 @@ impl Workbench {
             (&pending, &resp),
             (Some(PendingOp::Run), Response::Executed(_))
                 | (Some(PendingOp::ImportCsv { .. }), Response::Imported(_))
+                | (
+                    Some(PendingOp::ObjectOp {
+                        uncommitted: true,
+                        ..
+                    }),
+                    Response::ObjectOp(_)
+                )
         ) {
             conn.uncommitted = true;
         }
@@ -462,6 +476,13 @@ impl Workbench {
             (Some(PendingOp::RefreshMaterializedView { owner, name }), Response::Executed(_)) => {
                 self.on_materialized_view_refreshed(cid, owner, name, cx)
             }
+            (Some(PendingOp::ObjectOp { reload, .. }), Response::ObjectOp(lines)) => {
+                self.on_object_op_done(cid, lines, reload, cx)
+            }
+            (
+                Some(PendingOp::RoutineSignature(object)),
+                Response::RoutineSignature(args, returns),
+            ) => self.on_routine_signature(cid, object, args, returns, window, cx),
             (Some(PendingOp::ImportCsv { owner, name }), Response::Imported(rows)) => {
                 self.on_csv_imported(cid, owner, name, rows)
             }

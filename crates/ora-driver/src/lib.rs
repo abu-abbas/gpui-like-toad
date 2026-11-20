@@ -936,6 +936,46 @@ impl DbClient for ThinClient {
         Ok(indexes)
     }
 
+    fn routine_signature(
+        &mut self,
+        owner: &str,
+        name: &str,
+    ) -> Result<(Vec<ora_core::ddl::RoutineArg>, String), DbError> {
+        let conn = self.conn()?;
+        let owner_upper = owner.trim().to_ascii_uppercase();
+        let owner_param: &str = &owner_upper;
+        let name_param: &str = name;
+        // Position 0 is the return value; data_level 0 skips the fields of
+        // record parameters.
+        let cursor = conn
+            .query(
+                "SELECT argument_name, data_type, in_out, position \
+                 FROM all_arguments \
+                 WHERE owner = :1 AND object_name = :2 AND package_name IS NULL \
+                   AND data_level = 0 AND data_type IS NOT NULL \
+                 ORDER BY position",
+                &[&owner_param, &name_param],
+            )
+            .map_err(db_err)?;
+        let mut args = Vec::new();
+        let mut returns = String::new();
+        for row in cursor {
+            let row = row.map_err(db_err)?;
+            let arg_name: Option<String> = row.get(0).map_err(db_err)?;
+            let data_type: Option<String> = row.get(1).map_err(db_err)?;
+            let in_out: Option<String> = row.get(2).map_err(db_err)?;
+            match arg_name {
+                None => returns = data_type.unwrap_or_default(),
+                Some(arg_name) => args.push(ora_core::ddl::RoutineArg {
+                    name: arg_name,
+                    data_type: data_type.unwrap_or_default(),
+                    direction: in_out.unwrap_or_else(|| "IN".to_string()),
+                }),
+            }
+        }
+        Ok((args, returns))
+    }
+
     fn explain_plan(&mut self, sql: &str) -> Result<Vec<String>, DbError> {
         let conn = self.conn()?;
         let sql = clean_statement(sql);

@@ -348,3 +348,83 @@ fn bundled_sqlite_is_patched() {
         rusqlite::version()
     );
 }
+
+#[test]
+fn table_operations_create_copy_rename_empty_and_drop() {
+    use ora_core::ddl::{self, CopyMode, NewColumn, NewTable, ObjectOp, TableKind};
+    let db = TempDb::new("ddl");
+    let mut client = db.client();
+    let d = client.dialect();
+    let table = NewTable {
+        owner: "main".into(),
+        name: "people".into(),
+        kind: TableKind::Normal,
+        columns: vec![
+            NewColumn {
+                name: "id".into(),
+                data_type: "INTEGER".into(),
+                not_null: false,
+                primary_key: true,
+            },
+            NewColumn {
+                name: "name".into(),
+                data_type: "TEXT".into(),
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        ..NewTable::default()
+    };
+    let run = |client: &mut SqliteClient, sql: String| {
+        ddl::run(
+            client,
+            &ObjectOp::Statements {
+                sql: vec![sql],
+                summary: "ok".into(),
+            },
+        )
+        .unwrap()
+    };
+    run(&mut client, ddl::create_table_sql(d, &table).unwrap());
+    client
+        .execute("INSERT INTO \"people\" (id, name) VALUES (1, 'a'), (2, 'b')")
+        .unwrap();
+    run(
+        &mut client,
+        ddl::duplicate_table_sql(d, "main", "people", "people2", CopyMode::StructureAndData)
+            .unwrap(),
+    );
+    run(
+        &mut client,
+        ddl::duplicate_table_sql(d, "main", "people", "shape", CopyMode::StructureOnly).unwrap(),
+    );
+    let count = |client: &mut SqliteClient, t: &str| {
+        client
+            .query(
+                &format!("SELECT COUNT(*) FROM \"{t}\""),
+                FetchLimits::rows(1),
+            )
+            .unwrap()
+            .rows[0][0]
+            .display()
+    };
+    assert_eq!(count(&mut client, "people2"), "2");
+    assert_eq!(count(&mut client, "shape"), "0");
+    run(
+        &mut client,
+        ddl::rename_table_sql(d, "main", "people2", "renamed").unwrap(),
+    );
+    assert_eq!(count(&mut client, "renamed"), "2");
+    run(&mut client, ddl::empty_table_sql(d, "main", "renamed"));
+    assert_eq!(count(&mut client, "renamed"), "0");
+    run(&mut client, ddl::drop_table_sql(d, "main", "renamed"));
+    assert!(client
+        .query("SELECT * FROM \"renamed\"", FetchLimits::rows(1))
+        .is_err());
+    // A hostile name stays one identifier.
+    run(
+        &mut client,
+        ddl::rename_table_sql(d, "main", "shape", "x\"; DROP TABLE people; --").unwrap(),
+    );
+    assert_eq!(count(&mut client, "people"), "2");
+}
