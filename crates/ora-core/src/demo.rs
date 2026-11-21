@@ -961,7 +961,7 @@ mod tests {
     fn demo_list_objects_and_describe() {
         let mut client = connected();
         let objects = client.list_objects("hr").unwrap();
-        assert_eq!(objects.len(), 15);
+        assert_eq!(objects.len(), 17);
         assert!(objects.iter().all(|o| o.owner == "HR"));
         // Every group the schema tree shows is represented.
         for kind in [
