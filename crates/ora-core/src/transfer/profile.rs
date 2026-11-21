@@ -32,6 +32,18 @@ fn options_json(o: &TransferOptions) -> Json {
     Json::Obj(vec![
         ("create_tables".into(), Json::Bool(o.create_tables)),
         ("include_indexes".into(), Json::Bool(o.include_indexes)),
+        (
+            "include_primary_keys".into(),
+            Json::Bool(o.include_primary_keys),
+        ),
+        ("include_uniques".into(), Json::Bool(o.include_uniques)),
+        ("include_checks".into(), Json::Bool(o.include_checks)),
+        (
+            "include_foreign_keys".into(),
+            Json::Bool(o.include_foreign_keys),
+        ),
+        ("include_defaults".into(), Json::Bool(o.include_defaults)),
+        ("lock_source".into(), Json::Bool(o.lock_source)),
         ("create_records".into(), Json::Bool(o.create_records)),
         ("use_transaction".into(), Json::Bool(o.use_transaction)),
         ("complete_inserts".into(), Json::Bool(o.complete_inserts)),
@@ -114,6 +126,12 @@ impl TransferProfile {
         let options = TransferOptions {
             create_tables: flag("create_tables", d.create_tables),
             include_indexes: flag("include_indexes", d.include_indexes),
+            include_primary_keys: flag("include_primary_keys", d.include_primary_keys),
+            include_uniques: flag("include_uniques", d.include_uniques),
+            include_checks: flag("include_checks", d.include_checks),
+            include_foreign_keys: flag("include_foreign_keys", d.include_foreign_keys),
+            include_defaults: flag("include_defaults", d.include_defaults),
+            lock_source: flag("lock_source", d.lock_source),
             create_records: flag("create_records", d.create_records),
             use_transaction: flag("use_transaction", d.use_transaction),
             complete_inserts: flag("complete_inserts", d.complete_inserts),

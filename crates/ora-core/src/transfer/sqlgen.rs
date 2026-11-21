@@ -5,9 +5,9 @@
 
 use crate::ddl::check_data_type;
 use crate::dialect::{DbKind, Dialect};
-use crate::model::{ColumnDef, IndexDef, Value};
+use crate::model::{ColumnDef, ConstraintDef, ConstraintKind, IndexDef, Value};
 
-use super::spec::{Fields, NameCase};
+use super::spec::{Fields, NameCase, TransferOptions};
 
 /// Name of the extra first column holding the row key (keyset paging).
 pub const KEY_COLUMN: &str = "__KEY__";
@@ -20,6 +20,8 @@ pub struct ColumnPlan {
     /// Type used for the target column (and to render its literals).
     pub target_type: String,
     pub nullable: bool,
+    /// DEFAULT expression to create the column with, when it is safe to.
+    pub default: Option<String>,
 }
 
 pub fn convert_name(name: &str, case: Option<NameCase>) -> String {
@@ -95,6 +97,7 @@ pub fn plan_columns(
         target: convert_name(target_name, case),
         target_type: map_type(source, target, &col.data_type),
         nullable: col.nullable,
+        default: default_for(source, target, col),
     };
     match fields {
         Fields::All => Ok(source_columns.iter().map(|c| make(c, &c.name)).collect()),
@@ -116,11 +119,46 @@ pub fn plan_columns(
     }
 }
 
+/// A column default that can move to the target: same engine only (the
+/// expressions are engine specific), one plain expression, no sequence or
+/// schema-qualified reference.
+fn default_for(source: DbKind, target: DbKind, col: &ColumnDef) -> Option<String> {
+    if source != target {
+        return None;
+    }
+    let text = col.default.as_deref()?.trim();
+    let upper = text.to_ascii_uppercase();
+    if text.is_empty()
+        || text.len() > 200
+        || text.contains('\n')
+        || upper == "NULL"
+        || upper.contains("NEXTVAL")
+        || upper.contains("CURRVAL")
+        || text.contains("\".\"")
+        || super::spec::check_condition(text).is_err()
+    {
+        return None;
+    }
+    Some(text.to_string())
+}
+
 pub fn create_table_sql(
     dialect: &dyn Dialect,
     schema: &str,
     table: &str,
     columns: &[ColumnPlan],
+) -> Result<String, String> {
+    create_table_sql_with(dialect, schema, table, columns, &[])
+}
+
+/// `CREATE TABLE` with extra table-level clauses (constraints) after the
+/// columns.
+pub fn create_table_sql_with(
+    dialect: &dyn Dialect,
+    schema: &str,
+    table: &str,
+    columns: &[ColumnPlan],
+    clauses: &[String],
 ) -> Result<String, String> {
     if columns.is_empty() {
         return Err("The table has no columns.".to_string());
@@ -128,17 +166,157 @@ pub fn create_table_sql(
     let mut lines = Vec::new();
     for c in columns {
         let ty = check_data_type(&c.target_type)?;
+        let default = match (&c.default, dialect.kind()) {
+            (Some(d), DbKind::Sqlite) => format!(" DEFAULT ({d})"),
+            (Some(d), DbKind::Oracle) => format!(" DEFAULT {d}"),
+            (None, _) => String::new(),
+        };
         lines.push(format!(
-            "{} {ty}{}",
+            "{} {ty}{default}{}",
             dialect.quote_ident(&c.target),
             if c.nullable { "" } else { " NOT NULL" }
         ));
     }
+    lines.extend(clauses.iter().cloned());
     Ok(format!(
         "CREATE TABLE {} (\n  {}\n)",
         dialect.table_ref(schema, table),
         lines.join(",\n  ")
     ))
+}
+
+/// What the constraints of one table become on the target.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ConstraintPlan {
+    /// Clauses inside `CREATE TABLE`.
+    pub inline: Vec<String>,
+    /// `ALTER TABLE ... ADD` statements to run once every table is in.
+    pub after: Vec<String>,
+    /// One line per constraint that could not be copied, and why.
+    pub skipped: Vec<String>,
+    /// Column lists of the primary key / unique constraints that are copied
+    /// (their backing index is then not copied again).
+    pub key_columns: Vec<Vec<String>>,
+}
+
+/// Decide which constraints of a source table are created on the target.
+/// Constraints are created unnamed (names are unique per schema in Oracle
+/// and would collide). `resolve` maps a referenced source table to its
+/// target name when that table is part of the transfer with all its
+/// columns under their own names.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_constraints(
+    source: DbKind,
+    dialect: &dyn Dialect,
+    schema: &str,
+    constraints: &[ConstraintDef],
+    plan: &[ColumnPlan],
+    all_fields: bool,
+    options: &TransferOptions,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> ConstraintPlan {
+    let target = dialect.kind();
+    let mut out = ConstraintPlan::default();
+    let cols = |names: &[String]| -> Option<Vec<String>> {
+        names
+            .iter()
+            .map(|c| {
+                plan.iter()
+                    .find(|p| p.source == *c)
+                    .map(|p| dialect.quote_ident(&p.target))
+            })
+            .collect()
+    };
+    let renamed = plan
+        .iter()
+        .any(|p| !p.target.eq_ignore_ascii_case(&p.source));
+    for c in constraints {
+        let label = match c.kind {
+            ConstraintKind::PrimaryKey => "primary key".to_string(),
+            ConstraintKind::Unique => format!("unique constraint {}", c.name),
+            ConstraintKind::ForeignKey => format!("foreign key on ({})", c.columns.join(", ")),
+            ConstraintKind::Check => "check constraint".to_string(),
+        };
+        let enabled = match c.kind {
+            ConstraintKind::PrimaryKey => options.include_primary_keys,
+            ConstraintKind::Unique => options.include_uniques,
+            ConstraintKind::ForeignKey => options.include_foreign_keys,
+            ConstraintKind::Check => options.include_checks,
+        };
+        if !enabled {
+            continue;
+        }
+        let mut skip = |why: &str| out.skipped.push(format!("{label} not copied: {why}."));
+        match c.kind {
+            ConstraintKind::PrimaryKey | ConstraintKind::Unique => {
+                let Some(list) = cols(&c.columns) else {
+                    skip("one of its columns is not transferred");
+                    continue;
+                };
+                let word = if c.kind == ConstraintKind::PrimaryKey {
+                    "PRIMARY KEY"
+                } else {
+                    "UNIQUE"
+                };
+                out.inline.push(format!("{word} ({})", list.join(", ")));
+                out.key_columns.push(c.columns.clone());
+            }
+            ConstraintKind::Check => {
+                if source != target {
+                    skip("check expressions are engine specific");
+                } else if renamed || (c.columns.is_empty() && !all_fields) {
+                    skip("columns were renamed or left out");
+                } else if cols(&c.columns).is_none() {
+                    skip("one of its columns is not transferred");
+                } else if super::spec::check_condition(&c.condition).is_err()
+                    || c.condition.is_empty()
+                {
+                    skip("the condition is not a single plain expression");
+                } else {
+                    out.inline.push(format!("CHECK ({})", c.condition));
+                }
+            }
+            ConstraintKind::ForeignKey => {
+                let Some(list) = cols(&c.columns) else {
+                    skip("one of its columns is not transferred");
+                    continue;
+                };
+                let Some(parent) = resolve(&c.ref_table) else {
+                    skip("the referenced table is not part of this transfer");
+                    continue;
+                };
+                let parent_ref = match target {
+                    DbKind::Oracle => dialect.table_ref(schema, &parent),
+                    DbKind::Sqlite => dialect.quote_ident(&parent),
+                };
+                let ref_cols: Vec<String> = c
+                    .ref_columns
+                    .iter()
+                    .filter(|r| !r.is_empty())
+                    .map(|r| dialect.quote_ident(&convert_name(r, options.convert_case)))
+                    .collect();
+                let ref_part = if ref_cols.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", ref_cols.join(", "))
+                };
+                let rule = match c.on_delete.to_ascii_uppercase().as_str() {
+                    "CASCADE" => " ON DELETE CASCADE",
+                    "SET NULL" => " ON DELETE SET NULL",
+                    _ => "",
+                };
+                let clause = format!(
+                    "FOREIGN KEY ({}) REFERENCES {parent_ref}{ref_part}{rule}",
+                    list.join(", ")
+                );
+                match target {
+                    DbKind::Sqlite => out.inline.push(clause),
+                    DbKind::Oracle => out.after.push(clause),
+                }
+            }
+        }
+    }
+    out
 }
 
 /// `CREATE INDEX` for one source index, or `None` when it cannot be

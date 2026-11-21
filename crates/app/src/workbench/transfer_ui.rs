@@ -909,28 +909,44 @@ impl Workbench {
                 table_on,
             ))
             .child(check(
+                "op-pk",
+                "Include primary key",
+                o.include_primary_keys,
+                |o, v| o.include_primary_keys = v,
+                true,
+                table_on,
+            ))
+            .child(check(
+                "op-default",
+                "Include default values",
+                o.include_defaults,
+                |o, v| o.include_defaults = v,
+                true,
+                table_on,
+            ))
+            .child(check(
                 "op-fk",
                 "Include foreign key constraints",
-                false,
-                |_, _| {},
+                o.include_foreign_keys,
+                |o, v| o.include_foreign_keys = v,
                 true,
-                false,
+                table_on,
             ))
             .child(check(
                 "op-unique",
                 "Include uniques",
-                false,
-                |_, _| {},
+                o.include_uniques,
+                |o, v| o.include_uniques = v,
                 true,
-                false,
+                table_on,
             ))
             .child(check(
                 "op-check",
                 "Include checks",
-                false,
-                |_, _| {},
+                o.include_checks,
+                |o, v| o.include_checks = v,
                 true,
-                false,
+                table_on,
             ))
             .child(check(
                 "op-trigger",
@@ -969,7 +985,7 @@ impl Workbench {
             .child(check("op-complete", "Use complete insert statements", o.complete_inserts, |o, v| o.complete_inserts = v, true, record_on))
             .child(section("Other Options", theme))
             .child(check("op-continue", "Continue on error", o.continue_on_error, |o, v| o.continue_on_error = v, false, true))
-            .child(check("op-lock", "Lock source tables", false, |_, _| {}, false, false))
+            .child(check("op-lock", "Lock source tables", o.lock_source, |o, v| o.lock_source = v, false, true))
             .child(check("op-drop", "Drop target objects before create", o.drop_target, |o, v| o.drop_target = v, false, table_on))
             .child(check("op-empty", "Empty target tables before creating records", o.empty_target, |o, v| o.empty_target = v, false, record_on))
             .child(div().text_size(crate::theme::ui_size(theme, FONT_CAPTION)).text_color(theme.muted_foreground).child("Dropping or emptying target tables asks for confirmation before the run starts."));
@@ -981,7 +997,7 @@ impl Workbench {
                 .gap(px(SPACE_3))
                 .child(div().flex().flex_row().gap(px(SPACE_4)).child(left).child(right))
                 .child(muted(
-                    "Greyed options are not available yet. Unique indexes are copied with Include indexes.".into(),
+                    "Include checks and default values apply between the same kind of database (Oracle to Oracle, SQLite to SQLite). Foreign keys are created only to tables in this transfer. Include triggers is not available yet.".into(),
                     theme,
                 )),
             Button::new("op-ok").small().primary().label("OK").on_click(
@@ -1376,9 +1392,13 @@ impl Workbench {
             ));
             col = col.child(muted(
                 format!(
-                    "Create tables: {}   Indexes: {}   Create records: {}   Transaction: {}   Continue on error: {}   Drop target: {}   Empty target: {}",
+                    "Create tables: {}   Indexes: {}   Keys and constraints: {}   Create records: {}   Transaction: {}   Continue on error: {}   Drop target: {}   Empty target: {}",
                     yes(o.create_tables),
                     yes(o.include_indexes),
+                    yes(o.include_primary_keys
+                        || o.include_uniques
+                        || o.include_checks
+                        || o.include_foreign_keys),
                     yes(o.create_records),
                     yes(o.use_transaction),
                     yes(o.continue_on_error),

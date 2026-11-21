@@ -7,6 +7,7 @@ use ora_core::transfer::{
     run_transfer, Event, FieldMap, Fields, LogLevel, Rows, ScriptIo, TableSpec, TransferOptions,
     TransferSpec, TransferSummary,
 };
+use ora_core::ConstraintKind::{Check, ForeignKey, PrimaryKey, Unique};
 use ora_core::{ConnectionAccess, ConnectionProfile, DbClient, DbKind, FetchLimits, Value};
 
 use super::SqliteClient;
@@ -161,8 +162,9 @@ fn auto_mode_copies_tables_rows_and_indexes() {
     // the transferring session.
     assert_eq!(dst.committed("SELECT count(*) FROM emp"), [["Integer(5)"]]);
     assert_eq!(
-        dst.committed("SELECT name FROM sqlite_master WHERE type = 'index'"),
-        [["Text(\"emp_name\")"]]
+        dst.committed("SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name"),
+        // kv's primary key now comes along as a constraint (its own index).
+        [["Text(\"emp_name\")"], ["Text(\"sqlite_autoindex_kv_1\")"]]
     );
 }
 
@@ -435,4 +437,136 @@ fn structure_only_commits_the_new_tables() {
         dst.committed("SELECT count(*) FROM sqlite_master WHERE type = 'index'"),
         [["Integer(1)"]]
     );
+}
+
+const KEYED: &str = "
+    CREATE TABLE dept (id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT DEFAULT 'none');
+    CREATE TABLE staff (
+        id INTEGER PRIMARY KEY,
+        dept_id INTEGER REFERENCES dept(id) ON DELETE CASCADE,
+        level INTEGER NOT NULL DEFAULT 1 CHECK (level BETWEEN 1 AND 5),
+        mail TEXT,
+        CHECK (length(mail) < 20 OR mail IS NULL)
+    );
+    CREATE INDEX staff_level ON staff(level);
+    INSERT INTO dept VALUES (1,'IT','Tech'), (2,'HR',NULL);
+    INSERT INTO staff VALUES (1,1,2,'a@b.c'), (2,2,3,NULL);
+";
+
+#[test]
+fn constraints_and_defaults_are_read_and_copied() {
+    let mut src = Db::new("keys-src", KEYED);
+    let kinds: Vec<_> = src
+        .client
+        .list_constraints("main", "staff")
+        .unwrap()
+        .into_iter()
+        .map(|c| (c.kind, c.columns, c.ref_table, c.condition))
+        .collect();
+    assert!(kinds.contains(&(PrimaryKey, vec!["id".into()], String::new(), String::new())));
+    assert!(kinds.contains(&(
+        ForeignKey,
+        vec!["dept_id".into()],
+        "dept".into(),
+        String::new()
+    )));
+    assert!(kinds
+        .iter()
+        .any(|k| k.0 == Check && k.3 == "level BETWEEN 1 AND 5"));
+    assert!(kinds
+        .iter()
+        .any(|k| k.0 == Check && k.3.starts_with("length(mail)")));
+
+    let mut dst = Db::new("keys-dst", "");
+    let s = spec(
+        vec![TableSpec::auto("dept"), TableSpec::auto("staff")],
+        TransferOptions::default(),
+    );
+    let (summary, _) = run(&mut src, &mut dst, &s, &AtomicBool::new(false));
+    assert!(summary.ok(), "{summary:?}");
+    assert_eq!(summary.rows(), 4);
+
+    let kinds: Vec<_> = dst
+        .client
+        .list_constraints("main", "staff")
+        .unwrap()
+        .into_iter()
+        .map(|c| c.kind)
+        .collect();
+    assert_eq!(kinds.iter().filter(|k| **k == Check).count(), 2);
+    assert!(kinds.contains(&PrimaryKey) && kinds.contains(&ForeignKey));
+    // UNIQUE on dept.code came along as a constraint, not a second index.
+    let dept = dst.client.list_constraints("main", "dept").unwrap();
+    assert!(dept
+        .iter()
+        .any(|c| c.kind == Unique && c.columns == ["code"]));
+    // Enforced on the target.
+    let e = dst
+        .client
+        .execute("INSERT INTO staff (id, level) VALUES (9, 9)")
+        .unwrap_err();
+    assert!(e.to_string().to_lowercase().contains("check"), "{e}");
+    assert!(dst
+        .client
+        .execute("INSERT INTO dept (id, code) VALUES (7, 'IT')")
+        .is_err());
+    dst.client
+        .execute("INSERT INTO dept (id, code) VALUES (8, 'XX')")
+        .unwrap();
+    assert_eq!(dst.rows("SELECT name FROM dept WHERE id = 8"), [["none"]]);
+    let cols = dst.client.describe_table("main", "staff").unwrap();
+    assert_eq!(cols[2].default.as_deref(), Some("1"));
+    // The plain index is still copied.
+    assert_eq!(
+        dst.rows("SELECT count(*) FROM sqlite_master WHERE name = 'staff_level'"),
+        [["1"]]
+    );
+}
+
+#[test]
+fn constraint_options_off_copy_plain_tables() {
+    let mut src = Db::new("nokeys-src", KEYED);
+    let mut dst = Db::new("nokeys-dst", "");
+    let s = spec(
+        vec![TableSpec::auto("dept"), TableSpec::auto("staff")],
+        TransferOptions {
+            include_primary_keys: false,
+            include_uniques: false,
+            include_checks: false,
+            include_foreign_keys: false,
+            include_defaults: false,
+            ..TransferOptions::default()
+        },
+    );
+    let (summary, _) = run(&mut src, &mut dst, &s, &AtomicBool::new(false));
+    assert!(summary.ok(), "{summary:?}");
+    assert!(dst
+        .client
+        .list_constraints("main", "staff")
+        .unwrap()
+        .is_empty());
+    dst.client
+        .execute("INSERT INTO staff (id, level) VALUES (9, 9)")
+        .unwrap();
+    assert_eq!(
+        dst.client.describe_table("main", "staff").unwrap()[2].default,
+        None
+    );
+}
+
+#[test]
+fn foreign_key_to_a_table_outside_the_transfer_is_skipped_with_a_log() {
+    let mut src = Db::new("fkskip-src", KEYED);
+    let mut dst = Db::new("fkskip-dst", "");
+    let s = spec(vec![TableSpec::auto("staff")], TransferOptions::default());
+    let (summary, events) = run(&mut src, &mut dst, &s, &AtomicBool::new(false));
+    assert!(summary.ok(), "{summary:?}");
+    assert!(events.iter().any(|e| matches!(e,
+        Event::Log(LogLevel::Warn, m) if m.contains("foreign key") && m.contains("not part of this transfer"))));
+    assert!(dst
+        .client
+        .list_constraints("main", "staff")
+        .unwrap()
+        .iter()
+        .all(|c| c.kind != ora_core::ConstraintKind::ForeignKey));
 }

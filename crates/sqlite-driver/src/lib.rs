@@ -277,6 +277,14 @@ impl DbClient for SqliteClient {
         catalog::list_indexes(self.conn()?, owner, table)
     }
 
+    fn list_constraints(
+        &mut self,
+        owner: &str,
+        table: &str,
+    ) -> Result<Vec<ora_core::ConstraintDef>, DbError> {
+        catalog::list_constraints(self.conn()?, owner, table)
+    }
+
     fn explain_plan(&mut self, sql: &str) -> Result<Vec<String>, DbError> {
         Ok(plan::as_text(&plan::nodes(self.conn()?, sql)?))
     }

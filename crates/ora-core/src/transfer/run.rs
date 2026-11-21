@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::client::{DbClient, DbError};
 use crate::dialect::DbKind;
 use crate::fetch::{FetchLimits, EXPORT_MAX_CELL_BYTES};
-use crate::model::{ColumnDef, IndexDef, ObjectKind, QueryResult};
+use crate::model::{ColumnDef, ConstraintDef, IndexDef, ObjectKind, QueryResult};
 
 use super::spec::{Fields, Rows, TransferSpec};
 use super::sqlgen::{self, ColumnPlan, Resume};
@@ -27,6 +27,10 @@ pub trait TransferIo {
     }
     fn describe(&mut self, schema: &str, table: &str) -> Result<Vec<ColumnDef>, DbError>;
     fn indexes(&mut self, schema: &str, table: &str) -> Result<Vec<IndexDef>, DbError>;
+    /// Constraints of a table; a side that cannot tell reports none.
+    fn constraints(&mut self, _schema: &str, _table: &str) -> Result<Vec<ConstraintDef>, DbError> {
+        Ok(Vec::new())
+    }
     fn table_exists(&mut self, schema: &str, table: &str) -> Result<bool, DbError>;
     /// Run a SELECT, at most `max_rows` rows, cells up to the export limit.
     fn read(&mut self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError>;
@@ -50,6 +54,9 @@ impl TransferIo for ClientIo<'_> {
     }
     fn indexes(&mut self, schema: &str, table: &str) -> Result<Vec<IndexDef>, DbError> {
         self.0.list_indexes(schema, table)
+    }
+    fn constraints(&mut self, schema: &str, table: &str) -> Result<Vec<ConstraintDef>, DbError> {
+        self.0.list_constraints(schema, table)
     }
     fn table_exists(&mut self, schema: &str, table: &str) -> Result<bool, DbError> {
         Ok(self
@@ -147,6 +154,11 @@ impl TransferSummary {
 struct Ctx<'a> {
     cancel: &'a AtomicBool,
     emit: &'a mut dyn FnMut(Event),
+    /// Source table -> target name, for the tables that keep all their
+    /// columns (foreign keys may point at those).
+    targets: std::collections::HashMap<String, String>,
+    /// `ALTER TABLE` statements to run once every table is in.
+    deferred: Vec<String>,
 }
 
 impl Ctx<'_> {
@@ -166,7 +178,23 @@ pub fn run_transfer(
     cancel: &AtomicBool,
     emit: &mut dyn FnMut(Event),
 ) -> TransferSummary {
-    let mut cx = Ctx { cancel, emit };
+    let targets = spec
+        .tables
+        .iter()
+        .filter(|t| matches!(t.fields, Fields::All))
+        .map(|t| {
+            (
+                t.source.clone(),
+                sqlgen::convert_name(t.target_name(), spec.options.convert_case),
+            )
+        })
+        .collect();
+    let mut cx = Ctx {
+        cancel,
+        emit,
+        targets,
+        deferred: Vec::new(),
+    };
     let mut summary = TransferSummary::default();
     if let Err(e) = spec.validate() {
         cx.log(LogLevel::Error, e.clone());
@@ -174,6 +202,7 @@ pub fn run_transfer(
         return summary;
     }
     let total = spec.tables.len();
+    let locked = spec.options.lock_source && lock_sources(src, spec, &mut cx);
     for (index, table) in spec.tables.iter().enumerate() {
         if cx.cancelled() {
             summary.cancelled = true;
@@ -204,11 +233,54 @@ pub fn run_transfer(
             break;
         }
     }
+    if !cx.deferred.is_empty() && !cx.cancelled() {
+        for sql in std::mem::take(&mut cx.deferred) {
+            if let Err((_, e)) = dst.execute_many(&[sql]) {
+                cx.log(LogLevel::Warn, format!("foreign key not created: {e}"));
+            }
+        }
+        if let Err(e) = dst.commit() {
+            cx.log(LogLevel::Warn, format!("foreign keys not committed: {e}"));
+        }
+    }
+    if locked {
+        // The locks end with the source's transaction.
+        let _ = src.rollback();
+    }
     if cx.cancelled() {
         summary.cancelled = true;
         cx.log(LogLevel::Warn, "Stopped by the user.");
     }
     summary
+}
+
+/// `LOCK TABLE ... IN SHARE MODE` on every source table (Oracle): others
+/// can read but not change them until the transfer ends. Returns whether
+/// any lock is held.
+fn lock_sources(src: &mut dyn TransferIo, spec: &TransferSpec, cx: &mut Ctx<'_>) -> bool {
+    if src.kind() != DbKind::Oracle {
+        cx.log(
+            LogLevel::Info,
+            "Lock source tables: SQLite locks the file itself while it is written; nothing to lock.",
+        );
+        return false;
+    }
+    let d = src.kind().dialect();
+    let mut any = false;
+    for t in &spec.tables {
+        let sql = format!(
+            "LOCK TABLE {} IN SHARE MODE",
+            d.table_ref(&spec.source_schema, &t.source)
+        );
+        match src.execute_many(&[sql]) {
+            Ok(_) => any = true,
+            Err((_, e)) => cx.log(
+                LogLevel::Warn,
+                format!("{}: source table not locked: {e}", t.source),
+            ),
+        }
+    }
+    any
 }
 
 fn db(e: DbError) -> String {
@@ -259,6 +331,12 @@ fn copy_table(
         return Err("table not found in the source schema".to_string());
     }
     let mut plan = sqlgen::plan_columns(sk, dk, &source_columns, &table.fields, o.convert_case)?;
+    if !o.include_defaults {
+        for p in &mut plan {
+            p.default = None;
+        }
+    }
+    let mut key_columns: Vec<Vec<String>> = Vec::new();
 
     let mut exists = if dst.is_script() {
         !o.create_tables
@@ -292,8 +370,22 @@ fn copy_table(
         if !o.create_tables {
             return Err("the target table does not exist and Create tables is off".to_string());
         }
-        let sql = sqlgen::create_table_sql(dd, &spec.target_schema, target_name, &plan)?;
+        let cplan = plan_table_constraints(src, dk, spec, table, &plan, cx);
+        let sql = sqlgen::create_table_sql_with(
+            dd,
+            &spec.target_schema,
+            target_name,
+            &plan,
+            &cplan.inline,
+        )?;
         dst.execute_many(&[sql]).map_err(|(_, e)| db(e))?;
+        for clause in &cplan.after {
+            cx.deferred.push(format!(
+                "ALTER TABLE {} ADD {clause}",
+                dd.table_ref(&spec.target_schema, target_name)
+            ));
+        }
+        key_columns = cplan.key_columns;
         outcome.created = true;
         cx.log(LogLevel::Info, format!("{target_name}: table created."));
     }
@@ -320,6 +412,10 @@ fn copy_table(
             ),
             Ok(indexes) => {
                 for idx in &indexes {
+                    // Already backed by a copied primary key / unique constraint.
+                    if key_columns.contains(&idx.columns) {
+                        continue;
+                    }
                     let Some(sql) = sqlgen::create_index_sql(
                         dd,
                         &spec.target_schema,
@@ -351,6 +447,47 @@ fn copy_table(
     // rows) must not be left in an open transaction.
     dst.commit().map_err(db)?;
     Ok(())
+}
+
+/// Read the source table's constraints and decide what the new target
+/// table gets. Problems are logged, never fatal.
+fn plan_table_constraints(
+    src: &mut dyn TransferIo,
+    dst_kind: DbKind,
+    spec: &TransferSpec,
+    table: &super::spec::TableSpec,
+    plan: &[ColumnPlan],
+    cx: &mut Ctx<'_>,
+) -> sqlgen::ConstraintPlan {
+    let o = &spec.options;
+    if !(o.include_primary_keys || o.include_uniques || o.include_checks || o.include_foreign_keys)
+    {
+        return Default::default();
+    }
+    let constraints = match src.constraints(&spec.source_schema, &table.source) {
+        Ok(c) => c,
+        Err(e) => {
+            cx.log(
+                LogLevel::Warn,
+                format!("{}: constraints not read: {e}", table.source),
+            );
+            return Default::default();
+        }
+    };
+    let cplan = sqlgen::plan_constraints(
+        src.kind(),
+        dst_kind.dialect(),
+        &spec.target_schema,
+        &constraints,
+        plan,
+        matches!(table.fields, Fields::All),
+        o,
+        &|r| cx.targets.get(r).cloned(),
+    );
+    for line in &cplan.skipped {
+        cx.log(LogLevel::Warn, format!("{}: {line}", table.source));
+    }
+    cplan
 }
 
 /// An existing target keeps its own column types and spelling.

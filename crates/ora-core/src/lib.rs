@@ -37,8 +37,9 @@ pub use filter::{
 };
 pub use model::{
     compose_easy_connect, default_profile_name, parse_easy_connect, ClippedValue, ClobPreview,
-    ColumnDef, ColumnInfo, ConnectionAccess, ConnectionEnvironment, ConnectionProfile, IndexDef,
-    LenUnit, ObjectKind, PlanNode, QueryResult, SchemaObject, Value,
+    ColumnDef, ColumnInfo, ConnectionAccess, ConnectionEnvironment, ConnectionProfile,
+    ConstraintDef, ConstraintKind, IndexDef, LenUnit, ObjectKind, PlanNode, QueryResult,
+    SchemaObject, Value,
 };
 
 /// Default cap for rows fetched into the grid. Queries that hit the cap set

@@ -299,6 +299,18 @@ pub trait DbClient: Send {
         Err(DbError::new("indexes are not supported by this backend"))
     }
 
+    /// Primary key, unique, foreign key and check constraints of one table
+    /// (NOT NULL checks excluded), for Data Transfer.
+    fn list_constraints(
+        &mut self,
+        _owner: &str,
+        _table: &str,
+    ) -> Result<Vec<crate::model::ConstraintDef>, DbError> {
+        Err(DbError::new(
+            "constraints are not supported by this backend",
+        ))
+    }
+
     /// Parameters and return type of a standalone function (empty return
     /// type for a procedure), for Execute Function.
     fn routine_signature(

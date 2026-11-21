@@ -75,6 +75,20 @@ impl TransferIo for WorkerIo {
         }
     }
 
+    fn constraints(
+        &mut self,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<ora_core::ConstraintDef>, DbError> {
+        match self.call(Job::Constraints {
+            owner: schema.to_string(),
+            name: table.to_string(),
+        })? {
+            Response::Constraints(constraints) => Ok(constraints),
+            _ => Err(unexpected()),
+        }
+    }
+
     fn table_exists(&mut self, schema: &str, table: &str) -> Result<bool, DbError> {
         if self.tables.as_ref().is_none_or(|(s, _)| s != schema) {
             let objects = match self.call(Job::ListObjects {

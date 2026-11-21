@@ -972,6 +972,106 @@ impl DbClient for ThinClient {
         Ok(indexes)
     }
 
+    fn list_constraints(
+        &mut self,
+        owner: &str,
+        table: &str,
+    ) -> Result<Vec<ora_core::ConstraintDef>, DbError> {
+        use ora_core::{ConstraintDef, ConstraintKind};
+        let conn = self.conn()?;
+        let owner_upper = owner.trim().to_ascii_uppercase();
+        let table_upper = table.trim().to_ascii_uppercase();
+        let owner_param: &str = &owner_upper;
+        let table_param: &str = &table_upper;
+        // One row per constraint column, in key order; grouped below.
+        let cursor = conn
+            .query(
+                "SELECT c.constraint_name, c.constraint_type, c.search_condition, \
+                        c.r_owner, c.r_constraint_name, c.delete_rule, cc.column_name \
+                 FROM all_constraints c \
+                 LEFT JOIN all_cons_columns cc \
+                   ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name \
+                 WHERE c.owner = :1 AND c.table_name = :2 \
+                   AND c.constraint_type IN ('P', 'U', 'R', 'C') AND c.status = 'ENABLED' \
+                 ORDER BY c.constraint_name, cc.position",
+                &[&owner_param, &table_param],
+            )
+            .map_err(db_err)?;
+        let mut out: Vec<ConstraintDef> = Vec::new();
+        let mut refs: Vec<Option<(String, String)>> = Vec::new();
+        for row in cursor {
+            let row = row.map_err(db_err)?;
+            let name: String = row.get(0).map_err(db_err)?;
+            let kind: String = row.get(1).map_err(db_err)?;
+            let condition: Option<String> = row.get(2).map_err(db_err)?;
+            let r_owner: Option<String> = row.get(3).map_err(db_err)?;
+            let r_name: Option<String> = row.get(4).map_err(db_err)?;
+            let delete_rule: Option<String> = row.get(5).map_err(db_err)?;
+            let column: Option<String> = row.get(6).map_err(db_err)?;
+            if out.last().map(|c| c.name.as_str()) != Some(name.as_str()) {
+                out.push(ConstraintDef {
+                    name,
+                    kind: match kind.as_str() {
+                        "P" => ConstraintKind::PrimaryKey,
+                        "U" => ConstraintKind::Unique,
+                        "R" => ConstraintKind::ForeignKey,
+                        _ => ConstraintKind::Check,
+                    },
+                    columns: Vec::new(),
+                    ref_table: String::new(),
+                    ref_columns: Vec::new(),
+                    on_delete: delete_rule.unwrap_or_default(),
+                    condition: condition.map(|c| c.trim().to_string()).unwrap_or_default(),
+                });
+                refs.push(r_owner.zip(r_name));
+            }
+            if let (Some(c), Some(column)) = (out.last_mut(), column) {
+                c.columns.push(column);
+            }
+        }
+        // NOT NULL is a CHECK in the dictionary; the column flag carries it.
+        let mut keep = Vec::new();
+        for (c, r) in out.into_iter().zip(refs) {
+            if c.kind == ConstraintKind::Check {
+                let upper = c.condition.to_ascii_uppercase();
+                if c.columns.len() == 1
+                    && upper.ends_with("IS NOT NULL")
+                    && !upper.contains(" AND ")
+                    && !upper.contains(" OR ")
+                {
+                    continue;
+                }
+            }
+            keep.push((c, r));
+        }
+        let mut result = Vec::with_capacity(keep.len());
+        for (mut c, r) in keep {
+            if let Some((r_owner, r_name)) = r.filter(|_| c.kind == ConstraintKind::ForeignKey) {
+                let (ro, rn): (&str, &str) = (&r_owner, &r_name);
+                let cursor = conn
+                    .query(
+                        "SELECT table_name, column_name FROM all_cons_columns \
+                         WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
+                        &[&ro, &rn],
+                    )
+                    .map_err(db_err)?;
+                for row in cursor {
+                    let row = row.map_err(db_err)?;
+                    let t: String = row.get(0).map_err(db_err)?;
+                    let col: String = row.get(1).map_err(db_err)?;
+                    c.ref_table = if r_owner.eq_ignore_ascii_case(&owner_upper) {
+                        t
+                    } else {
+                        format!("{r_owner}.{t}")
+                    };
+                    c.ref_columns.push(col);
+                }
+            }
+            result.push(c);
+        }
+        Ok(result)
+    }
+
     fn routine_signature(
         &mut self,
         owner: &str,

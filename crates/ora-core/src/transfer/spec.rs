@@ -29,6 +29,18 @@ pub struct TransferOptions {
     pub create_tables: bool,
     /// Also create the source table's indexes (after the rows are in).
     pub include_indexes: bool,
+    /// Create the primary key constraint.
+    pub include_primary_keys: bool,
+    /// Create UNIQUE constraints.
+    pub include_uniques: bool,
+    /// Create CHECK constraints (same engine only).
+    pub include_checks: bool,
+    /// Create foreign keys (to tables that are part of this transfer).
+    pub include_foreign_keys: bool,
+    /// Keep column DEFAULT expressions (same engine only).
+    pub include_defaults: bool,
+    /// Lock the source tables for the whole transfer (Oracle).
+    pub lock_source: bool,
     /// Copy the rows.
     pub create_records: bool,
     /// One transaction per table: all its rows or none (unless Continue
@@ -52,6 +64,12 @@ impl Default for TransferOptions {
         TransferOptions {
             create_tables: true,
             include_indexes: true,
+            include_primary_keys: true,
+            include_uniques: true,
+            include_checks: true,
+            include_foreign_keys: true,
+            include_defaults: true,
+            lock_source: false,
             create_records: true,
             use_transaction: true,
             complete_inserts: true,
