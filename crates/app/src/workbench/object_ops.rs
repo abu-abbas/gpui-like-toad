@@ -8,6 +8,7 @@
 //! dialogs of a PROD connection ask for the object's name to be typed.
 
 use ora_core::ddl::{self, CopyMode, NewColumn, NewTable, ObjectOp, RoutineArg, TableKind};
+use ora_core::recycle;
 
 use super::*;
 
@@ -20,11 +21,25 @@ pub(super) enum ObjectAction {
     Empty,
     Truncate,
     ResetSequence,
-    Compile { debug: bool },
+    Compile {
+        debug: bool,
+    },
     Execute,
-    Trigger { enable: bool },
-    ConstraintState { enable: bool },
+    Trigger {
+        enable: bool,
+    },
+    ConstraintState {
+        enable: bool,
+    },
     DropConstraint,
+    /// Recycle Bin: `FLASHBACK TABLE ... TO BEFORE DROP`.
+    Flashback,
+    /// Recycle Bin: `PURGE TABLE|INDEX` of one object.
+    PurgeObject,
+    /// Recycle Bin: `PURGE RECYCLEBIN`.
+    PurgeAll,
+    /// Recycle Bin: `PURGE DBA_RECYCLEBIN` (needs SYSDBA).
+    PurgeAllUsers,
 }
 
 impl ObjectAction {
@@ -33,7 +48,14 @@ impl ObjectAction {
     fn destructive(self) -> bool {
         matches!(
             self,
-            Self::Drop | Self::Empty | Self::Truncate | Self::ResetSequence | Self::DropConstraint
+            Self::Drop
+                | Self::Empty
+                | Self::Truncate
+                | Self::ResetSequence
+                | Self::DropConstraint
+                | Self::PurgeObject
+                | Self::PurgeAll
+                | Self::PurgeAllUsers
         )
     }
 
@@ -49,6 +71,10 @@ impl ObjectAction {
             Self::Execute => "cannot execute functions",
             Self::Trigger { .. } => "cannot change triggers",
             Self::ConstraintState { .. } | Self::DropConstraint => "cannot change constraints",
+            Self::Flashback => "cannot flash back tables",
+            Self::PurgeObject | Self::PurgeAll | Self::PurgeAllUsers => {
+                "cannot purge the recycle bin"
+            }
         }
     }
 }
@@ -236,10 +262,19 @@ impl Workbench {
                 cx,
             )),
             ObjectAction::ResetSequence => inputs.push(text_input("Restart at", "1", window, cx)),
+            ObjectAction::Flashback => inputs.push(text_input(
+                "Rename to (optional, if the name is taken again)",
+                "",
+                window,
+                cx,
+            )),
             ObjectAction::Drop
             | ObjectAction::Empty
             | ObjectAction::Truncate
-            | ObjectAction::DropConstraint => {}
+            | ObjectAction::DropConstraint
+            | ObjectAction::PurgeObject
+            | ObjectAction::PurgeAll
+            | ObjectAction::PurgeAllUsers => {}
         }
         for input in &inputs {
             subs.push(
@@ -250,7 +285,15 @@ impl Workbench {
                 }),
             );
         }
-        let confirm = self.prod_confirm(action, &name, window, cx);
+        let mut confirm = self.prod_confirm(action, &name, window, cx);
+        // Emptying every user's recycle bin always asks for the keyword,
+        // not only on PROD.
+        if action == ObjectAction::PurgeAllUsers && confirm.is_none() {
+            confirm = Some((
+                name.clone(),
+                text_input(&format!("Type {name}"), "", window, cx),
+            ));
+        }
         let first = inputs.first().cloned();
         self.object_dialog = Some(ObjectDialog {
             kind: DialogKind::Object {
@@ -266,6 +309,32 @@ impl Workbench {
         });
         self.focus_dialog_input(first, window, cx);
         cx.notify();
+    }
+
+    /// Whole-bin purge from the Recycle Bin menu: there is no object to
+    /// point at, so the dialog gets a stand-in named after the statement.
+    pub(super) fn recycle_bin_action(
+        &mut self,
+        action: ObjectAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(owner) = self.conn.current_schema.clone() else {
+            return;
+        };
+        let name = if action == ObjectAction::PurgeAllUsers {
+            "DBA_RECYCLEBIN"
+        } else {
+            "RECYCLEBIN"
+        };
+        let object = ObjectRef {
+            owner,
+            name: name.to_string(),
+            kind: ObjectKind::RecycleBin,
+            parent: None,
+            detail: None,
+        };
+        self.object_action(object, action, window, cx);
     }
 
     /// Toolbar button: recompile every INVALID object of the schema.
@@ -630,6 +699,61 @@ fn build_object_op(
             false,
             format!("Executing {name}…"),
         ),
+        ObjectAction::Flashback => {
+            let original = object.parent.clone().unwrap_or_else(|| name.clone());
+            let rename = typed(0);
+            let sql = recycle::flashback_table_sql(dialect, owner, name, &rename)?;
+            let restored = if rename.trim().is_empty() {
+                original.clone()
+            } else {
+                rename.trim().to_string()
+            };
+            (
+                statements(
+                    vec![sql],
+                    format!("Restored {owner}.{restored} from the recycle bin."),
+                ),
+                true,
+                false,
+                format!("Restoring {original}…"),
+            )
+        }
+        ObjectAction::PurgeObject => {
+            let info = object
+                .detail
+                .as_deref()
+                .and_then(recycle::RecycleInfo::parse)
+                .ok_or_else(|| "This recycle bin entry cannot be purged.".to_string())?;
+            let original = object.parent.clone().unwrap_or_else(|| name.clone());
+            let sql = recycle::purge_object_sql(dialect, name, &info)?;
+            (
+                statements(
+                    vec![sql],
+                    format!("Purged {} {original} from the recycle bin.", info.kind.to_lowercase()),
+                ),
+                true,
+                false,
+                format!("Purging {original}…"),
+            )
+        }
+        ObjectAction::PurgeAll => (
+            statements(
+                vec![recycle::PURGE_RECYCLEBIN_SQL.to_string()],
+                "Purged the recycle bin.".to_string(),
+            ),
+            true,
+            false,
+            "Purging the recycle bin…".to_string(),
+        ),
+        ObjectAction::PurgeAllUsers => (
+            statements(
+                vec![recycle::PURGE_DBA_RECYCLEBIN_SQL.to_string()],
+                "Purged the DBA recycle bin.".to_string(),
+            ),
+            true,
+            false,
+            "Purging the DBA recycle bin…".to_string(),
+        ),
         ObjectAction::Compile { .. }
         | ObjectAction::Trigger { .. }
         | ObjectAction::ConstraintState { .. } => {
@@ -668,6 +792,20 @@ fn confirm_text(action: ObjectAction, object: &ObjectRef, sqlite: bool) -> Strin
         ObjectAction::Rename => format!("Rename table {target}. Views and code that use the old name stop working."),
         ObjectAction::Duplicate => format!("Copy table {target} into a new table in the same schema."),
         ObjectAction::Execute => format!("Run {target} with these parameter values. Leave a box empty for NULL."),
+        ObjectAction::Flashback => format!(
+            "Restore table {} from the recycle bin as {} (FLASHBACK TABLE … TO BEFORE DROP). Its indexes come back with system names. To avoid a clash with a table that has the same name now, give a new name below.",
+            object.parent.clone().unwrap_or_else(|| object.name.clone()),
+            object.owner,
+        ),
+        ObjectAction::PurgeObject => format!(
+            "Permanently remove {} from the recycle bin. It can no longer be restored with Flashback Table, and this cannot be undone.",
+            object.parent.clone().unwrap_or_else(|| object.name.clone()),
+        ),
+        ObjectAction::PurgeAll => format!(
+            "Permanently empty the recycle bin of {}. Nothing in it can be restored afterwards, and this cannot be undone.",
+            object.owner
+        ),
+        ObjectAction::PurgeAllUsers => "Permanently empty the recycle bin of every user (PURGE DBA_RECYCLEBIN). This needs the SYSDBA privilege, nothing in any bin can be restored afterwards, and this cannot be undone.".to_string(),
         ObjectAction::Compile { .. }
         | ObjectAction::Trigger { .. }
         | ObjectAction::ConstraintState { .. } => String::new(),
@@ -684,7 +822,8 @@ impl Workbench {
             return div().into_any_element();
         };
         let sqlite = self.active_kind() == DbKind::Sqlite;
-        let prod = dialog.confirm.is_some();
+        let prod = dialog.confirm.is_some()
+            && self.conn.access().environment == ConnectionEnvironment::Production;
         let (title, body, ok_label, danger, width) = match &dialog.kind {
             DialogKind::NewTable(form) => (
                 "New Table".to_string(),
@@ -711,6 +850,16 @@ impl Workbench {
                     ObjectAction::Truncate => format!("Truncate {}?", object.name),
                     ObjectAction::ResetSequence => format!("Reset {}", object.name),
                     ObjectAction::Execute => format!("Execute {}", object.name),
+                    ObjectAction::Flashback => format!(
+                        "Flashback {}",
+                        object.parent.as_deref().unwrap_or(&object.name)
+                    ),
+                    ObjectAction::PurgeObject => format!(
+                        "Purge {}?",
+                        object.parent.as_deref().unwrap_or(&object.name)
+                    ),
+                    ObjectAction::PurgeAll => "Purge Recycle Bin?".to_string(),
+                    ObjectAction::PurgeAllUsers => "Purge DBA Recycle Bin?".to_string(),
                     ObjectAction::Compile { .. }
                     | ObjectAction::Trigger { .. }
                     | ObjectAction::ConstraintState { .. } => String::new(),
@@ -725,6 +874,8 @@ impl Workbench {
                         ));
                     } else if *action == ObjectAction::ResetSequence {
                         col = col.child(form_label("Restart at", theme));
+                    } else if *action == ObjectAction::Flashback {
+                        col = col.child(form_label("Rename to (optional)", theme));
                     } else {
                         col = col.child(form_label("Name", theme));
                     }
@@ -762,6 +913,10 @@ impl Workbench {
                     ObjectAction::Execute => ("Execute", false),
                     ObjectAction::Rename => ("Rename", false),
                     ObjectAction::Duplicate => ("Duplicate", false),
+                    ObjectAction::Flashback => ("Flashback", false),
+                    ObjectAction::PurgeObject
+                    | ObjectAction::PurgeAll
+                    | ObjectAction::PurgeAllUsers => ("Purge", true),
                     ObjectAction::Compile { .. }
                     | ObjectAction::Trigger { .. }
                     | ObjectAction::ConstraintState { .. } => ("OK", false),

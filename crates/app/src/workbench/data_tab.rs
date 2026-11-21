@@ -76,6 +76,8 @@ pub(super) struct DataTab {
     pub(super) structure: Entity<TableState<ResultsDelegate>>,
     pub(super) indexes: Entity<TableState<ResultsDelegate>>,
     pub(super) ddl: Entity<EditorState>,
+    /// DDL tab: also show STORAGE/TABLESPACE/segment clauses (Oracle).
+    pub(super) show_storage: bool,
     /// Column names of the table, known after the first fetch.
     pub(super) columns: Vec<String>,
     rows: Vec<FilterRow>,
@@ -168,6 +170,7 @@ impl DataTab {
             structure,
             indexes,
             ddl,
+            show_storage: false,
             columns: Vec::new(),
             rows: Vec::new(),
             join: FilterJoin::And,
@@ -536,11 +539,12 @@ impl Workbench {
         let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
             return;
         };
-        let (owner, name, kind, view) = (
+        let (owner, name, kind, view, show_storage) = (
             data.owner.clone(),
             data.name.clone(),
             data.kind.clone(),
             data.view,
+            data.show_storage,
         );
         match view {
             DataView::Data => self.reload_data(cx),
@@ -554,9 +558,44 @@ impl Workbench {
             }
             DataView::Ddl => {
                 self.conn.status = format!("Loading DDL for {owner}.{name}…");
-                self.spawn_db(Job::Ddl { owner, name, kind }, PendingOp::DataDdl, cx);
+                self.spawn_db(
+                    Job::Ddl {
+                        owner,
+                        name,
+                        kind,
+                        show_storage,
+                    },
+                    PendingOp::DataDdl,
+                    cx,
+                );
             }
         }
+    }
+
+    /// DDL tab "Show storage" toggle: remember the choice and refetch.
+    pub(super) fn set_show_storage(&mut self, show: bool, cx: &mut Context<Self>) {
+        if self.conn.busy {
+            return;
+        }
+        let Some(data) = self.data_mut() else {
+            return;
+        };
+        if data.show_storage == show || data.view != DataView::Ddl {
+            return;
+        }
+        data.show_storage = show;
+        let (owner, name, kind) = (data.owner.clone(), data.name.clone(), data.kind.clone());
+        self.conn.status = format!("Loading DDL for {owner}.{name}…");
+        self.spawn_db(
+            Job::Ddl {
+                owner,
+                name,
+                kind,
+                show_storage: show,
+            },
+            PendingOp::DataDdl,
+            cx,
+        );
     }
 
     /// Fetch the active data tab's table with its applied filter. The

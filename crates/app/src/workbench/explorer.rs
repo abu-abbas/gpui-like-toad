@@ -76,11 +76,19 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let view = cx.entity();
+        let caps = self.active_kind().capabilities();
         let counts: Vec<(ObjectCategory, usize)> = ObjectCategory::ALL
             .iter()
+            .filter(|c| **c != ObjectCategory::RecycleBin || caps.recycle_bin)
             .map(|c| (*c, schema::count_in(&self.conn.objects, *c)))
             .collect();
-        let current_category = self.category;
+        // A connection without a recycle bin (SQLite) falls back to Tables
+        // if the category was left on Recycle Bin by another connection.
+        let current_category = if self.category == ObjectCategory::RecycleBin && !caps.recycle_bin {
+            ObjectCategory::Tables
+        } else {
+            self.category
+        };
         let category_button = control("category-select", theme)
             .w_full()
             .child(
@@ -118,7 +126,7 @@ impl Workbench {
                 menu
             });
 
-        let visible: Vec<ObjectRef> = schema::objects_in(&self.conn.objects, self.category, "")
+        let visible: Vec<ObjectRef> = schema::objects_in(&self.conn.objects, current_category, "")
             .into_iter()
             .map(|o| ObjectRef {
                 owner: o.owner.clone(),
@@ -153,7 +161,6 @@ impl Workbench {
             let reloading =
                 self.conn.busy && matches!(self.conn.pending_op, Some(PendingOp::ListObjects));
             let theme = theme.clone();
-            let caps = self.active_kind().capabilities();
             let cover = reloading.then(|| loading_overlay(&theme));
             div()
                 .relative()
@@ -234,6 +241,31 @@ impl Workbench {
                         },
                     )
                     .when(
+                        current_category == ObjectCategory::RecycleBin
+                            && self.conn.session.is_some(),
+                        |row| {
+                            let view = cx.entity();
+                            row.child(
+                                control("explorer-recycle-refresh", theme)
+                                    .icon(icon(IconName::RefreshCw, 15., theme.muted_foreground))
+                                    .size(px(EXPLORER_CONTROL_HEIGHT))
+                                    .flex_none()
+                                    .tooltip("Refresh Recycle Bin")
+                                    .on_click(cx.listener(|this, _, _, cx| this.load_objects(cx))),
+                            )
+                            .child(
+                                control("explorer-recycle-purge", theme)
+                                    .icon(icon(IconName::Trash, 15., theme.muted_foreground))
+                                    .size(px(EXPLORER_CONTROL_HEIGHT))
+                                    .flex_none()
+                                    .tooltip("Purge…")
+                                    .dropdown_menu(move |menu, _, _| {
+                                        purge_all_items(menu.min_w(px(220.)), &view)
+                                    }),
+                            )
+                        },
+                    )
+                    .when(
                         self.active_kind().capabilities().programs
                             && self.conn.session.is_some()
                             && matches!(
@@ -295,6 +327,7 @@ fn render_object_row(
         ObjectKind::Type => IconName::Braces,
         ObjectKind::DbLink => IconName::Plug,
         ObjectKind::Constraint => IconName::Key,
+        ObjectKind::RecycleBin => IconName::Trash,
         ObjectKind::Other(_) => IconName::FileText,
     };
     let click_object = object.clone();
@@ -321,7 +354,14 @@ fn render_object_row(
     }
     let view = cx.entity();
     row.child(icon(icon_name, 14., theme.muted_foreground))
-        .child(div().truncate().child(object.name.clone()))
+        .child(
+            div()
+                .truncate()
+                .child(match (&object.kind, &object.parent) {
+                    (ObjectKind::RecycleBin, Some(original)) => original.clone(),
+                    _ => object.name.clone(),
+                }),
+        )
         .child(
             div()
                 .flex_1()
@@ -330,12 +370,79 @@ fn render_object_row(
                 .text_color(theme.muted_foreground)
                 .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
                 .children(match (&object.parent, &object.detail) {
+                    _ if object.kind == ObjectKind::RecycleBin => object
+                        .detail
+                        .as_deref()
+                        .and_then(ora_core::recycle::RecycleInfo::parse)
+                        .map(|info| info.summary()),
                     (Some(table), Some(detail)) => Some(format!("{table} · {detail}")),
                     (None, Some(detail)) => Some(detail.clone()),
                     _ => None,
                 }),
         )
         .context_menu(move |menu, _, _| object_menu(menu, &view, &object, caps))
+}
+
+/// Purge entries that act on the whole recycle bin, shared by the row menu
+/// and the category toolbar.
+fn purge_all_items(menu: PopupMenu, view: &Entity<Workbench>) -> PopupMenu {
+    let entry = |label: &str, action: ObjectAction| {
+        let view = view.clone();
+        PopupMenuItem::new(label.to_string())
+            .icon(Icon::new(IconName::Trash))
+            .on_click(move |_, window, cx: &mut App| {
+                view.update(cx, |this, cx| this.recycle_bin_action(action, window, cx));
+            })
+    };
+    menu.item(entry("Purge Recycle Bin…", ObjectAction::PurgeAll))
+        .item(entry("Purge DBA Recycle Bin…", ObjectAction::PurgeAllUsers))
+}
+
+/// Right-click menu of a Recycle Bin row: Flashback Table, Purge Object,
+/// the whole-bin purges and Refresh.
+fn recycle_menu(menu: PopupMenu, view: &Entity<Workbench>, object: &ObjectRef) -> PopupMenu {
+    let info = object
+        .detail
+        .as_deref()
+        .and_then(ora_core::recycle::RecycleInfo::parse);
+    let can_flashback = info.as_ref().is_some_and(|i| i.can_flashback());
+    let can_purge = info.as_ref().is_some_and(|i| i.can_purge_object());
+    let item =
+        |label: &str,
+         icon_name: IconName,
+         enabled: bool,
+         f: fn(&mut Workbench, ObjectRef, &mut Window, &mut Context<Workbench>)| {
+            let view = view.clone();
+            let object = object.clone();
+            PopupMenuItem::new(label.to_string())
+                .icon(Icon::new(icon_name))
+                .disabled(!enabled)
+                .on_click(move |_, window, cx: &mut App| {
+                    let object = object.clone();
+                    view.update(cx, |this, cx| f(this, object, window, cx));
+                })
+        };
+    let menu = menu
+        .min_w(px(240.))
+        .item(item(
+            "Flashback Table…",
+            IconName::RotateCcw,
+            can_flashback,
+            |this, o, w, cx| this.object_action(o, ObjectAction::Flashback, w, cx),
+        ))
+        .item(item(
+            "Purge Object…",
+            IconName::Trash,
+            can_purge,
+            |this, o, w, cx| this.object_action(o, ObjectAction::PurgeObject, w, cx),
+        ))
+        .separator();
+    purge_all_items(menu, view).separator().item(item(
+        "Refresh",
+        IconName::RefreshCw,
+        true,
+        |this, _, _, cx| this.load_objects(cx),
+    ))
 }
 
 /// The right-click menu for an explorer object.
@@ -345,6 +452,9 @@ fn object_menu(
     object: &ObjectRef,
     caps: ora_core::Capabilities,
 ) -> PopupMenu {
+    if object.kind == ObjectKind::RecycleBin {
+        return recycle_menu(menu, view, object);
+    }
     let has_data = schema::has_data(&object.kind);
     let is_table = object.kind == ObjectKind::Table;
     let is_mview = object.kind == ObjectKind::MaterializedView;
@@ -650,7 +760,7 @@ impl Workbench {
     ) {
         self.conn.selected_object = Some(object.name.clone());
         let double_click = matches!(event, ClickEvent::Mouse(m) if m.down.click_count >= 2);
-        if double_click {
+        if double_click && object.kind != ObjectKind::RecycleBin {
             if schema::has_data(&object.kind) {
                 self.open_table_data(&object.owner, &object.name, window, cx);
             } else {
@@ -796,6 +906,7 @@ impl Workbench {
                 owner: object.owner.clone(),
                 name: object.name.clone(),
                 kind: object.kind,
+                show_storage: false,
             },
             PendingOp::Ddl {
                 owner: object.owner,

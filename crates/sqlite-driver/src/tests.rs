@@ -220,6 +220,13 @@ fn catalog_lists_objects_columns_indexes_and_ddl() {
         .unwrap();
     assert!(ddl.starts_with("CREATE TABLE emp"), "{ddl}");
     assert!(ddl.contains("CREATE INDEX emp_name"), "{ddl}");
+    // The storage switch only matters for Oracle; SQLite ignores it.
+    for show_storage in [false, true] {
+        let again = client
+            .object_ddl_with("main", "emp", &ora_core::ObjectKind::Table, show_storage)
+            .unwrap();
+        assert_eq!(again, ddl);
+    }
 }
 
 #[test]

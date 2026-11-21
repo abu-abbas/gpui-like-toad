@@ -22,9 +22,11 @@ pub mod filter;
 pub mod import;
 pub mod model;
 pub mod pretty;
+pub mod recycle;
 pub mod redact;
 pub mod sql;
 pub mod store;
+pub mod timing;
 pub mod transfer;
 pub mod update;
 

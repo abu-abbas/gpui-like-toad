@@ -156,6 +156,8 @@ pub enum Job {
         owner: String,
         name: String,
         kind: ObjectKind,
+        /// Include STORAGE/TABLESPACE/segment clauses (Oracle only).
+        show_storage: bool,
     },
     /// Explorer "Export Data": fetch the whole table (capped at
     /// [`ora_core::EXPORT_MAX_ROWS`]) and write it to `path`.
@@ -667,8 +669,13 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             },
             None => Response::Failed("not connected".to_string()),
         },
-        Job::Ddl { owner, name, kind } => match client.as_mut() {
-            Some(client) => match client.object_ddl(&owner, &name, &kind) {
+        Job::Ddl {
+            owner,
+            name,
+            kind,
+            show_storage,
+        } => match client.as_mut() {
+            Some(client) => match client.object_ddl_with(&owner, &name, &kind, show_storage) {
                 Ok(ddl) => Response::Ddl(ddl),
                 Err(err) => Response::Failed(err.to_string()),
             },

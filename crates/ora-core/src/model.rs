@@ -359,6 +359,8 @@ pub enum ObjectKind {
     DbLink,
     /// A table constraint (primary/unique/foreign key, check).
     Constraint,
+    /// A dropped object in the Oracle recycle bin (`BIN$...`).
+    RecycleBin,
     Other(String),
 }
 
@@ -378,6 +380,7 @@ impl ObjectKind {
             "TYPE" => ObjectKind::Type,
             "DATABASE LINK" => ObjectKind::DbLink,
             "CONSTRAINT" => ObjectKind::Constraint,
+            "RECYCLE BIN" => ObjectKind::RecycleBin,
             other => ObjectKind::Other(other.to_string()),
         }
     }
@@ -398,6 +401,7 @@ impl ObjectKind {
             ObjectKind::Type => "Types",
             ObjectKind::DbLink => "DB Links",
             ObjectKind::Constraint => "Constraints",
+            ObjectKind::RecycleBin => "Recycle Bin",
             ObjectKind::Other(label) => label,
         }
     }
@@ -418,6 +422,7 @@ impl ObjectKind {
             ObjectKind::Type => "TYPE",
             ObjectKind::DbLink => "DATABASE LINK",
             ObjectKind::Constraint => "CONSTRAINT",
+            ObjectKind::RecycleBin => "RECYCLE BIN",
             ObjectKind::Other(raw) => raw,
         }
     }
