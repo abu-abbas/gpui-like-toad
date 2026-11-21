@@ -280,6 +280,7 @@ mod tests {
 
     #[test]
     fn profile_round_trips_through_a_file() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join(format!("ora-transfer-profile-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let p = sample();
@@ -305,6 +306,7 @@ mod tests {
 
     #[test]
     fn damaged_files_load_as_empty() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join(format!("ora-transfer-bad-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(FILE), "{not json").unwrap();
