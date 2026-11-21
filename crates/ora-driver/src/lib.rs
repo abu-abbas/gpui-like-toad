@@ -694,6 +694,7 @@ impl DbClient for ThinClient {
                  WHERE o.owner = :1 AND o.object_type IN \
                  ('TABLE','VIEW','MATERIALIZED VIEW','INDEX','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','TRIGGER','SYNONYM','TYPE') \
                  AND NOT (o.object_type = 'TYPE' AND o.object_name LIKE 'SYS\\_PLSQL\\_%' ESCAPE '\\') \
+                 AND o.object_name NOT LIKE 'BIN$%' \
                  AND NOT (o.object_type = 'TABLE' AND EXISTS \
                    (SELECT 1 FROM all_mviews m WHERE m.owner = o.owner AND m.mview_name = o.object_name)) \
                  UNION ALL \
@@ -725,6 +726,37 @@ impl DbClient for ThinClient {
                 parent,
                 detail,
             });
+        }
+        // The recycle bin is best effort: a user without access to the view
+        // (or a database that has it switched off) still gets every other
+        // category. USER_RECYCLEBIN is the session user's own bin, so other
+        // schemas show none.
+        if let Ok(cursor) = conn.query(
+            "SELECT object_name, original_name, type, operation, droptime, \
+             can_undrop, can_purge FROM user_recyclebin \
+             WHERE :1 = SYS_CONTEXT('USERENV', 'SESSION_USER') ORDER BY droptime DESC",
+            &[&owner_param],
+        ) {
+            for row in cursor.flatten() {
+                let text = |ix: usize| row.get::<Option<String>>(ix).ok().flatten();
+                let (Some(bin_name), Some(original)) = (text(0), text(1)) else {
+                    continue;
+                };
+                let info = ora_core::recycle::RecycleInfo {
+                    kind: text(2).unwrap_or_default(),
+                    operation: text(3).unwrap_or_else(|| "DROP".to_string()),
+                    dropped: ora_core::recycle::pretty_droptime(&text(4).unwrap_or_default()),
+                    can_undrop: text(5).as_deref() == Some("YES"),
+                    can_purge: text(6).as_deref() == Some("YES"),
+                };
+                objects.push(SchemaObject {
+                    owner: owner_upper.clone(),
+                    name: bin_name,
+                    kind: ObjectKind::RecycleBin,
+                    parent: Some(original),
+                    detail: Some(info.to_detail()),
+                });
+            }
         }
         Ok(objects)
     }

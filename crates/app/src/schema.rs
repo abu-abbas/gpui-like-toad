@@ -19,10 +19,11 @@ pub enum ObjectCategory {
     Synonyms,
     Types,
     DbLinks,
+    RecycleBin,
 }
 
 impl ObjectCategory {
-    pub const ALL: [ObjectCategory; 11] = [
+    pub const ALL: [ObjectCategory; 12] = [
         ObjectCategory::Tables,
         ObjectCategory::Views,
         ObjectCategory::MaterializedViews,
@@ -34,6 +35,7 @@ impl ObjectCategory {
         ObjectCategory::Synonyms,
         ObjectCategory::Types,
         ObjectCategory::DbLinks,
+        ObjectCategory::RecycleBin,
     ];
 
     pub fn label(self) -> &'static str {
@@ -49,6 +51,7 @@ impl ObjectCategory {
             ObjectCategory::Synonyms => "Synonyms",
             ObjectCategory::Types => "Types",
             ObjectCategory::DbLinks => "DB Links",
+            ObjectCategory::RecycleBin => "Recycle Bin",
         }
     }
 
@@ -68,6 +71,7 @@ impl ObjectCategory {
             ObjectCategory::Synonyms => *kind == ObjectKind::Synonym,
             ObjectCategory::Types => *kind == ObjectKind::Type,
             ObjectCategory::DbLinks => *kind == ObjectKind::DbLink,
+            ObjectCategory::RecycleBin => *kind == ObjectKind::RecycleBin,
         }
     }
 }
@@ -83,10 +87,23 @@ pub fn objects_in<'a>(
     let mut list: Vec<&SchemaObject> = objects
         .iter()
         .filter(|o| category.contains(&o.kind))
-        .filter(|o| filter.is_empty() || o.name.to_lowercase().contains(&filter))
+        .filter(|o| filter.is_empty() || shown_name(o).to_lowercase().contains(&filter))
         .collect();
-    list.sort_by(|a, b| a.name.cmp(&b.name));
+    list.sort_by(|a, b| {
+        shown_name(a)
+            .cmp(shown_name(b))
+            .then_with(|| a.name.cmp(&b.name))
+    });
     list
+}
+
+/// The name a row is listed and sorted by. Recycle bin objects are known
+/// by their original name; `name` holds the `BIN$...` system name.
+pub fn shown_name(object: &SchemaObject) -> &str {
+    match (&object.kind, &object.parent) {
+        (ObjectKind::RecycleBin, Some(original)) => original,
+        _ => &object.name,
+    }
 }
 
 /// Tables and views whose name matches `query`, best first, for Quick

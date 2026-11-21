@@ -467,7 +467,7 @@ impl DbClient for DemoClient {
             ("EMP_ADDRESS_T", ObjectKind::Type),
             ("REMOTE_HR", ObjectKind::DbLink),
         ];
-        Ok(catalog
+        let mut objects: Vec<SchemaObject> = catalog
             .into_iter()
             .map(|(name, kind)| SchemaObject {
                 owner: owner.clone(),
@@ -476,7 +476,38 @@ impl DbClient for DemoClient {
                 parent: None,
                 detail: None,
             })
-            .collect())
+            .collect();
+        // Two dropped objects, so the Recycle Bin category has something to show.
+        for (bin, original, kind, dropped) in [
+            (
+                "BIN$Zx3kQ1vTR0q4yJd5aBcDeg==$0",
+                "CACHE_LOCKS",
+                "TABLE",
+                "2026-11-20 16:42:07",
+            ),
+            (
+                "BIN$Zx3kQ1vTR1q4yJd5aBcDeg==$0",
+                "CACHE_LOCKS_PK",
+                "INDEX",
+                "2026-11-20 16:42:07",
+            ),
+        ] {
+            let info = crate::recycle::RecycleInfo {
+                kind: kind.to_string(),
+                operation: "DROP".to_string(),
+                dropped: dropped.to_string(),
+                can_undrop: true,
+                can_purge: true,
+            };
+            objects.push(SchemaObject {
+                owner: owner.clone(),
+                name: bin.to_string(),
+                kind: ObjectKind::RecycleBin,
+                parent: Some(original.to_string()),
+                detail: Some(info.to_detail()),
+            });
+        }
+        Ok(objects)
     }
 
     fn list_schemas(&mut self) -> Result<Vec<String>, DbError> {

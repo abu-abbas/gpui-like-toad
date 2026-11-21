@@ -21,6 +21,7 @@ impl Dialect for OracleDialect {
             special_tables: true,
             programs: true,
             sequences: true,
+            recycle_bin: true,
         }
     }
 

@@ -22,6 +22,7 @@ impl Dialect for SqliteDialect {
             special_tables: false,
             programs: false,
             sequences: false,
+            recycle_bin: false,
         }
     }
 
