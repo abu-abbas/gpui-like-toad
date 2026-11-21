@@ -29,6 +29,7 @@ mod profiles;
 #[cfg(test)]
 mod tests;
 mod theme;
+mod tools;
 mod update_prefs;
 
 pub use history::*;
@@ -37,6 +38,7 @@ pub use layout::*;
 pub use profile_import::*;
 pub use profiles::*;
 pub use theme::*;
+pub use tools::*;
 pub use update_prefs::*;
 
 // ---------------------------------------------------------------------------

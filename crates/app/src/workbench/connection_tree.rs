@@ -918,6 +918,7 @@ impl Workbench {
                             return;
                         };
                         this.focused_profile_id = Some(profile_id.clone());
+                        this.leave_tools();
                         if matches!(event, ClickEvent::Mouse(mouse) if mouse.down.click_count == 2)
                         {
                             this.open_profile(ix, window, cx);

@@ -82,6 +82,9 @@ mod settings;
 mod sidebar;
 mod sqlite_form;
 mod tabs;
+mod tools;
+mod tools_mail;
+mod tools_redis;
 mod transfer;
 mod transfer_ui;
 mod ui_helpers;
@@ -485,6 +488,8 @@ pub struct Workbench {
     completion: Rc<SqlCompletionProvider>,
     /// GitHub Releases update check state (see `updates.rs`).
     updates: UpdateState,
+    /// Developer Tools (Redis, MailHog): saved instances and open views.
+    tools: tools::ToolsState,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -579,6 +584,7 @@ impl Workbench {
             catalog,
             completion,
             updates: UpdateState::load(cx),
+            tools: tools::ToolsState::load(),
             _subscriptions: vec![appearance_sub, settings_search_sub, proxy_sub],
         }
     }
@@ -742,7 +748,18 @@ impl Render for Workbench {
                     .child(self.render_navigation(window.last_input_was_keyboard(), &theme, cx))
                     .child(div().flex().flex_1().min_w(px(0.)).child({
                         let connected = self.conn.session.is_some();
+                        let tool_view = (self.rail == RailPanel::Connections)
+                            .then(|| {
+                                self.render_tool_explorer(&theme, cx)
+                                    .zip(self.render_tool_main(&theme, cx))
+                            })
+                            .flatten();
+                        let (tool_secondary, tool_main) = match tool_view {
+                            Some((a, b)) => (Some(a), Some(b)),
+                            None => (None, None),
+                        };
                         let secondary = match self.rail {
+                            _ if tool_secondary.is_some() => tool_secondary,
                             RailPanel::Connections if connected => Some(
                                 self.render_connection_explorer(&theme, cx)
                                     .into_any_element(),
@@ -757,12 +774,14 @@ impl Render for Workbench {
                                 .into_any_element(),
                             ),
                         };
-                        let main =
-                            if connected || !self.show_empty_workspace || self.whats_new_active() {
-                                self.render_main(&theme, cx).into_any_element()
-                            } else {
-                                self.render_disconnected(&theme, cx).into_any_element()
-                            };
+                        let main = if let Some(main) = tool_main {
+                            main
+                        } else if connected || !self.show_empty_workspace || self.whats_new_active()
+                        {
+                            self.render_main(&theme, cx).into_any_element()
+                        } else {
+                            self.render_disconnected(&theme, cx).into_any_element()
+                        };
                         if let Some(secondary) = secondary {
                             // Use the same resizable column for all three sidebar pages.
                             h_resizable(if self.sidebar_compact {
@@ -821,6 +840,7 @@ impl Render for Workbench {
             .when(self.folder_delete.is_some(), |this| {
                 this.child(self.render_folder_delete(&theme, cx))
             })
+            .children(self.render_tool_dialogs(&theme, cx))
             .when(self.settings.open, |this| {
                 this.child(self.render_settings_dialog(&theme, cx))
             })
