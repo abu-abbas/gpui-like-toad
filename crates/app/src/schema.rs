@@ -277,8 +277,25 @@ mod tests {
         assert!(ObjectCategory::MaterializedViews.contains(&ObjectKind::MaterializedView));
         assert!(!ObjectCategory::Views.contains(&ObjectKind::MaterializedView));
         assert!(!ObjectCategory::Tables.contains(&ObjectKind::MaterializedView));
-        assert_eq!(ObjectCategory::ALL.len(), 11);
+        assert_eq!(ObjectCategory::ALL.len(), 12);
+        assert!(ObjectCategory::RecycleBin.contains(&ObjectKind::RecycleBin));
+        assert!(!ObjectCategory::Tables.contains(&ObjectKind::RecycleBin));
         assert!(ObjectCategory::Constraints.contains(&ObjectKind::Constraint));
+    }
+
+    #[test]
+    fn recycle_bin_rows_are_listed_by_original_name() {
+        let mut bin = obj("HR", "BIN$zz==$0", ObjectKind::RecycleBin);
+        bin.parent = Some("CACHE_LOCKS".to_string());
+        let mut bin2 = obj("HR", "BIN$aa==$0", ObjectKind::RecycleBin);
+        bin2.parent = Some("ABC".to_string());
+        let objects = vec![bin, bin2];
+        let listed = objects_in(&objects, ObjectCategory::RecycleBin, "");
+        assert_eq!(listed[0].name, "BIN$aa==$0");
+        assert_eq!(
+            objects_in(&objects, ObjectCategory::RecycleBin, "cache").len(),
+            1
+        );
     }
 
     #[test]
