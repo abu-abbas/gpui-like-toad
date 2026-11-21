@@ -32,13 +32,11 @@ pub(super) fn tool_icon(kind: ToolKind, live: bool, theme: &gpui_kit::component:
             (ToolKind::MailHog, true) => gpui_kit::hsla(36. / 360., 0.9, 0.6, 1.),
         }
     };
-    match kind {
-        ToolKind::Redis => Icon::default()
-            .data(include_bytes!("../../assets/db/redis.svg").as_slice())
-            .size(px(16.))
-            .text_color(color),
-        ToolKind::MailHog => icon(IconName::Mail, 16., color),
-    }
+    let svg: &'static [u8] = match kind {
+        ToolKind::Redis => include_bytes!("../../assets/db/redis.svg"),
+        ToolKind::MailHog => include_bytes!("../../assets/db/mailhog.svg"),
+    };
+    Icon::default().data(svg).size(px(16.)).text_color(color)
 }
 
 /// Small colored tag for DEV / STAGING / PROD.
