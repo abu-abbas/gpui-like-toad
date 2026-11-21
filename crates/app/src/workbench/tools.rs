@@ -658,7 +658,7 @@ impl Workbench {
                             .w_full()
                             .min_w(px(0.))
                             .gap(px(8.))
-                            .pl(px(SPACE_2))
+                            .pl(px(SPACE_2 + 13.)) // icon starts under the "Developer Tools" text
                             .child(tool_icon(tool.kind, live, theme))
                             .child(
                                 div()
