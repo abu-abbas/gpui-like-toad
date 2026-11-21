@@ -694,6 +694,7 @@ impl DbClient for ThinClient {
                  WHERE o.owner = :1 AND o.object_type IN \
                  ('TABLE','VIEW','MATERIALIZED VIEW','INDEX','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','TRIGGER','SYNONYM','TYPE') \
                  AND NOT (o.object_type = 'TYPE' AND o.object_name LIKE 'SYS\\_PLSQL\\_%' ESCAPE '\\') \
+                 AND o.object_name NOT LIKE 'BIN$%' \
                  AND NOT (o.object_type = 'TABLE' AND EXISTS \
                    (SELECT 1 FROM all_mviews m WHERE m.owner = o.owner AND m.mview_name = o.object_name)) \
                  UNION ALL \
@@ -725,6 +726,37 @@ impl DbClient for ThinClient {
                 parent,
                 detail,
             });
+        }
+        // The recycle bin is best effort: a user without access to the view
+        // (or a database that has it switched off) still gets every other
+        // category. USER_RECYCLEBIN is the session user's own bin, so other
+        // schemas show none.
+        if let Ok(cursor) = conn.query(
+            "SELECT object_name, original_name, type, operation, droptime, \
+             can_undrop, can_purge FROM user_recyclebin \
+             WHERE :1 = SYS_CONTEXT('USERENV', 'SESSION_USER') ORDER BY droptime DESC",
+            &[&owner_param],
+        ) {
+            for row in cursor.flatten() {
+                let text = |ix: usize| row.get::<Option<String>>(ix).ok().flatten();
+                let (Some(bin_name), Some(original)) = (text(0), text(1)) else {
+                    continue;
+                };
+                let info = ora_core::recycle::RecycleInfo {
+                    kind: text(2).unwrap_or_default(),
+                    operation: text(3).unwrap_or_else(|| "DROP".to_string()),
+                    dropped: ora_core::recycle::pretty_droptime(&text(4).unwrap_or_default()),
+                    can_undrop: text(5).as_deref() == Some("YES"),
+                    can_purge: text(6).as_deref() == Some("YES"),
+                };
+                objects.push(SchemaObject {
+                    owner: owner_upper.clone(),
+                    name: bin_name,
+                    kind: ObjectKind::RecycleBin,
+                    parent: Some(original),
+                    detail: Some(info.to_detail()),
+                });
+            }
         }
         Ok(objects)
     }
@@ -980,6 +1012,155 @@ impl DbClient for ThinClient {
             }
         }
         Ok(indexes)
+    }
+
+    fn list_constraints(
+        &mut self,
+        owner: &str,
+        table: &str,
+    ) -> Result<Vec<ora_core::ConstraintDef>, DbError> {
+        use ora_core::{ConstraintDef, ConstraintKind};
+        let conn = self.conn()?;
+        let owner_upper = owner.trim().to_ascii_uppercase();
+        let table_upper = table.trim().to_ascii_uppercase();
+        let owner_param: &str = &owner_upper;
+        let table_param: &str = &table_upper;
+        // One row per constraint column, in key order; grouped below.
+        let cursor = conn
+            .query(
+                "SELECT c.constraint_name, c.constraint_type, c.search_condition, \
+                        c.r_owner, c.r_constraint_name, c.delete_rule, cc.column_name \
+                 FROM all_constraints c \
+                 LEFT JOIN all_cons_columns cc \
+                   ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name \
+                 WHERE c.owner = :1 AND c.table_name = :2 \
+                   AND c.constraint_type IN ('P', 'U', 'R', 'C') AND c.status = 'ENABLED' \
+                 ORDER BY c.constraint_name, cc.position",
+                &[&owner_param, &table_param],
+            )
+            .map_err(db_err)?;
+        let mut out: Vec<ConstraintDef> = Vec::new();
+        let mut refs: Vec<Option<(String, String)>> = Vec::new();
+        for row in cursor {
+            let row = row.map_err(db_err)?;
+            let name: String = row.get(0).map_err(db_err)?;
+            let kind: String = row.get(1).map_err(db_err)?;
+            let condition: Option<String> = row.get(2).map_err(db_err)?;
+            let r_owner: Option<String> = row.get(3).map_err(db_err)?;
+            let r_name: Option<String> = row.get(4).map_err(db_err)?;
+            let delete_rule: Option<String> = row.get(5).map_err(db_err)?;
+            let column: Option<String> = row.get(6).map_err(db_err)?;
+            if out.last().map(|c| c.name.as_str()) != Some(name.as_str()) {
+                out.push(ConstraintDef {
+                    name,
+                    kind: match kind.as_str() {
+                        "P" => ConstraintKind::PrimaryKey,
+                        "U" => ConstraintKind::Unique,
+                        "R" => ConstraintKind::ForeignKey,
+                        _ => ConstraintKind::Check,
+                    },
+                    columns: Vec::new(),
+                    ref_table: String::new(),
+                    ref_columns: Vec::new(),
+                    on_delete: delete_rule.unwrap_or_default(),
+                    condition: condition.map(|c| c.trim().to_string()).unwrap_or_default(),
+                });
+                refs.push(r_owner.zip(r_name));
+            }
+            if let (Some(c), Some(column)) = (out.last_mut(), column) {
+                c.columns.push(column);
+            }
+        }
+        // NOT NULL is a CHECK in the dictionary; the column flag carries it.
+        let mut keep = Vec::new();
+        for (c, r) in out.into_iter().zip(refs) {
+            if c.kind == ConstraintKind::Check {
+                let upper = c.condition.to_ascii_uppercase();
+                if c.columns.len() == 1
+                    && upper.ends_with("IS NOT NULL")
+                    && !upper.contains(" AND ")
+                    && !upper.contains(" OR ")
+                {
+                    continue;
+                }
+            }
+            keep.push((c, r));
+        }
+        let mut result = Vec::with_capacity(keep.len());
+        for (mut c, r) in keep {
+            if let Some((r_owner, r_name)) = r.filter(|_| c.kind == ConstraintKind::ForeignKey) {
+                let (ro, rn): (&str, &str) = (&r_owner, &r_name);
+                let cursor = conn
+                    .query(
+                        "SELECT table_name, column_name FROM all_cons_columns \
+                         WHERE owner = :1 AND constraint_name = :2 ORDER BY position",
+                        &[&ro, &rn],
+                    )
+                    .map_err(db_err)?;
+                for row in cursor {
+                    let row = row.map_err(db_err)?;
+                    let t: String = row.get(0).map_err(db_err)?;
+                    let col: String = row.get(1).map_err(db_err)?;
+                    c.ref_table = if r_owner.eq_ignore_ascii_case(&owner_upper) {
+                        t
+                    } else {
+                        format!("{r_owner}.{t}")
+                    };
+                    c.ref_columns.push(col);
+                }
+            }
+            result.push(c);
+        }
+        Ok(result)
+    }
+
+    fn trigger_scripts(&mut self, owner: &str, table: &str) -> Result<Vec<String>, DbError> {
+        let conn = self.conn()?;
+        let owner_upper = owner.trim().to_ascii_uppercase();
+        let table_upper = table.trim().to_ascii_uppercase();
+        let owner_param: &str = &owner_upper;
+        let table_param: &str = &table_upper;
+        let cursor = conn
+            .query(
+                "SELECT owner, trigger_name FROM all_triggers \
+                 WHERE table_owner = :1 AND table_name = :2 AND base_object_type = 'TABLE' \
+                 ORDER BY trigger_name",
+                &[&owner_param, &table_param],
+            )
+            .map_err(db_err)?;
+        let mut names = Vec::new();
+        for row in cursor {
+            let row = row.map_err(db_err)?;
+            let o: String = row.get(0).map_err(db_err)?;
+            let n: String = row.get(1).map_err(db_err)?;
+            names.push((o, n));
+        }
+        let mut out = Vec::new();
+        for (o, n) in names {
+            let (kind, name_param, owner_param): (&str, &str, &str) = ("TRIGGER", &n, &o);
+            let cursor = conn
+                .query(
+                    "SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM dual",
+                    &[&kind, &name_param, &owner_param],
+                )
+                .map_err(db_err)?;
+            let Some(row) = cursor.into_iter().next() else {
+                continue;
+            };
+            let ddl: Option<String> = row.map_err(db_err)?.get(0).map_err(db_err)?;
+            let ddl = ddl.unwrap_or_default();
+            // GET_DDL appends `ALTER TRIGGER ... ENABLE`; new triggers are
+            // enabled anyway and it is a second statement.
+            let cut = ddl
+                .to_ascii_uppercase()
+                .rfind("\nALTER TRIGGER")
+                .unwrap_or(ddl.len());
+            let text = ddl[..cut].trim().to_string();
+            if !text.is_empty() {
+                out.push(text);
+            }
+        }
+        Ok(out)
     }
 
     fn routine_signature(

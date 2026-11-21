@@ -139,6 +139,32 @@ pub fn to_csv_mode(result: &QueryResult, mode: CsvMode) -> String {
     String::from_utf8(out).unwrap_or_default()
 }
 
+/// One CSV record of header names (formula-safe in [`CsvMode::SpreadsheetSafe`]).
+pub fn write_csv_header<W: std::io::Write>(
+    out: &mut W,
+    names: &[String],
+    mode: CsvMode,
+) -> std::io::Result<()> {
+    let cells: Vec<String> = names
+        .iter()
+        .map(|n| match mode {
+            CsvMode::Raw => n.clone(),
+            CsvMode::SpreadsheetSafe => spreadsheet_safe(n).into_owned(),
+        })
+        .collect();
+    write_record(out, cells.iter().map(String::as_str))
+}
+
+/// One CSV record of cell values.
+pub fn write_csv_row<W: std::io::Write>(
+    out: &mut W,
+    row: &[Value],
+    mode: CsvMode,
+) -> std::io::Result<()> {
+    let cells: Vec<String> = row.iter().map(|v| cell_text(v, mode)).collect();
+    write_record(out, cells.iter().map(String::as_str))
+}
+
 /// Stream a [`QueryResult`] as CSV to `out`, one record at a time (nothing
 /// but the current record is built in memory). `progress(rows_done)` runs
 /// every [`PROGRESS_EVERY`] rows and returning `false` cancels.

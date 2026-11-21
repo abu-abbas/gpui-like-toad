@@ -82,6 +82,8 @@ mod settings;
 mod sidebar;
 mod sqlite_form;
 mod tabs;
+mod transfer;
+mod transfer_ui;
 mod ui_helpers;
 mod updates;
 use cell_edit::CellEditor;
@@ -465,6 +467,8 @@ pub struct Workbench {
     /// The cell edit dialog, while it is showing.
     cell_editor: Option<CellEditor>,
     object_dialog: Option<ObjectDialog>,
+    /// The Data Transfer wizard, while it is showing.
+    transfer: Option<transfer::TransferWizard>,
     /// "Save scripts before disconnect?" dialog, while it is showing.
     disconnect_prompt: Option<conns::DisconnectPrompt>,
     /// The Info panel under data / script tabs is folded to its header.
@@ -565,6 +569,7 @@ impl Workbench {
             quick_open: None,
             cell_editor: None,
             object_dialog: None,
+            transfer: None,
             disconnect_prompt: None,
             info_collapsed: layout.info_collapsed,
             side_conn_folded: false,
@@ -802,6 +807,9 @@ impl Render for Workbench {
             })
             .when(self.object_dialog.is_some(), |this| {
                 this.child(self.render_object_dialog(&theme, cx))
+            })
+            .when(self.transfer.is_some(), |this| {
+                this.child(self.render_transfer(&theme, cx))
             })
             .when(self.disconnect_prompt.is_some(), |this| {
                 this.child(self.render_disconnect_prompt(&theme, cx))

@@ -2,7 +2,9 @@
 //! (`main` plus any `ATTACH`ed file), objects come from `sqlite_master`,
 //! columns and indexes from the `pragma_*` table functions.
 
-use ora_core::{ColumnDef, DbError, IndexDef, ObjectKind, SchemaObject};
+use ora_core::{
+    ColumnDef, ConstraintDef, ConstraintKind, DbError, IndexDef, ObjectKind, SchemaObject,
+};
 use rusqlite::Connection;
 
 use crate::db_err;
@@ -186,6 +188,185 @@ fn declares_without_rowid(ddl: &str) -> bool {
     words
         .windows(2)
         .any(|w| w[0] == "WITHOUT" && w[1] == "ROWID")
+}
+
+/// Primary key, UNIQUE, foreign key and CHECK constraints of one table.
+/// CHECKs are cut out of the stored `CREATE TABLE`, since SQLite has no
+/// pragma for them.
+pub(crate) fn list_constraints(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<ConstraintDef>, DbError> {
+    let mut out = Vec::new();
+    let blank = |name: &str, kind| ConstraintDef {
+        name: name.to_string(),
+        kind,
+        columns: Vec::new(),
+        ref_table: String::new(),
+        ref_columns: Vec::new(),
+        on_delete: String::new(),
+        condition: String::new(),
+    };
+
+    let mut stmt = conn
+        .prepare("SELECT name, pk FROM pragma_table_info(:1, :2) WHERE pk > 0 ORDER BY pk")
+        .map_err(db_err)?;
+    let pk = stmt
+        .query_map([table, schema], |r| r.get::<_, String>(0))
+        .map_err(db_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    if !pk.is_empty() {
+        let mut c = blank("PRIMARY KEY", ConstraintKind::PrimaryKey);
+        c.columns = pk;
+        out.push(c);
+    }
+
+    for index in list_indexes(conn, schema, table)? {
+        if index.index_type == "UNIQUE CONSTRAINT" {
+            let mut c = blank(&index.name, ConstraintKind::Unique);
+            c.columns = index.columns;
+            out.push(c);
+        }
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, \"table\", \"from\", \"to\", on_delete \
+             FROM pragma_foreign_key_list(:1, :2) ORDER BY id, seq",
+        )
+        .map_err(db_err)?;
+    let rows = stmt
+        .query_map([table, schema], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(db_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    let mut last = None;
+    for (id, ref_table, from, to, on_delete) in rows {
+        if last != Some(id) {
+            let mut c = blank(&format!("FK {id}"), ConstraintKind::ForeignKey);
+            c.ref_table = ref_table;
+            c.on_delete = on_delete;
+            out.push(c);
+            last = Some(id);
+        }
+        if let Some(c) = out.last_mut() {
+            c.columns.push(from);
+            // A missing target column means "the parent's primary key".
+            c.ref_columns.push(to.unwrap_or_default());
+        }
+    }
+
+    let sql = format!(
+        "SELECT sql FROM {}.sqlite_master WHERE type = 'table' AND name = :1",
+        quote(schema)
+    );
+    if let Ok(Some(ddl)) = conn.query_row(&sql, [table], |r| r.get::<_, Option<String>>(0)) {
+        for condition in check_conditions(&ddl) {
+            let mut c = blank("CHECK", ConstraintKind::Check);
+            c.condition = condition;
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+/// `CREATE TRIGGER` text of the triggers on one table.
+pub(crate) fn trigger_scripts(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>, DbError> {
+    let sql = format!(
+        "SELECT sql FROM {}.sqlite_master \
+         WHERE type = 'trigger' AND tbl_name = :1 AND sql IS NOT NULL ORDER BY name",
+        quote(schema)
+    );
+    let mut stmt = conn.prepare(&sql).map_err(db_err)?;
+    let out = stmt
+        .query_map([table], |r| r.get::<_, String>(0))
+        .map_err(db_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    Ok(out)
+}
+
+/// The text inside every `CHECK ( ... )` of a `CREATE TABLE`, skipping
+/// quoted text. Used for column and table CHECKs alike.
+fn check_conditions(ddl: &str) -> Vec<String> {
+    let chars: Vec<char> = ddl.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut quote: Option<char> = None;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if matches!(c, '\'' | '"' | '`') {
+            quote = Some(c);
+            i += 1;
+            continue;
+        }
+        let word_start = i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '_');
+        if word_start
+            && chars.len() >= i + 5
+            && chars[i..i + 5]
+                .iter()
+                .collect::<String>()
+                .eq_ignore_ascii_case("check")
+        {
+            let mut j = i + 5;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == '(' {
+                let (mut depth, mut q2, start) = (0i32, None::<char>, j + 1);
+                let mut k = j;
+                while k < chars.len() {
+                    let ch = chars[k];
+                    if let Some(q) = q2 {
+                        if ch == q {
+                            q2 = None;
+                        }
+                    } else if matches!(ch, '\'' | '"' | '`') {
+                        q2 = Some(ch);
+                    } else if ch == '(' {
+                        depth += 1;
+                    } else if ch == ')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            out.push(
+                                chars[start..k]
+                                    .iter()
+                                    .collect::<String>()
+                                    .trim()
+                                    .to_string(),
+                            );
+                            break;
+                        }
+                    }
+                    k += 1;
+                }
+                i = k;
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 #[cfg(test)]

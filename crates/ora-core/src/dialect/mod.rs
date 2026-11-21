@@ -91,6 +91,8 @@ pub struct Capabilities {
     pub programs: bool,
     /// Sequences: Reset Sequence.
     pub sequences: bool,
+    /// Recycle Bin: Flashback Table and PURGE.
+    pub recycle_bin: bool,
 }
 
 /// SQL text that differs per database. Identifiers are double-quoted in

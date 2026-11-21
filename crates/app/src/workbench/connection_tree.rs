@@ -840,6 +840,18 @@ impl Workbench {
                 if let Some(id) = workbench.find_open_conn(Some(ix), false) {
                     let busy = workbench.conn_by_id(id).is_none_or(|conn| conn.busy);
                     let view = view.clone();
+                    let transfer_view = view.clone();
+                    let menu = menu.item(
+                        PopupMenuItem::new("Data Transfer…")
+                            .icon(Icon::new(IconName::ArrowLeftRight))
+                            .disabled(busy)
+                            .on_click(move |_, window, cx| {
+                                transfer_view.update(cx, |this, cx| {
+                                    this.activate_conn(id, cx);
+                                    this.open_data_transfer(None, window, cx);
+                                });
+                            }),
+                    );
                     return menu.item(
                         PopupMenuItem::new("Disconnect")
                             .icon(Icon::new(IconName::LogOut))

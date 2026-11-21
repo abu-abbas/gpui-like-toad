@@ -134,6 +134,17 @@ pub enum Job {
         owner: String,
         name: String,
     },
+    /// Data Transfer: one page of the source, read with the transfer's
+    /// limits (long cells allowed, never rendered).
+    TransferRead {
+        sql: String,
+        max_rows: usize,
+    },
+    /// Data Transfer: statements built by `ora_core::transfer`, run in
+    /// order and stopped at the first failure. Not committed.
+    TransferExec {
+        statements: Vec<String>,
+    },
     Commit,
     Rollback,
     ListSchemas,
@@ -191,6 +202,16 @@ pub enum Job {
         owner: String,
         name: String,
     },
+    /// CREATE TRIGGER scripts of one table, for Data Transfer.
+    TriggerScripts {
+        owner: String,
+        name: String,
+    },
+    /// Constraints of one table, for Data Transfer.
+    Constraints {
+        owner: String,
+        name: String,
+    },
     Explain {
         sql: String,
     },
@@ -214,6 +235,7 @@ impl Job {
             }
             Self::UpdateCells { .. } => Some("Apply table changes"),
             Self::ImportCsv { .. } => Some("Import CSV rows"),
+            Self::TransferExec { .. } => Some("Data Transfer"),
             Self::Explain { .. } => Some("Write to the Oracle plan table"),
             Self::RefreshMaterializedView { .. } => Some("Refresh materialized view"),
             // Calling a function can write too, so it counts as a change.
@@ -270,6 +292,12 @@ pub enum Response {
         value: Value,
     },
     Imported(u64),
+    /// Statements of a Data Transfer batch that ran, and why the next one
+    /// did not.
+    TransferExecuted {
+        done: usize,
+        error: Option<String>,
+    },
     /// How many of the cell edits went through, and why the next one
     /// failed, if one did.
     CellsUpdated {
@@ -278,6 +306,8 @@ pub enum Response {
     },
     Described(Vec<ColumnDef>),
     Indexes(Vec<IndexDef>),
+    Constraints(Vec<ora_core::ConstraintDef>),
+    TriggerScripts(Vec<String>),
     Plan(Vec<String>),
     /// Structured plan nodes for the tree panel, plus the DBMS_XPLAN text
     /// lines for the Explain Plan sub-tab (empty when the text path failed).
@@ -699,6 +729,32 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             },
             None => Response::Failed("not connected".to_string()),
         },
+        Job::TransferRead { sql, max_rows } => match client.as_mut() {
+            Some(client) => {
+                match client.query(&sql, ora_core::transfer::run::read_limits(max_rows)) {
+                    Ok(result) => Response::QueryDone(result),
+                    Err(err) => Response::Failed(err.to_string()),
+                }
+            }
+            None => Response::Failed("not connected".to_string()),
+        },
+        Job::TransferExec { statements } => match client.as_mut() {
+            Some(client) => {
+                let mut done = 0;
+                let mut error = None;
+                for sql in &statements {
+                    match client.execute(sql) {
+                        Ok(_) => done += 1,
+                        Err(err) => {
+                            error = Some(err.to_string());
+                            break;
+                        }
+                    }
+                }
+                Response::TransferExecuted { done, error }
+            }
+            None => Response::Failed("not connected".to_string()),
+        },
         Job::ListObjects { owner } => match client.as_mut() {
             Some(client) => match client.list_objects(&owner) {
                 Ok(objects) => Response::Objects(objects),
@@ -752,6 +808,20 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
         Job::Indexes { owner, name } => match client.as_mut() {
             Some(client) => match client.list_indexes(&owner, &name) {
                 Ok(indexes) => Response::Indexes(indexes),
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
+        Job::TriggerScripts { owner, name } => match client.as_mut() {
+            Some(client) => match client.trigger_scripts(&owner, &name) {
+                Ok(scripts) => Response::TriggerScripts(scripts),
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
+        Job::Constraints { owner, name } => match client.as_mut() {
+            Some(client) => match client.list_constraints(&owner, &name) {
+                Ok(constraints) => Response::Constraints(constraints),
                 Err(err) => Response::Failed(err.to_string()),
             },
             None => Response::Failed("not connected".to_string()),

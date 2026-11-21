@@ -359,6 +359,8 @@ pub enum ObjectKind {
     DbLink,
     /// A table constraint (primary/unique/foreign key, check).
     Constraint,
+    /// A dropped object in the Oracle recycle bin (`BIN$...`).
+    RecycleBin,
     Other(String),
 }
 
@@ -378,6 +380,7 @@ impl ObjectKind {
             "TYPE" => ObjectKind::Type,
             "DATABASE LINK" => ObjectKind::DbLink,
             "CONSTRAINT" => ObjectKind::Constraint,
+            "RECYCLE BIN" => ObjectKind::RecycleBin,
             other => ObjectKind::Other(other.to_string()),
         }
     }
@@ -398,6 +401,7 @@ impl ObjectKind {
             ObjectKind::Type => "Types",
             ObjectKind::DbLink => "DB Links",
             ObjectKind::Constraint => "Constraints",
+            ObjectKind::RecycleBin => "Recycle Bin",
             ObjectKind::Other(label) => label,
         }
     }
@@ -418,6 +422,7 @@ impl ObjectKind {
             ObjectKind::Type => "TYPE",
             ObjectKind::DbLink => "DATABASE LINK",
             ObjectKind::Constraint => "CONSTRAINT",
+            ObjectKind::RecycleBin => "RECYCLE BIN",
             ObjectKind::Other(raw) => raw,
         }
     }
@@ -452,6 +457,34 @@ pub struct ColumnDef {
     pub nullable: bool,
     /// Default expression as stored by the database, if any.
     pub default: Option<String>,
+}
+
+/// Kind of a table constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstraintKind {
+    PrimaryKey,
+    Unique,
+    ForeignKey,
+    Check,
+}
+
+/// One constraint of a table, for Data Transfer. Names are informational:
+/// copies are created unnamed so they never collide inside a schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstraintDef {
+    pub name: String,
+    pub kind: ConstraintKind,
+    /// Constrained columns in key order (empty for a check that the
+    /// backend could not tie to columns).
+    pub columns: Vec<String>,
+    /// Foreign key: referenced table (same schema as the constraint) and
+    /// its columns in the same order.
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+    /// Foreign key delete rule: "NO ACTION", "CASCADE" or "SET NULL".
+    pub on_delete: String,
+    /// Check: the condition text as the database stored it.
+    pub condition: String,
 }
 
 /// One index on a table, from `ALL_INDEXES` + `ALL_IND_COLUMNS`.

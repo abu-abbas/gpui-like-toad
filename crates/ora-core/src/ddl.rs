@@ -282,6 +282,7 @@ pub fn kind_noun(kind: &ObjectKind) -> &'static str {
         ObjectKind::Type => "type",
         ObjectKind::DbLink => "database link",
         ObjectKind::Constraint => "constraint",
+        ObjectKind::RecycleBin => "recycle bin object",
         ObjectKind::Other(_) => "object",
     }
 }

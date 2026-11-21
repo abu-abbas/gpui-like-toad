@@ -34,6 +34,7 @@ mod results;
 mod schema;
 mod splash;
 mod theme;
+mod transfer_io;
 mod workbench;
 mod worker;
 
