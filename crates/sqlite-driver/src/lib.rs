@@ -288,3 +288,5 @@ impl DbClient for SqliteClient {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod transfer_tests;
