@@ -111,7 +111,8 @@ actions!(
         ConnectLast,
         DisconnectSession,
         RefreshSchema,
-        EditConnection
+        EditConnection,
+        OpenDataTransfer
     ]
 );
 
@@ -693,6 +694,9 @@ impl Render for Workbench {
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenDataTransfer, window, cx| {
+                this.open_data_transfer(None, window, cx);
             }))
             .on_action(cx.listener(|this, _action: &CheckForUpdates, window, cx| {
                 this.open_update_check(window, cx)

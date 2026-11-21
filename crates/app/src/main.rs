@@ -137,6 +137,9 @@ fn main() {
             // itself while typing). Only editors with a completion
             // provider react, i.e. the SQL tabs.
             KeyBinding::new("ctrl-space", ShowCompletions, Some("Input")),
+            // Tools > Data Transfer…, as in Navicat (Shift+Cmd+T).
+            KeyBinding::new("cmd-shift-t", workbench::OpenDataTransfer, None),
+            KeyBinding::new("ctrl-shift-t", workbench::OpenDataTransfer, None),
             KeyBinding::new("cmd-,", workbench::OpenSettings, None),
             KeyBinding::new("ctrl-,", workbench::OpenSettings, None),
             KeyBinding::new("cmd-q", Quit, None),
@@ -207,6 +210,10 @@ fn install_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Refresh Schema", workbench::RefreshSchema),
         ]),
+        Menu::new("Tools").items([MenuItem::action(
+            "Data Transfer…",
+            workbench::OpenDataTransfer,
+        )]),
         Menu::new("Window").items([
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),

@@ -871,7 +871,14 @@ impl Workbench {
                 let connect_view = view.clone();
                 let edit_view = view.clone();
                 let remove_view = view.clone();
+                // Not connected: shown but disabled, so the entry is always
+                // discoverable; it needs an open connection as its source.
                 menu.item(
+                    PopupMenuItem::new("Data Transfer… (connect first)")
+                        .icon(Icon::new(IconName::ArrowLeftRight))
+                        .disabled(true),
+                )
+                .item(
                     PopupMenuItem::new("Connect")
                         .icon(Icon::new(IconName::LogIn))
                         .on_click(move |_, window, cx| {
