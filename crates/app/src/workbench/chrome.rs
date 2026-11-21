@@ -320,6 +320,7 @@ impl Workbench {
                 detail: None,
             };
             let import_object = object.clone();
+            let transfer_object = object.clone();
             let unavailable = busy || self.conn.session.is_none() || tab.conn != Some(self.conn.id);
             let action = |id: &'static str, symbol, color, label: &'static str| {
                 Button::new(id)
@@ -454,6 +455,18 @@ impl Workbench {
                     .disabled(unavailable || import_object.kind != ObjectKind::Table)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.import_table(import_object.clone(), cx)
+                    })),
+                )
+                .child(
+                    action(
+                        "table-transfer",
+                        IconName::ArrowLeftRight,
+                        theme.muted_foreground,
+                        "Data Transfer…",
+                    )
+                    .disabled(unavailable || transfer_object.kind != ObjectKind::Table)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_data_transfer(Some(transfer_object.clone()), window, cx)
                     })),
                 );
         } else if !no_active_tab {

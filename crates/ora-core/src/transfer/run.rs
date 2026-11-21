@@ -347,6 +347,9 @@ fn copy_table(
             }
         }
     }
+    // DDL after the last commit (indexes, or a table created without
+    // rows) must not be left in an open transaction.
+    dst.commit().map_err(db)?;
     Ok(())
 }
 

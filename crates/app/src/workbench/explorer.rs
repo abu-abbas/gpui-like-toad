@@ -418,6 +418,12 @@ fn object_menu(
             is_table,
             |this, o, _, cx| this.import_table(o, cx),
         ))
+        .item(item(
+            "Data Transfer…",
+            IconName::ArrowLeftRight,
+            is_table,
+            |this, o, window, cx| this.open_data_transfer(Some(o), window, cx),
+        ))
         .when(is_table, |menu| {
             menu.separator()
                 .item(item(

@@ -199,7 +199,7 @@ pub fn save_profile_in(dir: &Path, profile: &TransferProfile) -> std::io::Result
     let mut all = load_profiles_in(dir);
     all.retain(|p| p.name != profile.name);
     all.push(profile.clone());
-    all.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    all.sort_by_key(|p| p.name.to_lowercase());
     fs::create_dir_all(dir)?;
     fs::write(
         dir.join(FILE),
@@ -236,9 +236,11 @@ mod tests {
             batch: 250,
             conditions: vec!["\"ID\" >= 1 AND \"ID\" < 10".into()],
         };
-        let mut options = TransferOptions::default();
-        options.convert_case = Some(NameCase::Lower);
-        options.continue_on_error = true;
+        let options = TransferOptions {
+            convert_case: Some(NameCase::Lower),
+            continue_on_error: true,
+            ..Default::default()
+        };
         TransferProfile {
             name: "nightly".into(),
             source_connection: "DEV".into(),

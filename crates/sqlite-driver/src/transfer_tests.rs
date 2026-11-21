@@ -45,6 +45,24 @@ impl Db {
         Db { client, path }
     }
 
+    /// Rows as another connection sees them: only committed work.
+    fn committed(&self, sql: &str) -> Vec<Vec<String>> {
+        let conn = rusqlite::Connection::open(&self.path).unwrap();
+        let mut stmt = conn.prepare(sql).unwrap();
+        let n = stmt.column_count();
+        stmt.query_map([], |r| {
+            (0..n)
+                .map(|i| {
+                    r.get::<_, rusqlite::types::Value>(i)
+                        .map(|v| format!("{v:?}"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    }
+
     fn rows(&mut self, sql: &str) -> Vec<Vec<String>> {
         self.client
             .query(sql, FetchLimits::grid())
@@ -139,6 +157,13 @@ fn auto_mode_copies_tables_rows_and_indexes() {
         .is_err());
     // Source untouched.
     assert_eq!(src.rows("SELECT count(*) FROM emp"), [["5"]]);
+    // Everything, indexes included, is committed, not just visible to
+    // the transferring session.
+    assert_eq!(dst.committed("SELECT count(*) FROM emp"), [["Integer(5)"]]);
+    assert_eq!(
+        dst.committed("SELECT name FROM sqlite_master WHERE type = 'index'"),
+        [["Text(\"emp_name\")"]]
+    );
 }
 
 #[test]
@@ -198,8 +223,10 @@ fn advanced_mode_renames_maps_fields_and_splits_recordsets() {
 fn name_case_conversion_applies_to_tables_and_columns() {
     let mut src = Db::new("case-src", SOURCE);
     let mut dst = Db::new("case-dst", "");
-    let mut o = TransferOptions::default();
-    o.convert_case = Some(ora_core::transfer::NameCase::Upper);
+    let o = TransferOptions {
+        convert_case: Some(ora_core::transfer::NameCase::Upper),
+        ..Default::default()
+    };
     let (summary, _) = run(
         &mut src,
         &mut dst,
@@ -226,8 +253,10 @@ fn existing_target_is_kept_unless_dropped_or_emptied() {
 
     // Empty target tables first.
     let mut dst = Db::new("empty-dst", existing);
-    let mut o = TransferOptions::default();
-    o.empty_target = true;
+    let o = TransferOptions {
+        empty_target: true,
+        ..Default::default()
+    };
     let (summary, _) = run(
         &mut src,
         &mut dst,
@@ -243,8 +272,10 @@ fn existing_target_is_kept_unless_dropped_or_emptied() {
 
     // Drop and recreate: the old structure is gone too.
     let mut dst = Db::new("drop-dst", "CREATE TABLE emp (only_col TEXT);");
-    let mut o = TransferOptions::default();
-    o.drop_target = true;
+    let o = TransferOptions {
+        drop_target: true,
+        ..Default::default()
+    };
     let (summary, _) = run(
         &mut src,
         &mut dst,
@@ -272,8 +303,10 @@ fn error_rolls_back_the_table_unless_continue_on_error() {
     assert_eq!(dst.rows("SELECT count(*) FROM emp"), [["1"]], "rolled back");
 
     let mut dst = Db::new("cont-dst", existing);
-    let mut o = TransferOptions::default();
-    o.continue_on_error = true;
+    let o = TransferOptions {
+        continue_on_error: true,
+        ..Default::default()
+    };
     let (summary, events) = run(
         &mut src,
         &mut dst,
@@ -352,8 +385,10 @@ fn invalid_spec_runs_nothing() {
 fn missing_source_table_fails_that_table_only() {
     let mut src = Db::new("miss-src", SOURCE);
     let mut dst = Db::new("miss-dst", "");
-    let mut o = TransferOptions::default();
-    o.continue_on_error = true;
+    let o = TransferOptions {
+        continue_on_error: true,
+        ..Default::default()
+    };
     let s = spec(vec![TableSpec::auto("nope"), TableSpec::auto("kv")], o);
     let (summary, _) = run(&mut src, &mut dst, &s, &AtomicBool::new(false));
     assert_eq!(summary.failed_tables(), 1);
@@ -382,4 +417,22 @@ fn script_target_writes_statements_without_touching_a_database() {
         .find("CREATE UNIQUE INDEX \"main\".\"emp_name\" ON \"main\".\"emp\"")
         .unwrap();
     assert!(commit < index, "indexes follow the rows");
+}
+
+#[test]
+fn structure_only_commits_the_new_tables() {
+    let mut src = Db::new("struct-src", SOURCE);
+    let mut dst = Db::new("struct-dst", "");
+    let o = TransferOptions {
+        create_records: false,
+        ..Default::default()
+    };
+    let s = spec(vec![TableSpec::auto("emp")], o);
+    let (summary, _) = run(&mut src, &mut dst, &s, &AtomicBool::new(false));
+    assert!(summary.ok(), "{summary:?}");
+    assert_eq!(dst.committed("SELECT count(*) FROM emp"), [["Integer(0)"]]);
+    assert_eq!(
+        dst.committed("SELECT count(*) FROM sqlite_master WHERE type = 'index'"),
+        [["Integer(1)"]]
+    );
 }
