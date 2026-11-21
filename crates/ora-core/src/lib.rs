@@ -25,6 +25,7 @@ pub mod pretty;
 pub mod redact;
 pub mod sql;
 pub mod store;
+pub mod timing;
 pub mod update;
 
 pub use client::{DbClient, DbError, DbInfo};

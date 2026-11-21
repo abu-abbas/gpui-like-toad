@@ -790,6 +790,7 @@ impl Workbench {
                 owner: object.owner.clone(),
                 name: object.name.clone(),
                 kind: object.kind,
+                show_storage: false,
             },
             PendingOp::Ddl {
                 owner: object.owner,
