@@ -89,6 +89,16 @@ impl TransferIo for WorkerIo {
         }
     }
 
+    fn triggers(&mut self, schema: &str, table: &str) -> Result<Vec<String>, DbError> {
+        match self.call(Job::TriggerScripts {
+            owner: schema.to_string(),
+            name: table.to_string(),
+        })? {
+            Response::TriggerScripts(scripts) => Ok(scripts),
+            _ => Err(unexpected()),
+        }
+    }
+
     fn table_exists(&mut self, schema: &str, table: &str) -> Result<bool, DbError> {
         if self.tables.as_ref().is_none_or(|(s, _)| s != schema) {
             let objects = match self.call(Job::ListObjects {

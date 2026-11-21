@@ -121,6 +121,7 @@ impl Workbench {
                 label_of(w.target),
                 w.target_schema.clone().unwrap_or_default()
             ),
+            TargetMode::File if w.file_csv => "CSV files".to_string(),
             TargetMode::File => "SQL file".to_string(),
         };
         let header = div()
@@ -402,7 +403,7 @@ impl Workbench {
                     .flex_row()
                     .gap(px(SPACE_2))
                     .child(mode("tr-mode-conn", "Connection", TargetMode::Connection))
-                    .child(mode("tr-mode-file", "SQL file", TargetMode::File)),
+                    .child(mode("tr-mode-file", "File", TargetMode::File)),
             );
         match w.target_mode {
             TargetMode::Connection => {
@@ -445,7 +446,46 @@ impl Workbench {
                             cx.notify();
                         }))
                 };
-                target = target
+                let format_button = |id: &'static str, label: &'static str, csv: bool| {
+                    Button::new(id)
+                        .small()
+                        .label(label)
+                        .selected(w.file_csv == csv)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(w) = this.transfer.as_mut() {
+                                w.file_csv = csv;
+                                w.file_from_dialog = false;
+                            }
+                            cx.notify();
+                        }))
+                };
+                target = target.child(form_label("Format", theme)).child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(SPACE_2))
+                        .child(format_button("tr-ff-sql", "SQL script", false))
+                        .child(format_button("tr-ff-csv", "CSV files", true)),
+                );
+                if w.file_csv {
+                    target = target
+                        .child(form_label("Folder (one .csv per table)", theme))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(SPACE_2))
+                                .child(Input::new(&w.file_input).flex_1())
+                                .child(Button::new("tr-browse").small().label("Browse…").on_click(
+                                    cx.listener(|this, _, _, cx| this.transfer_browse_file(cx)),
+                                )),
+                        )
+                        .child(muted(
+                            "Existing files are not overwritten unless Drop target objects before create is on. Keys, indexes and triggers do not apply to CSV.".into(),
+                            theme,
+                        ));
+                } else {
+                    target = target
                     .child(form_label("SQL file", theme))
                     .child(
                         div()
@@ -473,6 +513,7 @@ impl Workbench {
                             .into(),
                         theme,
                     ));
+                }
             }
         }
         let swap = div().flex().flex_none().items_start().pt(px(70.)).child(
@@ -951,10 +992,10 @@ impl Workbench {
             .child(check(
                 "op-trigger",
                 "Include triggers",
-                false,
-                |_, _| {},
+                o.include_triggers,
+                |o, v| o.include_triggers = v,
                 true,
-                false,
+                table_on,
             ))
             .child(check(
                 "op-case",
@@ -997,7 +1038,7 @@ impl Workbench {
                 .gap(px(SPACE_3))
                 .child(div().flex().flex_row().gap(px(SPACE_4)).child(left).child(right))
                 .child(muted(
-                    "Include checks and default values apply between the same kind of database (Oracle to Oracle, SQLite to SQLite). Foreign keys are created only to tables in this transfer. Include triggers is not available yet.".into(),
+                    "Include checks and default values apply between the same kind of database (Oracle to Oracle, SQLite to SQLite). Foreign keys are created only to tables in this transfer. Triggers are copied after the rows, between the same kind of database, and only for tables that keep their name and all columns.".into(),
                     theme,
                 )),
             Button::new("op-ok").small().primary().label("OK").on_click(
@@ -1244,6 +1285,7 @@ impl Workbench {
             let target = match &p.target {
                 ora_core::transfer::TransferTarget::Connection(n) => n.clone(),
                 ora_core::transfer::TransferTarget::SqlFile(path) => format!("file {path}"),
+                ora_core::transfer::TransferTarget::CsvDir(path) => format!("CSV folder {path}"),
             };
             list = list.child(
                 Button::new(("tr-prof", ix))
@@ -1385,6 +1427,7 @@ impl Workbench {
                     spec.source_schema,
                     match w.target_mode {
                         TargetMode::Connection => spec.target_schema.clone(),
+                        TargetMode::File if w.file_csv => "CSV files".to_string(),
                         TargetMode::File => "an SQL file".to_string(),
                     }
                 ),

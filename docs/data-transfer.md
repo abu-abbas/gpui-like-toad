@@ -40,10 +40,35 @@ real SQLite databases, and `ScriptIo` writes an SQL script. Source rows are
 read page by page ordered by row key (`ROWID` / `rowid`), so paging is
 stable; a source without a row key falls back to offset paging.
 
-## Not in this slice
+## Constraints, defaults, triggers, lock, CSV
 
-Foreign keys, check constraints, triggers, defaults, primary key
-constraints (unique indexes are copied), Lock source tables, CSV/XLSX file
-targets, views and other object kinds, binary values over 2000 bytes into
-Oracle, column types beyond a simple Oracle/SQLite mapping, and a transfer
-between two Oracle databases has not been run against a real server.
+* Primary key, UNIQUE, CHECK and foreign keys are read per table
+  (`DbClient::list_constraints`: `ALL_CONSTRAINTS` on Oracle, pragmas and the
+  stored `CREATE TABLE` on SQLite) and created unnamed, so names never
+  collide inside a schema. Primary key, unique and check go into
+  `CREATE TABLE`. Foreign keys go into `CREATE TABLE` on SQLite and are
+  added with `ALTER TABLE` after every table is copied on Oracle, and only
+  when the referenced table is part of the same transfer with all its
+  columns; otherwise the log says why it was skipped. An index that only
+  backs a copied key is not created twice.
+* Check expressions and default values are copied only between the same kind
+  of database, one plain expression each (no sequences, no schema-qualified
+  names, not when columns were renamed or left out).
+* Triggers (off by default) are copied after the rows, between the same kind
+  of database, for tables that keep their name and all columns; a failing
+  trigger is logged and skipped. Oracle triggers come from
+  `DBMS_METADATA` with the schema prefix rewritten.
+* Lock source tables runs `LOCK TABLE ... IN SHARE MODE` on Oracle sources
+  and releases it at the end. SQLite has nothing to lock.
+* The file target can write CSV: one `<table>.csv` per table in a folder,
+  header row, formula-safe text cells. Existing files are only replaced when
+  Drop target objects before create is on. Keys, indexes and triggers do not
+  apply to CSV.
+
+## Not done
+
+XLSX file targets, views and other object kinds, binary values over 2000
+bytes into Oracle, column types beyond a simple Oracle/SQLite mapping, and
+the Oracle paths (constraint queries, trigger DDL, LOCK TABLE, keyset paging
+on huge tables) have only been checked against SQLite and unit tests, not a
+real Oracle server.

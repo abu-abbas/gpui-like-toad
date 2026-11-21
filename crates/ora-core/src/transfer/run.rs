@@ -31,6 +31,10 @@ pub trait TransferIo {
     fn constraints(&mut self, _schema: &str, _table: &str) -> Result<Vec<ConstraintDef>, DbError> {
         Ok(Vec::new())
     }
+    /// `CREATE TRIGGER` scripts of a table; a side that cannot tell reports none.
+    fn triggers(&mut self, _schema: &str, _table: &str) -> Result<Vec<String>, DbError> {
+        Ok(Vec::new())
+    }
     fn table_exists(&mut self, schema: &str, table: &str) -> Result<bool, DbError>;
     /// Run a SELECT, at most `max_rows` rows, cells up to the export limit.
     fn read(&mut self, sql: &str, max_rows: usize) -> Result<QueryResult, DbError>;
@@ -39,6 +43,20 @@ pub trait TransferIo {
     fn execute_many(&mut self, statements: &[String]) -> Result<u64, (usize, DbError)>;
     fn commit(&mut self) -> Result<(), DbError>;
     fn rollback(&mut self) -> Result<(), DbError>;
+    /// The target takes rows directly (CSV files) instead of SQL: no
+    /// tables, constraints or indexes are created, and `write_rows` is used.
+    fn writes_rows(&self) -> bool {
+        false
+    }
+    /// Append `rows` (values in `columns` order) to the target table's file.
+    fn write_rows(
+        &mut self,
+        _table: &str,
+        _columns: &[String],
+        _rows: &[Vec<crate::model::Value>],
+    ) -> Result<(), DbError> {
+        Err(DbError::new("this target does not take rows"))
+    }
 }
 
 /// [`TransferIo`] over a plain [`DbClient`] (tests, and the app's workers
@@ -57,6 +75,9 @@ impl TransferIo for ClientIo<'_> {
     }
     fn constraints(&mut self, schema: &str, table: &str) -> Result<Vec<ConstraintDef>, DbError> {
         self.0.list_constraints(schema, table)
+    }
+    fn triggers(&mut self, schema: &str, table: &str) -> Result<Vec<String>, DbError> {
+        self.0.trigger_scripts(schema, table)
     }
     fn table_exists(&mut self, schema: &str, table: &str) -> Result<bool, DbError> {
         Ok(self
@@ -338,6 +359,32 @@ fn copy_table(
     }
     let mut key_columns: Vec<Vec<String>> = Vec::new();
 
+    if dst.writes_rows() {
+        // CSV: one file per table; structure options do not apply.
+        outcome.created = true;
+        if o.create_records && !cx.cancelled() {
+            copy_rows(
+                src,
+                dst,
+                spec,
+                index,
+                table,
+                target_name,
+                &plan,
+                outcome,
+                cx,
+            )?;
+        }
+        // A table without rows still gets its header-only file.
+        dst.write_rows(
+            target_name,
+            &plan.iter().map(|p| p.target.clone()).collect::<Vec<_>>(),
+            &[],
+        )
+        .map_err(db)?;
+        return Ok(());
+    }
+
     let mut exists = if dst.is_script() {
         !o.create_tables
     } else {
@@ -443,10 +490,68 @@ fn copy_table(
             }
         }
     }
+    if outcome.created && o.include_triggers && !cx.cancelled() {
+        copy_triggers(src, dst, spec, table, target_name, cx);
+    }
     // DDL after the last commit (indexes, or a table created without
     // rows) must not be left in an open transaction.
     dst.commit().map_err(db)?;
     Ok(())
+}
+
+/// Re-create the source table's triggers on the new target table. Same
+/// engine only: trigger bodies are engine specific. The text is the
+/// database's own `CREATE TRIGGER` script; Oracle's schema prefix is
+/// rewritten to the target schema. A trigger that fails is logged and
+/// skipped, the table stays.
+fn copy_triggers(
+    src: &mut dyn TransferIo,
+    dst: &mut dyn TransferIo,
+    spec: &TransferSpec,
+    table: &super::spec::TableSpec,
+    target_name: &str,
+    cx: &mut Ctx<'_>,
+) {
+    let name = &table.source;
+    if src.kind() != dst.kind() {
+        cx.log(
+            LogLevel::Warn,
+            format!("{name}: triggers not copied: trigger bodies are engine specific."),
+        );
+        return;
+    }
+    if !matches!(table.fields, Fields::All) || !target_name.eq_ignore_ascii_case(name) {
+        cx.log(
+            LogLevel::Warn,
+            format!(
+                "{name}: triggers not copied: the table or its columns were renamed or left out."
+            ),
+        );
+        return;
+    }
+    let scripts = match src.triggers(&spec.source_schema, name) {
+        Ok(s) => s,
+        Err(e) => {
+            cx.log(LogLevel::Warn, format!("{name}: triggers not read: {e}"));
+            return;
+        }
+    };
+    for script in scripts {
+        let sql = if src.kind() == DbKind::Oracle {
+            script.replace(
+                &format!("\"{}\".", spec.source_schema),
+                &format!("\"{}\".", spec.target_schema),
+            )
+        } else {
+            script
+        };
+        if let Err((_, e)) = dst.execute_many(&[sql]) {
+            cx.log(
+                LogLevel::Warn,
+                format!("{target_name}: a trigger was not created: {e}"),
+            );
+        }
+    }
 }
 
 /// Read the source table's constraints and decide what the new target
@@ -605,6 +710,29 @@ fn copy_rows(
                     break;
                 }
                 let more = page.truncated || page.rows.len() >= batch;
+                if dst.writes_rows() {
+                    let names: Vec<String> = plan.iter().map(|p| p.target.clone()).collect();
+                    let skip = usize::from(keyed);
+                    let rows: Vec<Vec<crate::model::Value>> =
+                        page.rows.iter().map(|r| r[skip..].to_vec()).collect();
+                    dst.write_rows(target_name, &names, &rows).map_err(db)?;
+                    outcome.rows += rows.len() as u64;
+                    (cx.emit)(Event::Rows {
+                        index,
+                        done: outcome.rows,
+                    });
+                    if !more {
+                        break;
+                    }
+                    paging = match paging {
+                        Paging::Keyset(_) => match page.rows.last().and_then(|r| r.first()) {
+                            Some(key) => Paging::Keyset(Resume::After(key.clone())),
+                            None => break,
+                        },
+                        Paging::Offset(n) => Paging::Offset(n + page.rows.len()),
+                    };
+                    continue;
+                }
                 let statements = sqlgen::insert_statements(
                     dd,
                     &spec.target_schema,
@@ -770,5 +898,124 @@ impl<W: std::io::Write> TransferIo for ScriptIo<W> {
     }
     fn rollback(&mut self) -> Result<(), DbError> {
         self.line("ROLLBACK;")
+    }
+}
+
+/// Writes each table as `<folder>/<table>.csv` (header row, formula-safe
+/// text cells). Nothing is read back; structure statements are ignored.
+pub struct CsvIo {
+    dir: std::path::PathBuf,
+    overwrite: bool,
+    open: std::collections::HashMap<String, std::io::BufWriter<std::fs::File>>,
+}
+
+impl CsvIo {
+    /// `overwrite`: replace files that already exist in the folder.
+    pub fn new(dir: impl Into<std::path::PathBuf>, overwrite: bool) -> Self {
+        CsvIo {
+            dir: dir.into(),
+            overwrite,
+            open: Default::default(),
+        }
+    }
+
+    /// File name for a table: keeps letters, digits and `_-.`, so a table
+    /// name can never point outside the folder.
+    pub fn file_name(table: &str) -> String {
+        let mut name: String = table
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || matches!(c, '_' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if name.is_empty() {
+            name.push('_');
+        }
+        format!("{name}.csv")
+    }
+
+    /// Flush and close every file.
+    pub fn finish(&mut self) -> Result<(), DbError> {
+        use std::io::Write;
+        for (_, mut w) in self.open.drain() {
+            w.flush()
+                .map_err(|e| DbError::new(format!("writing a CSV file failed: {e}")))?;
+        }
+        Ok(())
+    }
+}
+
+impl TransferIo for CsvIo {
+    fn kind(&self) -> DbKind {
+        DbKind::Sqlite
+    }
+    fn is_script(&self) -> bool {
+        true
+    }
+    fn writes_rows(&self) -> bool {
+        true
+    }
+    fn describe(&mut self, _: &str, _: &str) -> Result<Vec<ColumnDef>, DbError> {
+        Ok(Vec::new())
+    }
+    fn indexes(&mut self, _: &str, _: &str) -> Result<Vec<IndexDef>, DbError> {
+        Ok(Vec::new())
+    }
+    fn table_exists(&mut self, _: &str, _: &str) -> Result<bool, DbError> {
+        Ok(false)
+    }
+    fn read(&mut self, _: &str, _: usize) -> Result<QueryResult, DbError> {
+        Err(DbError::new("a CSV target cannot be read"))
+    }
+    fn execute_many(&mut self, statements: &[String]) -> Result<u64, (usize, DbError)> {
+        Ok(statements.len() as u64)
+    }
+    fn commit(&mut self) -> Result<(), DbError> {
+        Ok(())
+    }
+    fn rollback(&mut self) -> Result<(), DbError> {
+        Ok(())
+    }
+    fn write_rows(
+        &mut self,
+        table: &str,
+        columns: &[String],
+        rows: &[Vec<crate::model::Value>],
+    ) -> Result<(), DbError> {
+        use crate::export::{write_csv_header, write_csv_row, CsvMode};
+        let io = |e: std::io::Error| DbError::new(format!("writing a CSV file failed: {e}"));
+        if !self.open.contains_key(table) {
+            let path = self.dir.join(Self::file_name(table));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true);
+            if self.overwrite {
+                options.create(true).truncate(true);
+            } else {
+                options.create_new(true);
+            }
+            let file = options.open(&path).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    DbError::new(format!(
+                        "{} already exists (turn on Drop target objects before create to overwrite it)",
+                        Self::file_name(table)
+                    ))
+                } else {
+                    DbError::new(format!("cannot create {}: {e}", Self::file_name(table)))
+                }
+            })?;
+            let mut w = std::io::BufWriter::new(file);
+            write_csv_header(&mut w, columns, CsvMode::SpreadsheetSafe).map_err(io)?;
+            self.open.insert(table.to_string(), w);
+        }
+        if let Some(w) = self.open.get_mut(table) {
+            for row in rows {
+                write_csv_row(w, row, CsvMode::SpreadsheetSafe).map_err(io)?;
+            }
+        }
+        Ok(())
     }
 }

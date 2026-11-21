@@ -200,6 +200,11 @@ pub enum Job {
         owner: String,
         name: String,
     },
+    /// CREATE TRIGGER scripts of one table, for Data Transfer.
+    TriggerScripts {
+        owner: String,
+        name: String,
+    },
     /// Constraints of one table, for Data Transfer.
     Constraints {
         owner: String,
@@ -300,6 +305,7 @@ pub enum Response {
     Described(Vec<ColumnDef>),
     Indexes(Vec<IndexDef>),
     Constraints(Vec<ora_core::ConstraintDef>),
+    TriggerScripts(Vec<String>),
     Plan(Vec<String>),
     /// Structured plan nodes for the tree panel, plus the DBMS_XPLAN text
     /// lines for the Explain Plan sub-tab (empty when the text path failed).
@@ -795,6 +801,13 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
         Job::Indexes { owner, name } => match client.as_mut() {
             Some(client) => match client.list_indexes(&owner, &name) {
                 Ok(indexes) => Response::Indexes(indexes),
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
+        Job::TriggerScripts { owner, name } => match client.as_mut() {
+            Some(client) => match client.trigger_scripts(&owner, &name) {
+                Ok(scripts) => Response::TriggerScripts(scripts),
                 Err(err) => Response::Failed(err.to_string()),
             },
             None => Response::Failed("not connected".to_string()),

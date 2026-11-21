@@ -125,6 +125,8 @@ pub(super) struct TransferWizard {
     pub file_schema: Entity<InputState>,
     pub file_from_dialog: bool,
     pub script_kind: DbKind,
+    /// File target: one CSV per table in a folder instead of an SQL script.
+    pub file_csv: bool,
     pub tables: Vec<String>,
     pub tables_state: TablesState,
     pub selected: BTreeSet<String>,
@@ -294,6 +296,7 @@ impl Workbench {
             file_schema: input("Schema name used in the script", "", window, cx),
             file_from_dialog: false,
             script_kind: source_kind.unwrap_or(DbKind::Oracle),
+            file_csv: false,
             tables: Vec::new(),
             tables_state: TablesState::Idle,
             selected: table.iter().map(|t| t.name.clone()).collect(),
@@ -510,7 +513,23 @@ impl Workbench {
 
     pub(super) fn transfer_browse_file(&mut self, cx: &mut Context<Self>) {
         let dir = store::config_dir();
-        let prompt = cx.prompt_for_new_path(&dir, Some("transfer.sql"));
+        let csv = self.transfer.as_ref().is_some_and(|w| w.file_csv);
+        let folder = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        let file = cx.prompt_for_new_path(&dir, Some("transfer.sql"));
+        let prompt = async move {
+            if csv {
+                folder
+                    .await
+                    .map(|r| r.map(|p| p.and_then(|mut v| (!v.is_empty()).then(|| v.remove(0)))))
+            } else {
+                file.await
+            }
+        };
         let handle = self.window_handle;
         cx.spawn(async move |view, cx| {
             let Ok(Ok(Some(path))) = prompt.await else {
@@ -556,6 +575,15 @@ impl Workbench {
             }
             TargetMode::File => {
                 let path = w.file_input.read(cx).value().trim().to_string();
+                if w.file_csv {
+                    if path.is_empty() {
+                        return Some("Enter the folder that receives the CSV files.".to_string());
+                    }
+                    if !std::path::Path::new(&path).is_dir() {
+                        return Some("That folder does not exist.".to_string());
+                    }
+                    return None;
+                }
                 if path.is_empty() {
                     return Some("Enter the path of the SQL file to write.".to_string());
                 }
@@ -1134,6 +1162,7 @@ impl Workbench {
         enum Sink {
             Db(WorkerIo, u64),
             File(PathBuf, DbKind),
+            Csv(PathBuf, bool),
         }
         let sink = match w.target_mode {
             TargetMode::Connection => {
@@ -1161,7 +1190,11 @@ impl Workbench {
             }
             TargetMode::File => {
                 let path = PathBuf::from(w.file_input.read(cx).value().trim());
-                Sink::File(path, w.script_kind)
+                if w.file_csv {
+                    Sink::Csv(path, spec.options.drop_target && spec.options.create_tables)
+                } else {
+                    Sink::File(path, w.script_kind)
+                }
             }
         };
         let objects = spec.tables.len();
@@ -1170,7 +1203,7 @@ impl Workbench {
         let thread_cancel = cancel.clone();
         let target_conn = match &sink {
             Sink::Db(_, id) => Some(*id),
-            Sink::File(..) => None,
+            Sink::File(..) | Sink::Csv(..) => None,
         };
         let target_schema = spec.target_schema.clone();
         std::thread::spawn(move || {
@@ -1182,6 +1215,15 @@ impl Workbench {
             let summary = match sink {
                 Sink::Db(mut dst, _) => {
                     run_transfer(&mut source, &mut dst, &spec, &thread_cancel, &mut emit)
+                }
+                Sink::Csv(dir, overwrite) => {
+                    let mut dst = ora_core::transfer::CsvIo::new(dir, overwrite);
+                    let summary =
+                        run_transfer(&mut source, &mut dst, &spec, &thread_cancel, &mut emit);
+                    if let Err(e) = dst.finish() {
+                        emit(Event::Log(LogLevel::Error, e.to_string()));
+                    }
+                    summary
                 }
                 Sink::File(path, kind) => match std::fs::File::create(&path) {
                     Ok(file) => {
@@ -1343,7 +1385,12 @@ impl Workbench {
                         .label,
                 ),
                 TargetMode::File => {
-                    TransferTarget::SqlFile(w.file_input.read(cx).value().trim().to_string())
+                    let path = w.file_input.read(cx).value().trim().to_string();
+                    if w.file_csv {
+                        TransferTarget::CsvDir(path)
+                    } else {
+                        TransferTarget::SqlFile(path)
+                    }
                 }
             };
             let profile = TransferProfile {
@@ -1409,7 +1456,7 @@ impl Workbench {
                     )
                 }
             },
-            TransferTarget::SqlFile(_) => None,
+            TransferTarget::SqlFile(_) | TransferTarget::CsvDir(_) => None,
         };
         let spec = profile.spec.clone();
         let Some(w) = self.wizard() else {
@@ -1427,8 +1474,9 @@ impl Workbench {
                 w.target_schema = Some(spec.target_schema.clone());
                 w.target_schemas.clear();
             }
-            TransferTarget::SqlFile(path) => {
+            TransferTarget::SqlFile(path) | TransferTarget::CsvDir(path) => {
                 w.target_mode = TargetMode::File;
+                w.file_csv = matches!(profile.target, TransferTarget::CsvDir(_));
                 let (file, schema) = (w.file_input.clone(), w.file_schema.clone());
                 w.file_from_dialog = false;
                 set_text(&file, path, window, cx);

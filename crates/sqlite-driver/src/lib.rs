@@ -285,6 +285,10 @@ impl DbClient for SqliteClient {
         catalog::list_constraints(self.conn()?, owner, table)
     }
 
+    fn trigger_scripts(&mut self, owner: &str, table: &str) -> Result<Vec<String>, DbError> {
+        catalog::trigger_scripts(self.conn()?, owner, table)
+    }
+
     fn explain_plan(&mut self, sql: &str) -> Result<Vec<String>, DbError> {
         Ok(plan::as_text(&plan::nodes(self.conn()?, sql)?))
     }

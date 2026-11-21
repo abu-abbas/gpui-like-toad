@@ -35,6 +35,8 @@ pub struct TransferOptions {
     pub include_uniques: bool,
     /// Create CHECK constraints (same engine only).
     pub include_checks: bool,
+    /// Copy the triggers of each new table (same engine only, after the rows).
+    pub include_triggers: bool,
     /// Create foreign keys (to tables that are part of this transfer).
     pub include_foreign_keys: bool,
     /// Keep column DEFAULT expressions (same engine only).
@@ -69,6 +71,7 @@ impl Default for TransferOptions {
             include_checks: true,
             include_foreign_keys: true,
             include_defaults: true,
+            include_triggers: false,
             lock_source: false,
             create_records: true,
             use_transaction: true,

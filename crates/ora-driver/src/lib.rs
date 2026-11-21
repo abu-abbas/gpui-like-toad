@@ -1072,6 +1072,55 @@ impl DbClient for ThinClient {
         Ok(result)
     }
 
+    fn trigger_scripts(&mut self, owner: &str, table: &str) -> Result<Vec<String>, DbError> {
+        let conn = self.conn()?;
+        let owner_upper = owner.trim().to_ascii_uppercase();
+        let table_upper = table.trim().to_ascii_uppercase();
+        let owner_param: &str = &owner_upper;
+        let table_param: &str = &table_upper;
+        let cursor = conn
+            .query(
+                "SELECT owner, trigger_name FROM all_triggers \
+                 WHERE table_owner = :1 AND table_name = :2 AND base_object_type = 'TABLE' \
+                 ORDER BY trigger_name",
+                &[&owner_param, &table_param],
+            )
+            .map_err(db_err)?;
+        let mut names = Vec::new();
+        for row in cursor {
+            let row = row.map_err(db_err)?;
+            let o: String = row.get(0).map_err(db_err)?;
+            let n: String = row.get(1).map_err(db_err)?;
+            names.push((o, n));
+        }
+        let mut out = Vec::new();
+        for (o, n) in names {
+            let (kind, name_param, owner_param): (&str, &str, &str) = ("TRIGGER", &n, &o);
+            let cursor = conn
+                .query(
+                    "SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM dual",
+                    &[&kind, &name_param, &owner_param],
+                )
+                .map_err(db_err)?;
+            let Some(row) = cursor.into_iter().next() else {
+                continue;
+            };
+            let ddl: Option<String> = row.map_err(db_err)?.get(0).map_err(db_err)?;
+            let ddl = ddl.unwrap_or_default();
+            // GET_DDL appends `ALTER TRIGGER ... ENABLE`; new triggers are
+            // enabled anyway and it is a second statement.
+            let cut = ddl
+                .to_ascii_uppercase()
+                .rfind("\nALTER TRIGGER")
+                .unwrap_or(ddl.len());
+            let text = ddl[..cut].trim().to_string();
+            if !text.is_empty() {
+                out.push(text);
+            }
+        }
+        Ok(out)
+    }
+
     fn routine_signature(
         &mut self,
         owner: &str,

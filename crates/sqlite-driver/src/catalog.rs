@@ -280,6 +280,26 @@ pub(crate) fn list_constraints(
     Ok(out)
 }
 
+/// `CREATE TRIGGER` text of the triggers on one table.
+pub(crate) fn trigger_scripts(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>, DbError> {
+    let sql = format!(
+        "SELECT sql FROM {}.sqlite_master \
+         WHERE type = 'trigger' AND tbl_name = :1 AND sql IS NOT NULL ORDER BY name",
+        quote(schema)
+    );
+    let mut stmt = conn.prepare(&sql).map_err(db_err)?;
+    let out = stmt
+        .query_map([table], |r| r.get::<_, String>(0))
+        .map_err(db_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    Ok(out)
+}
+
 /// The text inside every `CHECK ( ... )` of a `CREATE TABLE`, skipping
 /// quoted text. Used for column and table CHECKs alike.
 fn check_conditions(ddl: &str) -> Vec<String> {

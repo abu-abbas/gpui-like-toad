@@ -24,6 +24,7 @@ pub mod sqlgen;
 
 pub use profile::{TransferProfile, TransferTarget};
 pub use run::{
-    run_transfer, ClientIo, Event, LogLevel, ScriptIo, TableOutcome, TransferIo, TransferSummary,
+    run_transfer, ClientIo, CsvIo, Event, LogLevel, ScriptIo, TableOutcome, TransferIo,
+    TransferSummary,
 };
 pub use spec::{FieldMap, Fields, NameCase, Rows, TableSpec, TransferOptions, TransferSpec};

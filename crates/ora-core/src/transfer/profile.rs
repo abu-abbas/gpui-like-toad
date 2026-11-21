@@ -14,6 +14,8 @@ pub enum TransferTarget {
     Connection(String),
     /// An SQL script file.
     SqlFile(String),
+    /// A folder that receives one CSV file per table.
+    CsvDir(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +46,7 @@ fn options_json(o: &TransferOptions) -> Json {
         ),
         ("include_defaults".into(), Json::Bool(o.include_defaults)),
         ("lock_source".into(), Json::Bool(o.lock_source)),
+        ("include_triggers".into(), Json::Bool(o.include_triggers)),
         ("create_records".into(), Json::Bool(o.create_records)),
         ("use_transaction".into(), Json::Bool(o.use_transaction)),
         ("complete_inserts".into(), Json::Bool(o.complete_inserts)),
@@ -96,6 +99,7 @@ impl TransferProfile {
         let (kind, target) = match &self.target {
             TransferTarget::Connection(n) => ("connection", n),
             TransferTarget::SqlFile(p) => ("sql_file", p),
+            TransferTarget::CsvDir(p) => ("csv_dir", p),
         };
         Json::Obj(vec![
             ("name".into(), s(&self.name)),
@@ -118,6 +122,7 @@ impl TransferProfile {
         let target = match text("target_kind")?.as_str() {
             "connection" => TransferTarget::Connection(target),
             "sql_file" => TransferTarget::SqlFile(target),
+            "csv_dir" => TransferTarget::CsvDir(target),
             _ => return None,
         };
         let o = v.get("options")?;
@@ -132,6 +137,7 @@ impl TransferProfile {
             include_foreign_keys: flag("include_foreign_keys", d.include_foreign_keys),
             include_defaults: flag("include_defaults", d.include_defaults),
             lock_source: flag("lock_source", d.lock_source),
+            include_triggers: flag("include_triggers", d.include_triggers),
             create_records: flag("create_records", d.create_records),
             use_transaction: flag("use_transaction", d.use_transaction),
             complete_inserts: flag("complete_inserts", d.complete_inserts),

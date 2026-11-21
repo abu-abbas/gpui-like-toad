@@ -570,3 +570,101 @@ fn foreign_key_to_a_table_outside_the_transfer_is_skipped_with_a_log() {
         .iter()
         .all(|c| c.kind != ora_core::ConstraintKind::ForeignKey));
 }
+
+#[test]
+fn triggers_are_copied_after_the_rows_and_fire_on_the_target() {
+    let mut src = Db::new(
+        "trg-src",
+        "CREATE TABLE a (id INTEGER PRIMARY KEY, n INTEGER);
+         CREATE TABLE log (msg TEXT);
+         CREATE TRIGGER a_ins AFTER INSERT ON a BEGIN INSERT INTO log VALUES ('ins ' || NEW.id); END;
+         INSERT INTO a VALUES (1, 10), (2, 20);",
+    );
+    let mut dst = Db::new("trg-dst", "");
+    let s = spec(
+        vec![TableSpec::auto("a"), TableSpec::auto("log")],
+        TransferOptions {
+            include_triggers: true,
+            ..TransferOptions::default()
+        },
+    );
+    let (summary, _) = run(&mut src, &mut dst, &s, &AtomicBool::new(false));
+    assert!(summary.ok(), "{summary:?}");
+    // The load itself did not fire the trigger: the log holds the source's rows.
+    assert_eq!(dst.rows("SELECT count(*) FROM log"), [["2"]]);
+    dst.client.execute("INSERT INTO a VALUES (3, 30)").unwrap();
+    assert_eq!(dst.rows("SELECT count(*) FROM log"), [["3"]]);
+}
+
+#[test]
+fn triggers_stay_off_unless_asked() {
+    let mut src = Db::new(
+        "trgoff-src",
+        "CREATE TABLE a (id INTEGER PRIMARY KEY);
+         CREATE TRIGGER a_ins AFTER INSERT ON a BEGIN SELECT 1; END;",
+    );
+    let mut dst = Db::new("trgoff-dst", "");
+    let s = spec(vec![TableSpec::auto("a")], TransferOptions::default());
+    let (summary, _) = run(&mut src, &mut dst, &s, &AtomicBool::new(false));
+    assert!(summary.ok());
+    assert!(dst.client.trigger_scripts("main", "a").unwrap().is_empty());
+}
+
+#[test]
+fn csv_target_writes_one_safe_file_per_table_and_refuses_to_overwrite() {
+    use ora_core::transfer::CsvIo;
+    let mut src = Db::new("csv-src", SOURCE);
+    // nosemgrep: rust.lang.security.temp-dir.temp-dir
+    let dir = std::env::temp_dir().join(format!("transfer-csv-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let s = spec(
+        vec![TableSpec::auto("emp"), TableSpec::auto("we\"ird")],
+        TransferOptions::default(),
+    );
+    let mut io = CsvIo::new(&dir, false);
+    let summary = run_transfer(
+        &mut ClientIo(&mut src.client),
+        &mut io,
+        &s,
+        &AtomicBool::new(false),
+        &mut |_| {},
+    );
+    io.finish().unwrap();
+    assert!(summary.ok(), "{summary:?}");
+    assert_eq!(summary.rows(), 6);
+    let emp = std::fs::read_to_string(dir.join("emp.csv")).unwrap();
+    assert!(
+        emp.starts_with("id,name,salary,note\r\n1,Ana,50,it's fine\r\n"),
+        "{emp}"
+    );
+    assert!(dir.join("we_ird.csv").exists());
+
+    // A second run does not overwrite...
+    let mut io = CsvIo::new(&dir, false);
+    let summary = run_transfer(
+        &mut ClientIo(&mut src.client),
+        &mut io,
+        &s,
+        &AtomicBool::new(false),
+        &mut |_| {},
+    );
+    assert!(!summary.ok());
+    assert!(summary.tables[0]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("already exists"));
+    // ...unless asked to.
+    let mut io = CsvIo::new(&dir, true);
+    let summary = run_transfer(
+        &mut ClientIo(&mut src.client),
+        &mut io,
+        &s,
+        &AtomicBool::new(false),
+        &mut |_| {},
+    );
+    io.finish().unwrap();
+    assert!(summary.ok(), "{summary:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

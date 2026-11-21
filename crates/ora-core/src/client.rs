@@ -311,6 +311,13 @@ pub trait DbClient: Send {
         ))
     }
 
+    /// `CREATE TRIGGER` statements of the triggers on one table, one string
+    /// each, as the database stores them (for Data Transfer between two
+    /// databases of the same kind).
+    fn trigger_scripts(&mut self, _owner: &str, _table: &str) -> Result<Vec<String>, DbError> {
+        Err(DbError::new("triggers are not supported by this backend"))
+    }
+
     /// Parameters and return type of a standalone function (empty return
     /// type for a procedure), for Execute Function.
     fn routine_signature(
