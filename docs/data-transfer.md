@@ -67,7 +67,7 @@ stable; a source without a row key falls back to offset paging.
 
 ## Not done
 
-XLSX file targets, views and other object kinds, binary values over 2000
+XLSX file targets, other object kinds (views are copied as plain tables, rows read without a stable order), binary values over 2000
 bytes into Oracle, column types beyond a simple Oracle/SQLite mapping, and
 the Oracle paths (constraint queries, trigger DDL, LOCK TABLE, keyset paging
 on huge tables) have only been checked against SQLite and unit tests, not a

@@ -616,6 +616,14 @@ impl Workbench {
                             .text_color(theme.foreground)
                             .child(table.clone()),
                     )
+                    .when(w.views.contains(table), |d| {
+                        d.child(
+                            div()
+                                .text_size(crate::theme::ui_size(theme, FONT_CAPTION))
+                                .text_color(theme.muted_foreground)
+                                .child("view"),
+                        )
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.transfer_focus_table(&name, window, cx)
                     })),
@@ -695,6 +703,12 @@ impl Workbench {
             .gap(px(SPACE_2))
             .overflow_y_scroll()
             .child(section(&table, theme))
+            .when(w.views.contains(&table), |d| {
+                d.child(muted(
+                    "A view: its rows are copied into a new table (no keys, indexes or triggers). Rows are read without a stable order.".into(),
+                    theme,
+                ))
+            })
             .child(form_label("Transfer Mode", theme))
             .child(
                 div()

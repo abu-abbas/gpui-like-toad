@@ -668,3 +668,21 @@ fn csv_target_writes_one_safe_file_per_table_and_refuses_to_overwrite() {
     assert!(summary.ok(), "{summary:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_view_is_copied_as_a_plain_table() {
+    let mut src = Db::new("view-src", SOURCE);
+    let mut dst = Db::new("view-dst", "");
+    let s = spec(vec![TableSpec::auto("rich")], TransferOptions::default());
+    let (summary, events) = run(&mut src, &mut dst, &s, &AtomicBool::new(false));
+    assert!(summary.ok(), "{summary:?}");
+    assert_eq!(summary.rows(), 1);
+    assert_eq!(dst.rows("SELECT name FROM rich"), [["Budi"]]);
+    assert_eq!(
+        dst.rows("SELECT type FROM sqlite_master WHERE name = 'rich'"),
+        [["table"]]
+    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::Log(LogLevel::Warn, m) if m.contains("no usable row key"))));
+}

@@ -128,6 +128,8 @@ pub(super) struct TransferWizard {
     /// File target: one CSV per table in a folder instead of an SQL script.
     pub file_csv: bool,
     pub tables: Vec<String>,
+    /// Names in `tables` that are views (transferred as new tables).
+    pub views: BTreeSet<String>,
     pub tables_state: TablesState,
     pub selected: BTreeSet<String>,
     pub search: Entity<InputState>,
@@ -298,6 +300,7 @@ impl Workbench {
             script_kind: source_kind.unwrap_or(DbKind::Oracle),
             file_csv: false,
             tables: Vec::new(),
+            views: BTreeSet::new(),
             tables_state: TablesState::Idle,
             selected: table.iter().map(|t| t.name.clone()).collect(),
             search: input("Search tables", "", window, cx),
@@ -410,12 +413,18 @@ impl Workbench {
                 }
                 match reply {
                     Ok(Response::Objects(objects)) => {
+                        let views: BTreeSet<String> = objects
+                            .iter()
+                            .filter(|o| o.kind == ObjectKind::View)
+                            .map(|o| o.name.clone())
+                            .collect();
                         let mut tables: Vec<String> = objects
                             .into_iter()
-                            .filter(|o| o.kind == ObjectKind::Table)
+                            .filter(|o| matches!(o.kind, ObjectKind::Table | ObjectKind::View))
                             .map(|o| o.name)
                             .collect();
                         tables.sort();
+                        w.views = views;
                         w.selected.retain(|t| tables.contains(t));
                         w.configs.retain(|t, _| tables.contains(t));
                         w.tables = tables;
@@ -435,6 +444,7 @@ impl Workbench {
         w.configs.clear();
         w.focus = None;
         w.tables.clear();
+        w.views.clear();
         w.tables_state = TablesState::Idle;
         w.error = None;
     }
