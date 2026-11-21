@@ -205,6 +205,7 @@ mod tool_tests {
 
     #[test]
     fn round_trip_and_repair() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join(format!("kilat-tools-{}", new_tool_id()));
         let mut redis = ToolInstance::new(ToolKind::Redis);
         redis.name = "Local cache".into();

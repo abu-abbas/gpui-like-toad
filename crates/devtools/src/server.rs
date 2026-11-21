@@ -521,6 +521,7 @@ mod tests {
     use super::*;
 
     fn temp() -> PathBuf {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let d = std::env::temp_dir().join(format!(
             "kilat-server-{}-{}",
             std::process::id(),
