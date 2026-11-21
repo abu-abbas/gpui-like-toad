@@ -215,24 +215,53 @@ impl Workbench {
                         })),
                 )
         });
-        nav.child(div().flex_1().min_h(px(0.))).child(
-            tree_button(Button::new("sidebar-settings"), keyboard, cx)
-                .small()
-                .w_full()
-                .h(px(34.))
-                .tooltip("Settings")
-                .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .w_full()
-                        .gap(px(6.))
-                        .when(compact, |row| row.justify_center())
-                        .child(icon(IconName::Settings, 16., theme.muted_foreground))
-                        .when(!compact, |row| row.child("Settings")),
-                ),
-        )
+        let settings = tree_button(Button::new("sidebar-settings"), keyboard, cx)
+            .small()
+            .h(px(34.))
+            .tooltip("Settings")
+            .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .w_full()
+                    .gap(px(6.))
+                    .when(compact, |row| row.justify_center())
+                    .child(icon(IconName::Settings, 16., theme.muted_foreground))
+                    .when(!compact, |row| row.child("Settings")),
+            );
+        let toggle = Button::new("toggle-sidebar")
+            .ghost()
+            .small()
+            .icon(IconName::PanelLeft)
+            .tooltip(if compact {
+                "Expand connections sidebar"
+            } else {
+                "Collapse connections sidebar"
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.sidebar_compact = !this.sidebar_compact;
+                cx.notify();
+            }));
+        // Expanded: Settings on the left, the toggle pulled to the right
+        // edge. Compact rail (too narrow for both): toggle above Settings.
+        nav.child(div().flex_1().min_h(px(0.))).child(if compact {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(2.))
+                .child(toggle)
+                .child(settings.w_full())
+        } else {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(SPACE_1))
+                .child(settings.flex_1().min_w(px(0.)))
+                .child(toggle)
+        })
     }
 
     pub(super) fn render_history_panel(

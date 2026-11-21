@@ -8,36 +8,10 @@ impl Workbench {
     ) -> impl IntoElement {
         use gpui_kit::component::TitleBar;
 
-        TitleBar::new().child(
-            div()
-                .flex()
-                .items_center()
-                .h_full()
-                .gap(px(SPACE_2))
-                .px(px(SPACE_2))
-                .child(
-                    Button::new("toggle-sidebar")
-                        .ghost()
-                        .small()
-                        .icon(IconName::PanelLeft)
-                        .tooltip(if self.sidebar_compact {
-                            "Expand connections sidebar"
-                        } else {
-                            "Collapse connections sidebar"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.sidebar_compact = !this.sidebar_compact;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(crate::theme::ui_size(&theme, FONT_BODY))
-                        .text_color(theme.foreground)
-                        .child(app_name!()),
-                ),
-        )
+        // The sidebar toggle lives next to Settings at the bottom of the
+        // sidebar; the title bar only carries the window controls.
+        let _ = (theme, cx);
+        TitleBar::new()
     }
 
     pub(super) fn render_disconnected(
