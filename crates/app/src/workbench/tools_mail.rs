@@ -23,6 +23,8 @@ pub(super) enum MailTab {
     Html,
     Headers,
     Raw,
+    /// The server Kilat started ("Start server from Kilat").
+    Log,
 }
 
 pub(super) struct MailView {
@@ -278,6 +280,9 @@ impl Workbench {
     fn mail_select(&mut self, id: &str, message: String, cx: &mut Context<Self>) {
         if let Some(view) = self.tools.mail.get_mut(id) {
             view.selected = Some(message);
+            if view.tab == MailTab::Log {
+                view.tab = MailTab::Text;
+            }
         }
         cx.notify();
     }
@@ -376,6 +381,7 @@ impl Workbench {
             );
             let (i1, i2, i3, i4) = (id.clone(), id.clone(), id.clone(), id.clone());
             let kind = tool.kind;
+            let flags = self.server_flags(tool);
             div().flex_none().px(px(8.)).py(px(6.)).child(
                 Button::new("tool-session")
                     .ghost()
@@ -403,7 +409,8 @@ impl Workbench {
                     .dropdown_menu(move |menu, _, _| {
                         let (e1, e2, e3, e4) = (e1.clone(), e2.clone(), e3.clone(), e4.clone());
                         let (i1, i2, i3, i4) = (i1.clone(), i2.clone(), i3.clone(), i4.clone());
-                        menu.min_w(px(200.))
+                        let menu = menu
+                            .min_w(px(200.))
                             .item(
                                 PopupMenuItem::new("Refresh")
                                     .icon(Icon::new(IconName::RefreshCw))
@@ -429,15 +436,15 @@ impl Workbench {
                                             this.open_tool_form(kind, Some(i3.clone()), window, cx)
                                         })
                                     }),
-                            )
-                            .separator()
-                            .item(
-                                PopupMenuItem::new("Disconnect")
-                                    .icon(Icon::new(IconName::LogOut))
-                                    .on_click(move |_, _, cx| {
-                                        e4.update(cx, |this, cx| this.close_tool(&i4, cx))
-                                    }),
-                            )
+                            );
+                        let menu = tools_server::server_menu(menu, &i4, flags, &e4);
+                        menu.separator().item(
+                            PopupMenuItem::new("Disconnect")
+                                .icon(Icon::new(IconName::LogOut))
+                                .on_click(move |_, _, cx| {
+                                    e4.update(cx, |this, cx| this.close_tool(&i4, cx))
+                                }),
+                        )
                     }),
             )
         };
@@ -537,7 +544,7 @@ impl Workbench {
                 })
                 .when(view.error.is_some() && !view.loading, |c| {
                     let id = id.clone();
-                    c.child(
+                    c.children(self.start_server_button(tool, cx)).child(
                         Button::new("mail-retry")
                             .small()
                             .label("Try again")
@@ -651,24 +658,6 @@ impl Workbench {
         let Some(view) = self.tools.mail.get(&tool.id) else {
             return div().size_full().into_any_element();
         };
-        let Some(message) = view.selected_message() else {
-            return div()
-                .flex()
-                .flex_col()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .bg(theme.background)
-                .child(empty_state_text(
-                    if view.messages.is_empty() {
-                        "The inbox is empty.".into()
-                    } else {
-                        "Select a message to read it.".into()
-                    },
-                    theme,
-                ))
-                .into_any_element();
-        };
         let tab_button =
             |tab: MailTab, label: &'static str, enabled: bool, cx: &mut Context<Self>| {
                 let selected = view.tab == tab;
@@ -695,9 +684,66 @@ impl Workbench {
                         if let Some(v) = this.tools.mail.get_mut(&id) {
                             v.tab = tab;
                         }
+                        if tab == MailTab::Log {
+                            this.refresh_tool_log(&id);
+                            this.tools.log_scroll.scroll_to_bottom();
+                            this.start_log_poll(cx);
+                        }
                         cx.notify();
                     }))
             };
+        let server_tab = tools_server::can_start(tool);
+        let message = view.selected_message();
+        if message.is_none() || server_tab && view.tab == MailTab::Log {
+            let showing_log = server_tab && view.tab == MailTab::Log;
+            let body = if showing_log {
+                self.render_server_log(tool, theme, cx).into_any_element()
+            } else {
+                div()
+                    .flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .child(empty_state_text(
+                        if view.messages.is_empty() {
+                            "The inbox is empty.".into()
+                        } else {
+                            "Select a message to read it.".into()
+                        },
+                        theme,
+                    ))
+                    .into_any_element()
+            };
+            let has = message.is_some();
+            return div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .bg(theme.background)
+                .when(server_tab, |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .flex_none()
+                            .gap(px(SPACE_3))
+                            .px(px(SPACE_4))
+                            .h(px(TOOLBAR_HEIGHT))
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .child(tab_button(MailTab::Text, "Text", has, cx))
+                            .child(tab_button(MailTab::Html, "HTML", has, cx))
+                            .child(tab_button(MailTab::Headers, "Headers", has, cx))
+                            .child(tab_button(MailTab::Raw, "Raw", has, cx))
+                            .child(tab_button(MailTab::Log, "Server log", true, cx)),
+                    )
+                })
+                .child(body)
+                .into_any_element();
+        }
+        let Some(message) = message else {
+            return div().into_any_element();
+        };
         let has_html = message.html.is_some();
         let has_text = message.text.is_some();
         // A tab without content falls back to the other body.
@@ -723,6 +769,9 @@ impl Workbench {
             .child(tab_button(MailTab::Html, "HTML", has_html, cx))
             .child(tab_button(MailTab::Headers, "Headers", true, cx))
             .child(tab_button(MailTab::Raw, "Raw", true, cx))
+            .when(server_tab, |d| {
+                d.child(tab_button(MailTab::Log, "Server log", true, cx))
+            })
             .child(div().flex_1())
             .child(
                 Button::new("mail-copy-raw")
@@ -882,7 +931,7 @@ impl Workbench {
                 }
                 body = body.child(list);
             }
-            MailTab::Raw => {
+            MailTab::Raw | MailTab::Log => {
                 body = body.child(body_text_div(message.raw.clone(), true));
             }
         }

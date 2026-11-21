@@ -63,6 +63,8 @@ fn clip(text: String, max: usize) -> String {
 pub(super) enum RedisTab {
     Value,
     Console,
+    /// The server Kilat started ("Start server from Kilat").
+    Log,
 }
 
 pub(super) struct ConsoleLine {
@@ -506,6 +508,7 @@ impl Workbench {
             );
             let (i1, i2, i3, i4) = (id.clone(), id.clone(), id.clone(), id.clone());
             let kind = tool.kind;
+            let flags = self.server_flags(tool);
             div().flex_none().px(px(8.)).py(px(6.)).child(
                 Button::new("tool-session")
                     .ghost()
@@ -533,7 +536,8 @@ impl Workbench {
                     .dropdown_menu(move |menu, _, _| {
                         let (e1, e2, e3, e4) = (e1.clone(), e2.clone(), e3.clone(), e4.clone());
                         let (i1, i2, i3, i4) = (i1.clone(), i2.clone(), i3.clone(), i4.clone());
-                        menu.min_w(px(200.))
+                        let menu = menu
+                            .min_w(px(200.))
                             .item(
                                 PopupMenuItem::new("Refresh")
                                     .icon(Icon::new(IconName::RefreshCw))
@@ -556,15 +560,15 @@ impl Workbench {
                                             this.open_tool_form(kind, Some(i3.clone()), window, cx)
                                         })
                                     }),
-                            )
-                            .separator()
-                            .item(
-                                PopupMenuItem::new("Disconnect")
-                                    .icon(Icon::new(IconName::LogOut))
-                                    .on_click(move |_, _, cx| {
-                                        e4.update(cx, |this, cx| this.close_tool(&i4, cx))
-                                    }),
-                            )
+                            );
+                        let menu = tools_server::server_menu(menu, &i4, flags, &e4);
+                        menu.separator().item(
+                            PopupMenuItem::new("Disconnect")
+                                .icon(Icon::new(IconName::LogOut))
+                                .on_click(move |_, _, cx| {
+                                    e4.update(cx, |this, cx| this.close_tool(&i4, cx))
+                                }),
+                        )
                     }),
             )
         };
@@ -603,7 +607,7 @@ impl Workbench {
                     })
                     .when(!view.connecting, |c| {
                         let id = id.clone();
-                        c.child(
+                        c.children(self.start_server_button(tool, cx)).child(
                             Button::new("redis-retry")
                                 .small()
                                 .label("Try again")
@@ -854,6 +858,11 @@ impl Workbench {
                             input.update(cx, |state, cx| state.focus(window, cx));
                         }
                     }
+                    if tab == RedisTab::Log {
+                        this.refresh_tool_log(&id);
+                        this.tools.log_scroll.scroll_to_bottom();
+                        this.start_log_poll(cx);
+                    }
                     cx.notify();
                 }))
         };
@@ -873,6 +882,9 @@ impl Workbench {
                 .border_color(theme.border)
                 .child(tab_button(RedisTab::Value, "Value", cx))
                 .child(tab_button(RedisTab::Console, "Console", cx))
+                .when(tools_server::can_start(tool), |d| {
+                    d.child(tab_button(RedisTab::Log, "Server log", cx))
+                })
                 .child(div().flex_1())
                 .children(view.info.as_ref().map(|info| {
                     caption_text(
@@ -916,6 +928,7 @@ impl Workbench {
             RedisTab::Console => self
                 .render_redis_console(tool, view, theme, cx)
                 .into_any_element(),
+            RedisTab::Log => self.render_server_log(tool, theme, cx).into_any_element(),
         };
         div()
             .flex()

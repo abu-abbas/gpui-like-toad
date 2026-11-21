@@ -9,6 +9,7 @@ pub mod console;
 pub mod mailhog;
 pub mod mime;
 pub mod redis_tool;
+pub mod server;
 
 /// rustls finds both ring and aws-lc-rs in this build and will not pick
 /// one, so install ring as the process default before the first TLS

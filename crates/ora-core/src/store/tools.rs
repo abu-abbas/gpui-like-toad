@@ -60,6 +60,11 @@ pub struct ToolInstance {
     /// Redis: let the console run FLUSHDB, KEYS, CONFIG and the like.
     pub allow_dangerous: bool,
     pub environment: ConnectionEnvironment,
+    /// Kilat starts the server itself (local hosts only) and stops it
+    /// when Kilat quits.
+    pub start_server: bool,
+    /// The command that starts the server; empty means the default.
+    pub server_command: String,
 }
 
 impl ToolInstance {
@@ -76,6 +81,8 @@ impl ToolInstance {
             database: 0,
             allow_dangerous: false,
             environment: ConnectionEnvironment::None,
+            start_server: false,
+            server_command: String::new(),
         }
     }
 
@@ -111,6 +118,8 @@ fn tool_to_json(t: &ToolInstance) -> Json {
             "environment".into(),
             Json::Str(t.environment.label().into()),
         ),
+        ("start_server".into(), Json::Bool(t.start_server)),
+        ("server_command".into(), Json::Str(t.server_command.clone())),
     ])
 }
 
@@ -149,6 +158,8 @@ fn tool_from_json(v: &Json) -> Option<ToolInstance> {
             .unwrap_or(0),
         allow_dangerous: b("allow_dangerous"),
         environment: ConnectionEnvironment::parse(&s("environment")),
+        start_server: b("start_server"),
+        server_command: s("server_command"),
     })
 }
 
@@ -200,6 +211,8 @@ mod tool_tests {
         redis.database = 3;
         redis.allow_dangerous = true;
         redis.environment = ConnectionEnvironment::Production;
+        redis.start_server = true;
+        redis.server_command = "redis-server --port 6390".into();
         let mut mh = ToolInstance::new(ToolKind::MailHog);
         mh.id = redis.id.clone(); // duplicate id gets repaired
         mh.port = 8026;

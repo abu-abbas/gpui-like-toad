@@ -82,6 +82,13 @@ pub(super) struct SettingsState {
     log_entries: Vec<crate::diagnostics::Entry>,
     expanded_entry: Option<usize>,
     log_tab: logs::LogTab,
+    /// Settings > Logs > Developer Tools: the server logs, the one shown,
+    /// its tail, and whether "Clear" waits for a second click.
+    dev_logs: Vec<devtools::server::LogFile>,
+    dev_log: Option<PathBuf>,
+    dev_log_text: String,
+    dev_log_confirm: bool,
+    dev_log_scroll: ScrollHandle,
     previous_focus: Option<gpui_kit::FocusHandle>,
 }
 
@@ -102,6 +109,11 @@ impl SettingsState {
             log_entries: Vec::new(),
             expanded_entry: None,
             log_tab: logs::LogTab::Errors,
+            dev_logs: Vec::new(),
+            dev_log: None,
+            dev_log_text: String::new(),
+            dev_log_confirm: false,
+            dev_log_scroll: ScrollHandle::new(),
             previous_focus: None,
         }
     }

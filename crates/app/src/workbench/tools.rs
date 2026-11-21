@@ -82,6 +82,8 @@ pub(super) struct ToolForm {
     pub tls: bool,
     pub allow_dangerous: bool,
     pub environment: ConnectionEnvironment,
+    pub start_server: bool,
+    pub server_command: Entity<InputState>,
     /// `(is_error, text)` under the fields.
     pub notice: Option<(bool, String)>,
     pub testing: bool,
@@ -100,6 +102,12 @@ pub(super) struct ToolsState {
     pub folded: bool,
     /// Passwords typed without "Save password": kept for this run only.
     pub session_passwords: HashMap<String, String>,
+    /// Servers Kilat started, by tool id.
+    pub servers: super::tools_server::ServerMap,
+    /// The Server log tab is being refreshed.
+    pub log_polling: bool,
+    /// Scroll of the Server log tab (one is shown at a time).
+    pub log_scroll: ScrollHandle,
 }
 
 impl ToolsState {
@@ -196,18 +204,40 @@ impl Workbench {
                 if !self.tools.redis.contains_key(id) {
                     let view = RedisView::new(&tool, window, cx);
                     self.tools.redis.insert(id.to_string(), view);
-                    self.redis_connect(id, cx);
+                    self.connect_or_start(&tool, cx);
                 }
             }
             ToolKind::MailHog => {
                 if !self.tools.mail.contains_key(id) {
                     let view = MailView::new(&tool, window, cx);
                     self.tools.mail.insert(id.to_string(), view);
-                    self.mail_connect(id, cx);
+                    self.connect_or_start(&tool, cx);
                 }
             }
         }
         cx.notify();
+    }
+
+    /// Connect a freshly opened tool. With "Start server from Kilat" the
+    /// server is started first (or used, when something already listens
+    /// on the port); the tool connects once it is up.
+    fn connect_or_start(&mut self, tool: &ToolInstance, cx: &mut Context<Self>) {
+        let id = tool.id.as_str();
+        if self.server_busy(id) {
+            // Starting or restarting: it connects when done.
+            if let Some(v) = self.tools.redis.get_mut(id) {
+                v.connecting = true;
+            }
+            if let Some(v) = self.tools.mail.get_mut(id) {
+                v.loading = true;
+            }
+        } else if super::tools_server::can_start(tool) && !self.server_running(id) {
+            self.start_tool_server(id, cx);
+        } else if tool.kind == ToolKind::Redis {
+            self.redis_connect(id, cx);
+        } else {
+            self.mail_connect(id, cx);
+        }
     }
 
     /// Close tool `id`'s session; the instance stays in the list.
@@ -282,6 +312,12 @@ impl Workbench {
         );
         let password = cx.new(|cx| InputState::new(&mut *window, cx).masked(true));
         let database = input("0", tool.database.to_string(), window, cx);
+        let server_command = input(
+            &devtools::server::default_command(kind == ToolKind::Redis, tool.port),
+            tool.server_command.clone(),
+            window,
+            cx,
+        );
         self.tools.picker = false;
         self.tools.form = Some(ToolForm {
             editing,
@@ -297,6 +333,8 @@ impl Workbench {
             tls: tool.tls,
             allow_dangerous: tool.allow_dangerous,
             environment: tool.environment,
+            start_server: tool.start_server,
+            server_command,
             notice: None,
             testing: false,
         });
@@ -348,6 +386,14 @@ impl Workbench {
         tool.tls = form.tls;
         tool.allow_dangerous = form.kind == ToolKind::Redis && form.allow_dangerous;
         tool.environment = form.environment;
+        tool.start_server = form.start_server;
+        tool.server_command = Self::input_text(&form.server_command, cx);
+        if tool.start_server && !devtools::server::is_local(&tool.host) {
+            return Err(
+                "Kilat can only start a server on this machine. Use localhost or 127.0.0.1 as the host, or turn off Start server from Kilat."
+                    .into(),
+            );
+        }
         let typed = form.password.read(cx).value().to_string();
         let password = (!typed.is_empty())
             .then_some(typed)
@@ -410,6 +456,7 @@ impl Workbench {
         };
         let typed = form.password.read(cx).value().to_string();
         let tool = draft.tool;
+        let before = self.tools.get(&tool.id).cloned();
         let mut instances = self.tools.instances.clone();
         match instances.iter_mut().find(|t| t.id == tool.id) {
             Some(slot) => *slot = tool.clone(),
@@ -443,6 +490,19 @@ impl Workbench {
                 .detach();
         }
         self.tools.form = None;
+        // A server Kilat runs whose command or port changed restarts; one
+        // no longer wanted stops.
+        if self.server_running(&tool.id) {
+            let server_changed = before.as_ref().is_none_or(|b| {
+                super::tools_server::command_of(b) != super::tools_server::command_of(&tool)
+                    || b.port != tool.port
+                    || b.host != tool.host
+            });
+            let wanted = super::tools_server::can_start(&tool);
+            if server_changed || !wanted {
+                self.stop_tool_server(&tool.id, wanted, cx);
+            }
+        }
         // Changed settings take effect on a fresh session.
         self.close_tool(&tool.id, cx);
         self.open_tool(&tool.id, window, cx);
@@ -476,6 +536,9 @@ impl Workbench {
         }
         self.tools.instances = instances;
         self.tools.session_passwords.remove(id);
+        if self.server_running(id) {
+            self.stop_tool_server(id, false, cx);
+        }
         self.close_tool(id, cx);
         let id = id.to_string();
         cx.background_executor()
@@ -592,6 +655,7 @@ impl Workbench {
         let kind = tool.kind;
         let view = cx.entity();
         let menu_id = tool.id.clone();
+        let flags = self.server_flags(tool);
         div()
             .id(("tool-row", ix))
             .flex()
@@ -625,6 +689,7 @@ impl Workbench {
                 } else {
                     menu
                 };
+                let menu = super::tools_server::server_menu(menu, &i4, flags, &v4);
                 menu.separator()
                     .item(
                         PopupMenuItem::new("Edit…")
@@ -668,6 +733,9 @@ impl Workbench {
                                     .when(active, |t| t.font_weight(FontWeight::SEMIBOLD))
                                     .child(tool.name.clone()),
                             )
+                            .when(flags.running, |row| {
+                                row.child(icon(IconName::Play, 10., theme.success))
+                            })
                             .when(tool.environment != ConnectionEnvironment::None, |row| {
                                 let env = tool.environment;
                                 let color = match env {
@@ -689,7 +757,8 @@ impl Workbench {
                                 )
                             })
                             .when(
-                                live && tool.environment == ConnectionEnvironment::None,
+                                live && tool.environment == ConnectionEnvironment::None
+                                    && !flags.running,
                                 |row| row.child(status_dot(theme.success)),
                             ),
                     ),
@@ -979,6 +1048,38 @@ impl Workbench {
             );
         }
         body = body.child(checks);
+        let local = devtools::server::is_local(&Self::input_text(&form.host, cx));
+        let mut server = div().flex().flex_col().gap(px(SPACE_2)).child(
+            check(
+                "tool-start-server",
+                "Start server from Kilat",
+                form.start_server,
+            )
+            .disabled(!local && !form.start_server)
+            .on_click(cx.listener(|this, on: &bool, _, cx| {
+                if let Some(f) = this.tools.form.as_mut() {
+                    f.start_server = *on;
+                }
+                cx.notify();
+            })),
+        );
+        if form.start_server {
+            server = server
+                .child(input_field("Command", Input::new(&form.server_command)))
+                .child(caption_text(
+                    format!(
+                        "Kilat runs this when you open the {} and stops it when Kilat quits. Leave it blank for the default. Its output goes to the Server log tab.",
+                        if redis { "instance" } else { "inbox" }
+                    ),
+                    theme,
+                ));
+        } else if !local {
+            server = server.child(caption_text(
+                "Only for a server on this machine (localhost).".into(),
+                theme,
+            ));
+        }
+        body = body.child(server);
         let hint = match (&form.notice, redis) {
             (Some(_), _) => None,
             (None, true) if form.environment == ConnectionEnvironment::Production => Some(

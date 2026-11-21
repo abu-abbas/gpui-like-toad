@@ -85,6 +85,7 @@ mod tabs;
 mod tools;
 mod tools_mail;
 mod tools_redis;
+mod tools_server;
 mod transfer;
 mod transfer_ui;
 mod ui_helpers;
@@ -535,6 +536,13 @@ impl Workbench {
         // Panels the user minimized last time stay minimized.
         let layout = store::load_panel_layout();
 
+        // Servers Kilat started ("Start server from Kilat") follow Kilat:
+        // stop them on quit, and stop leftovers of a run that crashed.
+        devtools::server::stop_leftovers(&store::config_dir());
+        let quit_sub = cx.on_app_quit(|this: &mut Workbench, _| {
+            this.stop_all_servers_now();
+            async {}
+        });
         Workbench {
             connection_form,
             rail: RailPanel::Connections,
@@ -585,7 +593,7 @@ impl Workbench {
             completion,
             updates: UpdateState::load(cx),
             tools: tools::ToolsState::load(),
-            _subscriptions: vec![appearance_sub, settings_search_sub, proxy_sub],
+            _subscriptions: vec![appearance_sub, settings_search_sub, proxy_sub, quit_sub],
         }
     }
 
