@@ -86,6 +86,9 @@ impl Workbench {
                 .h(px(if compact { 34. } else { 30. }))
                 .when(selected, |button| button.text_color(theme.primary))
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.rail == panel && panel == RailPanel::Connections {
+                        this.leave_tools();
+                    }
                     this.rail = panel;
                     this.sidebar_compact = false;
                     cx.notify();
@@ -173,6 +176,7 @@ impl Workbench {
             }
             if selected && !compact && panel == RailPanel::Connections {
                 nav = nav.child(self.render_profile_list(keyboard, theme, cx));
+                nav = nav.child(self.render_tools_section(keyboard, theme, cx));
             }
         }
         nav = nav.when(!compact, |nav| {
