@@ -1,0 +1,16 @@
+[package]
+name = "kilat-ext-mailhog"
+version = "1.0.0"
+description = "The MailHog extension of Kilat: the MailHog API client as a separate program that speaks the extension protocol"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "kilat-ext-mailhog"
+path = "src/main.rs"
+
+[dependencies]
+ora-core = { path = "../ora-core" }
+devtools = { path = "../devtools" }
+serde_json = "1"
