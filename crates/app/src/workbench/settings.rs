@@ -88,6 +88,8 @@ pub(super) struct SettingsState {
     expanded_entry: Option<usize>,
     log_tab: logs::LogTab,
     ext_filter: extensions::ExtFilter,
+    /// Settings > Extensions > Available online (see `extensions.rs`).
+    ext_online: extensions::OnlineState,
     /// Settings > Logs > Developer Tools: the server logs, the one shown,
     /// its tail, and whether "Clear" waits for a second click.
     dev_logs: Vec<devtools::server::LogFile>,
@@ -116,6 +118,7 @@ impl SettingsState {
             expanded_entry: None,
             log_tab: logs::LogTab::Errors,
             ext_filter: extensions::ExtFilter::All,
+            ext_online: extensions::OnlineState::default(),
             dev_logs: Vec::new(),
             dev_log: None,
             dev_log_text: String::new(),
@@ -352,6 +355,15 @@ pub(super) fn setting_row(
     control: impl IntoElement,
     theme: &gpui_kit::component::Theme,
 ) -> gpui_kit::Div {
+    setting_row_owned(label.into(), description.into(), control, theme)
+}
+
+pub(super) fn setting_row_owned(
+    label: String,
+    description: String,
+    control: impl IntoElement,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
     div()
         .flex()
         .items_center()
@@ -365,9 +377,9 @@ pub(super) fn setting_row(
                 .flex_col()
                 .flex_1()
                 .min_w(px(0.))
-                .child(body_text(label.into(), theme))
+                .child(body_text(label, theme))
                 .when(!description.is_empty(), |row| {
-                    row.child(caption_text(description.into(), theme))
+                    row.child(caption_text(description.clone(), theme))
                 }),
         )
         .child(div().flex_none().child(control))
