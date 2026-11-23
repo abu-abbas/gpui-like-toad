@@ -114,11 +114,13 @@ impl Workbench {
             ),
         ));
         let name = entry.name.clone();
+        let entry_id = entry.id.clone();
         let task = cx
             .background_executor()
             .spawn(async move { crate::release_fetch::install_extension(&entry) });
         cx.spawn(async move |view, cx| {
             let result = task.await;
+            let downloaded = result.is_ok();
             let _ = view.update(cx, |this, cx| {
                 let online = &mut this.settings.ext_online;
                 online.busy = None;
@@ -130,6 +132,12 @@ impl Workbench {
                     Err(err) => (true, format!("Install failed: {err}")),
                 });
                 online.refresh_installed();
+                // The download replaces a driver that is also bundled:
+                // switch the extension on, or its connection type would
+                // stay hidden.
+                if downloaded {
+                    this.set_extension_installed_by_id(&entry_id, cx);
+                }
                 cx.notify();
             });
         })
@@ -157,12 +165,20 @@ impl Workbench {
     ) -> impl IntoElement {
         let online = &self.settings.ext_online;
         let busy = online.checking || online.busy.is_some();
-        let bundled = |id: &str| store::extension_info(id).is_some();
+        // Only what this app can run: database extensions for an engine it
+        // knows (the bundled driver is then replaced while the download is
+        // installed). Tool extensions need a UI protocol that does not exist.
+        let runnable = |e: &ora_core::extension_index::IndexEntry| {
+            e.kind == ora_core::store::ExtensionKind::Database
+                && ora_core::DbKind::ALL
+                    .iter()
+                    .any(|k| *k != ora_core::DbKind::Oracle && k.key() == e.id)
+        };
         let rows: Vec<_> = online
             .index
             .iter()
             .flat_map(|i| i.entries.iter())
-            .filter(|e| !bundled(&e.id))
+            .filter(|e| runnable(e))
             .enumerate()
             .map(|(ix, entry)| {
                 let id = entry.id.clone();
@@ -198,9 +214,15 @@ impl Workbench {
                         }))
                         .into_any_element(),
                 };
+                let built_in = store::extension_info(&entry.id).is_some();
                 let state = match have {
                     Some(r) => format!("Downloaded v{}", r.version),
                     None => format!("v{}", entry.version),
+                };
+                let state = if built_in {
+                    format!("{state} · runs as a separate program instead of the built-in driver")
+                } else {
+                    state
                 };
                 setting_row_owned(
                     entry.name.clone(),
@@ -244,6 +266,12 @@ impl Workbench {
                 "Downloads come from this project's GitHub Releases and are checked against its signing key before they are saved.".into(),
                 theme,
             ))
+    }
+
+    fn set_extension_installed_by_id(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(info) = store::extension_info(id) {
+            self.set_extension_installed(info.id, true, cx);
+        }
     }
 
     fn set_extension_installed(&mut self, id: &'static str, install: bool, cx: &mut Context<Self>) {

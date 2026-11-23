@@ -294,6 +294,9 @@ jobs:
             --title "Kilat $VERSION" \
             --notes "Dibangun dari ${{ github.sha }}"$'\n\n'"$notes" --latest
           # Pangkas: sisakan KEEP_RELEASES terbaru, hapus sisanya beserta tag.
+          # Hanya rilis app (tag v<angka>): rilis extension (ext-*) dan
+          # `extensions-index` tidak boleh ikut terhapus.
           gh release list --limit 100 --json tagName --jq '.[].tagName' \
+            | grep -E '^v[0-9]' \
             | tail -n +$((KEEP_RELEASES + 1)) \
             | while read -r tag; do gh release delete "$tag" --cleanup-tag --yes; done

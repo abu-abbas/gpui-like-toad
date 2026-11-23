@@ -1,0 +1,8 @@
+{
+  "id": "sqlite",
+  "name": "SQLite",
+  "description": "Open and edit SQLite database files.",
+  "kind": "database",
+  "crate": "kilat-ext-sqlite",
+  "min_app": "0.1.51"
+}

@@ -4,11 +4,13 @@
 # kunci turunan dari secret): SHA256SUMS cocok, setiap file punya .minisig
 # yang valid, dan trusted comment-nya `version:<versi>`.
 #
-# Pemakaian: verify-release.sh <folder> <versi X.Y.Z> <release-key.pub>
+# Pemakaian: verify-release.sh <folder> <versi X.Y.Z> <release-key.pub> [awalan nama file]
+# Awalan bawaan `Kilat-` (rilis app); rilis extension memakai `kilat-ext-<id>-`.
 set -euo pipefail
 
 dir=${1:?folder}
 version=${2:?versi}
+prefix=${4:-Kilat-}
 pub=$(cd "$(dirname "${3:?release-key.pub}")" && pwd)/$(basename "$3")
 cd "$dir"
 
@@ -20,7 +22,7 @@ fail() {
 [ -f SHA256SUMS ] || fail "SHA256SUMS tidak ada."
 sha256sum --quiet -c SHA256SUMS || fail "SHA256SUMS tidak cocok dengan file."
 listed=$(awk '{ sub(/^\*/, "", $2); print $2 }' SHA256SUMS | sort)
-present=$(ls Kilat-* | grep -v '\.minisig$' | sort)
+present=$(ls "$prefix"* | grep -v '\.minisig$' | sort)
 [ "$listed" = "$present" ] || fail "SHA256SUMS tidak memuat semua file rilis."
 
 for f in $present SHA256SUMS; do

@@ -1,0 +1,223 @@
+# Build satu extension (program terpisah yang bicara dengan Kilat lewat
+# protokol di docs/extension-protocol.md), tanda tangani, terbitkan sebagai
+# rilis `ext-<id>-<versi>`, lalu perbarui index `extensions.json` di rilis
+# `extensions-index` (ditandatangani dengan trusted comment
+# `version:<revision>`). Hanya manual: Actions > Release extension > Run
+# workflow. Kunci yang sama dengan rilis app (MINISIGN_SECRET_KEY, cocok
+# dengan release-key.pub); tanpa itu workflow berhenti sebelum build.
+# Rilis ini BUKAN rilis app: tidak pernah ditandai latest dan tidak ikut
+# dipangkas oleh workflow Release. Detail: docs/extension-release.md.
+name: Release extension
+
+on:
+  workflow_dispatch:
+    inputs:
+      extension:
+        description: 'Extension (folder di extensions/)'
+        required: true
+        type: choice
+        options: [sqlite]
+      version:
+        description: 'Versi extension, mis. 1.0.0'
+        required: true
+
+concurrency:
+  group: release-extension
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  EXT: ${{ inputs.extension }}
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Cek input dan kunci tanda tangan
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Versi harus X.Y.Z, dapat '$VERSION'"; exit 1; }
+          test -f "extensions/$EXT/extension.json"
+          if gh release view "ext-$EXT-$VERSION" >/dev/null 2>&1; then
+            echo "::error::Rilis ext-$EXT-$VERSION sudah ada. Pakai versi baru (atau hapus rilis itu dulu kalau gagal di tengah)."
+            exit 1
+          fi
+          sudo apt-get install -y minisign
+          .github/scripts/check-release-key.sh release-key.pub "$RUNNER_TEMP/release.key"
+          rm -f "$RUNNER_TEMP/release.key" "$RUNNER_TEMP/release.key.pub"
+
+  audit:
+    uses: ./.github/workflows/audit.yml
+
+  build:
+    needs: [preflight, audit]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            ext: ""
+          - os: windows-latest
+            platform: windows-x86_64
+            ext: ".exe"
+          - os: macos-latest
+            platform: macos-aarch64
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: rust
+        name: Toolchain Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          echo "version=$(rustc --version | cut -d ' ' -f 2)" >> "$GITHUB_OUTPUT"
+      - name: Pulihkan cache Cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+          key: cargo-ext-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-ext-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.version }}-
+      - name: Sematkan nomor versi
+        shell: python
+        run: |
+          import json, os, pathlib, re
+          version = os.environ["VERSION"]
+          ext = os.environ["EXT"]
+          assert re.fullmatch(r"\d+\.\d+\.\d+", version), version
+          crate = json.load(open(f"extensions/{ext}/extension.json"))["crate"]
+          p = pathlib.Path(f"crates/ext-{ext}/Cargo.toml")
+          s = p.read_text()
+          updated = re.sub(r'^version = "[^"]*"', f'version = "{version}"', s, count=1, flags=re.M)
+          assert 'name = "%s"' % crate in s, "crate name differs from extension.json"
+          p.write_text(updated)
+          # Cargo.lock ikut dibump, supaya `--locked` tidak menganggapnya basi.
+          lock = pathlib.Path("Cargo.lock")
+          out, in_pkg, done = [], False, False
+          for line in lock.read_text().splitlines(keepends=True):
+              if line.startswith("[[package]]"):
+                  in_pkg = False
+              if line.strip() == f'name = "{crate}"':
+                  in_pkg = True
+              if in_pkg and not done and line.startswith("version = "):
+                  line = f'version = "{version}"\n'
+                  done = True
+              out.append(line)
+          assert done, f"{crate} not found in Cargo.lock"
+          lock.write_text("".join(out))
+      - name: Build
+        shell: bash
+        run: |
+          crate=$(sed -n 's/.*"crate": *"\([^"]*\)".*/\1/p' "extensions/$EXT/extension.json")
+          test -n "$crate"
+          echo "CRATE=$crate" >> "$GITHUB_ENV"
+          cargo build --locked --release -p "$crate"
+      - name: Smoke test (handshake) dan siapkan artifact
+        shell: bash
+        run: |
+          bin="target/release/$CRATE${{ matrix.ext }}"
+          reply=$(printf '%s\n%s\n' \
+            '{"id":1,"method":"hello","params":{"protocol":1,"app":"0.0.0"}}' \
+            '{"id":0,"method":"shutdown"}' | "$bin")
+          echo "$reply"
+          echo "$reply" | grep -Eq "\"id\": ?\"$EXT\"" || { echo "::error::handshake tidak menyebut id $EXT"; exit 1; }
+          echo "$reply" | grep -Eq "\"version\": ?\"$VERSION\"" || { echo "::error::handshake tidak menyebut versi $VERSION"; exit 1; }
+          mkdir -p out
+          cp "$bin" "out/kilat-ext-$EXT-$VERSION-${{ matrix.platform }}${{ matrix.ext }}"
+          ls -la out/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ext-${{ matrix.platform }}
+          path: out/
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ext-*
+          path: out
+          merge-multiple: true
+      - name: Checksum dan tanda tangan minisign
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          ls -la out/
+          test "$(ls out | wc -l)" -eq 3
+          sudo apt-get install -y minisign
+          key="$RUNNER_TEMP/release.key"
+          .github/scripts/check-release-key.sh release-key.pub "$key"
+          trap 'rm -f "$key" "$key.pub"' EXIT
+          cd out
+          sha256sum kilat-ext-* > SHA256SUMS
+          cat SHA256SUMS
+          for f in kilat-ext-* SHA256SUMS; do
+            # Trusted comment `version:X.Y.Z` mengikat tanda tangan ke versi
+            # extension ini (dicek app saat Install).
+            minisign -S -s "$key" -t "version:$VERSION" -m "$f"
+          done
+          ls -la
+      - name: Verifikasi rilis seperti app
+        run: .github/scripts/verify-release.sh out "$VERSION" release-key.pub "kilat-ext-$EXT-"
+      - name: Terbitkan rilis extension (bukan latest)
+        run: |
+          gh release create "ext-$EXT-$VERSION" out/* --target "${{ github.sha }}" \
+            --title "$EXT extension $VERSION" --latest=false \
+            --notes "Extension $EXT $VERSION untuk Kilat. Dibangun dari ${{ github.sha }}. Dipasang dari Settings > Extensions, bukan diunduh manual."
+      - name: Perbarui index extensions.json
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          mkdir -p idx
+          old=-
+          if gh release view extensions-index >/dev/null 2>&1; then
+            gh release download extensions-index -D idx/old -p extensions.json -p extensions.json.minisig
+            # Index lama harus sah (kunci repo, revision sama dengan yang
+            # ditandatangani) sebelum dipakai sebagai dasar.
+            out=$(minisign -V -p release-key.pub -m idx/old/extensions.json 2>&1) || { echo "::error::Index lama tidak valid: $out"; exit 1; }
+            rev=$(python3 -c "import json;print(json.load(open('idx/old/extensions.json'))['revision'])")
+            printf '%s\n' "$out" | grep -qx "Trusted comment: version:$rev" || { echo "::error::Index lama bertanda tangan untuk revision lain"; exit 1; }
+            old=idx/old/extensions.json
+          fi
+          rev=$(python3 .github/scripts/build-extension-index.py \
+            "extensions/$EXT/extension.json" "$VERSION" out "$old" idx/extensions.json)
+          cat idx/extensions.json
+          key="$RUNNER_TEMP/release.key"
+          .github/scripts/check-release-key.sh release-key.pub "$key"
+          trap 'rm -f "$key" "$key.pub"' EXIT
+          minisign -S -s "$key" -t "version:$rev" -m idx/extensions.json
+          # Cek seperti app: tanda tangan sah dan revision cocok.
+          out=$(minisign -V -p release-key.pub -m idx/extensions.json 2>&1)
+          printf '%s\n' "$out" | grep -qx "Trusted comment: version:$rev"
+          if gh release view extensions-index >/dev/null 2>&1; then
+            gh release upload extensions-index idx/extensions.json idx/extensions.json.minisig --clobber
+          else
+            gh release create extensions-index idx/extensions.json idx/extensions.json.minisig \
+              --target "${{ github.sha }}" --title "Extension index" --latest=false \
+              --notes "Index extension Kilat (ditandatangani). Jangan diedit manual; dibuat oleh workflow Release extension."
+          fi
