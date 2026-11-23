@@ -51,13 +51,17 @@ struct Fake {
 
 impl Fake {
     fn new(messages: Vec<Value>) -> Self {
+        Self::with_messages(Some(messages))
+    }
+
+    fn with_messages(messages: Option<Vec<Value>>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&seen);
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                serve(stream, &messages, &log);
+                serve(stream, messages.as_deref(), &log);
             }
         });
         Self { port, seen }
@@ -72,7 +76,7 @@ impl Fake {
     }
 }
 
-fn serve(stream: TcpStream, messages: &[Value], log: &Mutex<Vec<String>>) {
+fn serve(stream: TcpStream, messages: Option<&[Value]>, log: &Mutex<Vec<String>>) {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     if reader.read_line(&mut line).unwrap_or(0) == 0 {
@@ -88,9 +92,12 @@ fn serve(stream: TcpStream, messages: &[Value], log: &Mutex<Vec<String>>) {
     let request = line.trim().to_string();
     log.lock().unwrap().push(request.clone());
     let path = request.split(' ').nth(1).unwrap_or("");
-    let (status, body) = if request.starts_with("DELETE") {
+    let (status, body) = if messages.is_none() {
+        ("503 Service Unavailable", String::new())
+    } else if request.starts_with("DELETE") {
         ("200 OK", String::new())
     } else if path.starts_with("/api/v2/messages") || path.starts_with("/api/v2/search") {
+        let messages = messages.unwrap_or_default();
         let page = json!({"total": messages.len(), "count": messages.len(), "start": 0, "items": messages});
         ("200 OK", page.to_string())
     } else {
@@ -228,21 +235,16 @@ fn calls_before_connect_and_after_disconnect_say_not_connected() {
 }
 
 #[test]
-fn connect_to_nothing_fails_with_a_message() {
-    // A port that was free a moment ago and has no listener now.
-    let port = {
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
-    };
+fn connect_reports_an_unavailable_server() {
+    let fake = Fake::with_messages(None);
     let mut ext = start();
     let err = ext
-        .call(
-            "connect",
-            params(json!({"target": {"host": "127.0.0.1", "port": port}})),
-            WAIT,
-        )
+        .call("connect", params(json!({"target": fake.target()})), WAIT)
         .unwrap_err();
-    assert!(err.to_string().contains("MailHog"), "{err}");
+    assert!(
+        err.to_string().contains("MailHog answered HTTP 503"),
+        "{err}"
+    );
 }
 
 #[test]
