@@ -324,8 +324,8 @@ impl Workbench {
                     .child(icon(IconName::Info, 14., theme.muted_foreground))
                     .child(
                         div()
-                            .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                            .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
+                            .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                            .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child("Info"),
@@ -374,8 +374,8 @@ impl Workbench {
                         .child(div().flex().flex_col().gap(px(SPACE_1)).children(
                             self.messages[start..].iter().rev().map(|m| {
                                 div()
-                                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
+                                    .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                                    .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
                                     .text_color(if crate::error_log::is_error_message(m) {
                                         theme.danger
                                     } else {
@@ -777,8 +777,8 @@ impl Workbench {
                         .child(div().flex().flex_col().children(tab.plan_lines.iter().map(
                             |line| {
                                 div()
-                                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
+                                    .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                                    .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
                                     .text_color(theme.foreground)
                                     .child(line.clone())
                             },
@@ -834,8 +834,8 @@ impl Workbench {
                         .child(div().flex().flex_col().gap(px(SPACE_1)).children(
                             self.messages[start..].iter().map(|m| {
                                 div()
-                                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
+                                    .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                                    .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
                                     .text_color(theme.foreground)
                                     .child(m.clone())
                             }),
@@ -925,8 +925,8 @@ impl Workbench {
                     row = row.child(
                         button.child(
                             div()
-                                .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                                .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
+                                .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                                .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(if active {
                                     theme.primary_foreground
@@ -1048,8 +1048,8 @@ impl Workbench {
                     .px(px(SPACE_3))
                     .child(
                         div()
-                            .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
-                            .line_height(crate::theme::ui_size(&theme, LEADING_CAPTION))
+                            .text_size(crate::theme::ui_size(theme, FONT_CAPTION))
+                            .line_height(crate::theme::ui_size(theme, LEADING_CAPTION))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child("EXPLAIN PLAN"),
@@ -1083,8 +1083,8 @@ impl Workbench {
                         .child(div().flex().flex_col().children(tab.plan_lines.iter().map(
                             |line| {
                                 div()
-                                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
+                                    .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                                    .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
                                     .text_color(theme.foreground)
                                     .child(line.clone())
                             },

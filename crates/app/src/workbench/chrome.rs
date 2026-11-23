@@ -51,7 +51,7 @@ impl Workbench {
             .child(icon(IconName::Plug, 38., theme::empty_hint(theme)))
             .child(
                 div()
-                    .text_size(crate::theme::ui_size(&theme, FONT_HEADING_MD))
+                    .text_size(crate::theme::ui_size(theme, FONT_HEADING_MD))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.muted_foreground)
                     .child(if self.conn.connection_lost {
@@ -565,8 +565,8 @@ impl Workbench {
                     div()
                         .min_w(px(0.))
                         .truncate()
-                        .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
-                        .line_height(crate::theme::ui_size(&theme, LEADING_CAPTION))
+                        .text_size(crate::theme::ui_size(theme, FONT_CAPTION))
+                        .line_height(crate::theme::ui_size(theme, LEADING_CAPTION))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.foreground)
                         .child(conn_text),

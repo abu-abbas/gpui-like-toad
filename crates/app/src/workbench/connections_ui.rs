@@ -205,7 +205,7 @@ impl Workbench {
                 .bg(theme.secondary)
                 .h(px(24.))
                 .w_full()
-                .child(select_trigger(current.label().into(), theme))
+                .child(select_trigger(current.label(), theme))
                 .dropdown_menu(move |menu, _, _| {
                     choices.iter().copied().fold(menu, |menu, option| {
                         let view = view.clone();
@@ -416,8 +416,8 @@ impl Workbench {
                 div()
                     .p(px(SPACE_2))
                     .rounded(px(RADIUS_SM))
-                    .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
-                    .line_height(crate::theme::ui_size(&theme, LEADING_CAPTION))
+                    .text_size(crate::theme::ui_size(theme, FONT_CAPTION))
+                    .line_height(crate::theme::ui_size(theme, LEADING_CAPTION))
                     .text_color(if is_error {
                         theme.danger
                     } else {
@@ -537,8 +537,8 @@ impl Workbench {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(crate::theme::ui_size(&theme, FONT_BODY))
-                            .line_height(crate::theme::ui_size(&theme, LEADING_BODY))
+                            .text_size(crate::theme::ui_size(theme, FONT_BODY))
+                            .line_height(crate::theme::ui_size(theme, LEADING_BODY))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child(title),

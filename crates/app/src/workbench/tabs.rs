@@ -221,8 +221,8 @@ impl Workbench {
                     ))
                     .child(
                         div()
-                            .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                            .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
+                            .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                            .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(label_color)
                             .child(tab.title.clone()),
@@ -247,8 +247,8 @@ impl Workbench {
                                 } else {
                                     theme.secondary
                                 })
-                                .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
-                                .line_height(crate::theme::ui_size(&theme, LEADING_CAPTION))
+                                .text_size(crate::theme::ui_size(theme, FONT_CAPTION))
+                                .line_height(crate::theme::ui_size(theme, LEADING_CAPTION))
                                 .text_color(if closed {
                                     theme.danger
                                 } else {

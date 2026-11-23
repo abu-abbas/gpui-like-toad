@@ -1082,8 +1082,8 @@ impl Workbench {
                     .bg(theme.secondary)
                     // No ligatures: `>=` must not render as one glyph.
                     .font_features(gpui_kit::FontFeatures::disable_ligatures())
-                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
+                    .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                    .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
                     .children(preview.lines().map(|line| {
                         div()
                             .text_color(if line.starts_with("--") {
