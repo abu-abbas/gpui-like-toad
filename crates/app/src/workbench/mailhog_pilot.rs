@@ -111,8 +111,8 @@ impl Workbench {
         let read_only = tool.read_only();
         let prod = tool.environment == ConnectionEnvironment::Production;
         let sidebar = cx.new(|_| ExtensionPanel::new(Slot::Sidebar, read_only, prod));
-        let explorer = cx.new(|_| ExtensionPanel::new(Slot::Explorer, read_only, prod));
-        let main = cx.new(|_| ExtensionPanel::new(Slot::Main, read_only, prod));
+        let explorer = cx.new(|_| ExtensionPanel::new(Slot::Explorer, read_only, prod).mailhog());
+        let main = cx.new(|_| ExtensionPanel::new(Slot::Main, read_only, prod).mailhog());
         let generation = explorer.entity_id();
         let subscriptions = [&sidebar, &explorer, &main]
             .into_iter()

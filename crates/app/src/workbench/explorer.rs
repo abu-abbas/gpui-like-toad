@@ -5,7 +5,10 @@ use super::*;
 
 pub(super) const EXPLORER_CONTROL_HEIGHT: f32 = 30.;
 
-pub(super) fn control(id: &'static str, theme: &gpui_kit::component::Theme) -> Button {
+pub(super) fn control(
+    id: impl Into<gpui_kit::ElementId>,
+    theme: &gpui_kit::component::Theme,
+) -> Button {
     Button::new(id)
         .ghost()
         .bg(theme.background)
