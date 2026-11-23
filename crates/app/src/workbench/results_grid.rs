@@ -22,6 +22,9 @@ impl ResultsGrid {
                 .stripe(true)
                 .fixed_cols_border(false)
                 .bordered(false)
+                // Own horizontal scrollbar under the grid (see `with_scrollbar`):
+                // the built-in one overlays the last row.
+                .scrollbar_visible(true, false)
                 .focus_ring(false)
                 .into_any_element(),
             // PopupMenu uses text_sm (0.875rem), including for submenu triggers.
@@ -87,4 +90,38 @@ impl Element for ResultsGrid {
     ) {
         window.with_rem_size(Some(self.rem), |window| self.table.paint(window, cx));
     }
+}
+
+/// The grid with its horizontal scrollbar in a strip of its own below it, so
+/// the scrollbar no longer covers the last row (the table's built-in one is
+/// an overlay on the table's bottom edge).
+pub(super) fn with_scrollbar(
+    state: &Entity<TableState<ResultsDelegate>>,
+    theme: &gpui_kit::component::Theme,
+    cx: &App,
+) -> gpui_kit::Div {
+    use gpui_kit::component::scroll::Scrollbar;
+    let t = state.read(cx);
+    let handle = t.horizontal_scroll_handle.clone();
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .child(ResultsGrid::new(state, theme)),
+        )
+        .child(
+            div().relative().flex_none().h(Scrollbar::width()).child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .child(Scrollbar::horizontal(&handle).viewport_from_layout()),
+            ),
+        )
 }

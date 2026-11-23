@@ -131,7 +131,7 @@ impl Workbench {
                         }
                     },
                 ))
-                .child(results_grid::ResultsGrid::new(&tab.table_state, theme))
+                .child(results_grid::with_scrollbar(&tab.table_state, theme, cx))
                 .into_any_element()
         } else {
             div()
@@ -189,7 +189,7 @@ impl Workbench {
                         .unwrap_or_else(|| {
                             div()
                                 .flex_1()
-                                .child(results_grid::ResultsGrid::new(&data.structure, theme))
+                                .child(results_grid::with_scrollbar(&data.structure, theme, cx))
                                 .into_any_element()
                         }),
                 )
@@ -205,7 +205,7 @@ impl Workbench {
                         .unwrap_or_else(|| {
                             div()
                                 .flex_1()
-                                .child(results_grid::ResultsGrid::new(&data.indexes, theme))
+                                .child(results_grid::with_scrollbar(&data.indexes, theme, cx))
                                 .into_any_element()
                         }),
                 )
@@ -678,7 +678,7 @@ impl Workbench {
     fn render_results_content(
         &self,
         theme: &gpui_kit::component::Theme,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tab = self.active_tab();
         match tab.results_tab {
@@ -751,7 +751,7 @@ impl Workbench {
                 } else {
                     div()
                         .flex_1()
-                        .child(results_grid::ResultsGrid::new(&tab.table_state, theme))
+                        .child(results_grid::with_scrollbar(&tab.table_state, theme, cx))
                         .into_any_element()
                 }
             }

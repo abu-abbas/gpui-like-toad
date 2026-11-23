@@ -626,12 +626,10 @@ impl Workbench {
             return section;
         }
         if self.tools.instances.is_empty() {
-            return section.child(
-                div()
-                    .px(px(SPACE_3))
-                    .py(px(SPACE_1))
-                    .child(caption_text("Add Redis or MailHog with +.".into(), theme)),
-            );
+            return section.child(div().px(px(SPACE_3)).py(px(SPACE_1)).child(caption_text(
+                "No developer tools yet. Add one with +.".into(),
+                theme,
+            )));
         }
         for (ix, tool) in self.tools.instances.iter().enumerate() {
             section = section.child(self.render_tool_row(ix, tool, keyboard, theme, cx));
