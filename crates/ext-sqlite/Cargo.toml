@@ -1,0 +1,18 @@
+[package]
+name = "kilat-ext-sqlite"
+version = "1.0.0"
+description = "The SQLite extension of Kilat: sqlite-driver as a separate program that speaks the extension protocol"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "kilat-ext-sqlite"
+path = "src/main.rs"
+
+[dependencies]
+ora-core = { path = "../ora-core" }
+sqlite-driver = { path = "../sqlite-driver" }
+
+[dev-dependencies]
+rusqlite = { version = "0.43", features = ["bundled"] }

@@ -4105,6 +4105,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kilat-ext-sqlite"
+version = "1.0.0"
+dependencies = [
+ "ora-core",
+ "rusqlite",
+ "sqlite-driver",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

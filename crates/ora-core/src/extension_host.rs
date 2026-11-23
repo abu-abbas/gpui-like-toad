@@ -178,23 +178,22 @@ impl ExtProcess {
         params: Json,
         timeout: Duration,
     ) -> Result<Json, CallError> {
-        let mut stray = None;
-        let result = self.call_streaming(method, params, timeout, &mut |chunk| stray = Some(chunk));
-        match (result, stray) {
-            (Ok(_), Some(_)) => Err(self.fail("chunk sent to a call without streaming")),
-            (result, _) => result,
-        }
+        self.call_streaming(method, params, timeout, &mut |_| {
+            Err("chunk sent to a call without streaming".to_string())
+        })
     }
 
     /// A request whose answer may arrive in pieces: `on_chunk` gets each
     /// `chunk`, the final `result` is returned. `timeout` is the longest
-    /// silence between two messages.
+    /// silence between two messages. When `on_chunk` returns an error the
+    /// chunk was not acceptable (bad shape, too much data): the program is
+    /// killed and the call fails as a protocol violation.
     pub fn call_streaming(
         &mut self,
         method: &str,
         params: Json,
         timeout: Duration,
-        on_chunk: &mut dyn FnMut(Json),
+        on_chunk: &mut dyn FnMut(Json) -> Result<(), String>,
     ) -> Result<Json, CallError> {
         if self.broken {
             return Err(self.closed());
@@ -236,7 +235,9 @@ impl ExtProcess {
                 return Err(self.fail("the answer is for another request"));
             }
             if let Some(chunk) = message.get("chunk") {
-                on_chunk(chunk.clone());
+                if let Err(why) = on_chunk(chunk.clone()) {
+                    return Err(self.fail(&why));
+                }
             } else if let Some(error) = message.get("error") {
                 return Err(CallError::Rpc(RpcError {
                     code: error
@@ -296,6 +297,12 @@ impl ExtProcess {
             }
         }
         CallError::Closed(self.stderr_tail())
+    }
+
+    /// The program sent something the protocol does not allow (found by
+    /// the caller, e.g. a result of the wrong shape): kill it.
+    pub fn violation(&mut self, why: &str) -> CallError {
+        self.fail(why)
     }
 
     fn fail(&mut self, why: &str) -> CallError {
@@ -399,7 +406,10 @@ mod tests {
         );
         let mut chunks = 0;
         let done = p
-            .call_streaming("query", Json::Null, T, &mut |_| chunks += 1)
+            .call_streaming("query", Json::Null, T, &mut |_| {
+                chunks += 1;
+                Ok(())
+            })
             .unwrap();
         assert_eq!(chunks, 2);
         assert_eq!(done.get("done").and_then(Json::as_bool), Some(true));
