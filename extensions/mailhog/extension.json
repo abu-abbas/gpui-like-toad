@@ -1,0 +1,8 @@
+{
+  "id": "mailhog",
+  "name": "MailHog",
+  "description": "Read the emails your app sends in development.",
+  "kind": "tool",
+  "crate": "kilat-ext-mailhog",
+  "min_app": "0.1.55"
+}

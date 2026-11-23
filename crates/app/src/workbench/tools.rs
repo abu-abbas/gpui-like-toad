@@ -99,6 +99,7 @@ pub(super) struct ToolsState {
     pub confirm: Option<ToolConfirm>,
     pub redis: HashMap<String, RedisView>,
     pub mail: HashMap<String, MailView>,
+    pub pilot: Option<super::mailhog_pilot::MailhogPilot>,
     pub folded: bool,
     /// Passwords typed without "Save password": kept for this run only.
     pub session_passwords: HashMap<String, String>,
@@ -125,6 +126,10 @@ impl ToolsState {
     pub fn is_live(&self, id: &str) -> bool {
         self.redis.get(id).is_some_and(|v| v.session.is_some())
             || self.mail.get(id).is_some_and(|v| v.reachable)
+            || self
+                .pilot
+                .as_ref()
+                .is_some_and(|v| v.instance == id && v.reachable())
     }
 
     /// The active tool, if it still exists.
@@ -199,6 +204,22 @@ impl Workbench {
         };
         self.tools.active = Some(id.to_string());
         self.rail = RailPanel::Connections;
+        if self
+            .tools
+            .pilot
+            .as_ref()
+            .is_some_and(|pilot| pilot.instance != id)
+        {
+            self.close_mailhog_pilot(cx);
+        }
+        if tool.kind == ToolKind::MailHog && self.extensions.tool_enabled(tool.kind) {
+            if let Some(install) = store::remote_install(super::mailhog_pilot::ID) {
+                if self.tools.pilot.is_none() {
+                    self.open_mailhog_pilot(tool, install.path, cx);
+                }
+                return;
+            }
+        }
         match tool.kind {
             ToolKind::Redis => {
                 if !self.tools.redis.contains_key(id) {
@@ -244,6 +265,14 @@ impl Workbench {
     pub(super) fn close_tool(&mut self, id: &str, cx: &mut Context<Self>) {
         self.tools.redis.remove(id);
         self.tools.mail.remove(id);
+        if self
+            .tools
+            .pilot
+            .as_ref()
+            .is_some_and(|pilot| pilot.instance == id)
+        {
+            self.close_mailhog_pilot(cx);
+        }
         if self.tools.active.as_deref() == Some(id) {
             self.tools.active = None;
         }
@@ -650,13 +679,21 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let live = self.tools.is_live(&tool.id);
-        let open =
-            self.tools.redis.contains_key(&tool.id) || self.tools.mail.contains_key(&tool.id);
+        let pilot = self
+            .tools
+            .pilot
+            .as_ref()
+            .filter(|pilot| pilot.instance == tool.id);
+        let open = pilot.is_some()
+            || self.tools.redis.contains_key(&tool.id)
+            || self.tools.mail.contains_key(&tool.id);
         let active = self.tools.active.as_deref() == Some(tool.id.as_str());
         let id = tool.id.clone();
         let kind = tool.kind;
         let view = cx.entity();
         let menu_id = tool.id.clone();
+        let managed_by_extension =
+            kind == ToolKind::MailHog && store::remote_install(super::mailhog_pilot::ID).is_some();
         let flags = self.server_flags(tool);
         div()
             .id(("tool-row", ix))
@@ -691,7 +728,11 @@ impl Workbench {
                 } else {
                     menu
                 };
-                let menu = super::tools_server::server_menu(menu, &i4, flags, &v4);
+                let menu = if managed_by_extension {
+                    menu
+                } else {
+                    super::tools_server::server_menu(menu, &i4, flags, &v4)
+                };
                 menu.separator()
                     .item(
                         PopupMenuItem::new("Edit…")
@@ -759,10 +800,18 @@ impl Workbench {
                                 )
                             })
                             .when(
-                                live && tool.environment == ConnectionEnvironment::None
+                                live && pilot.is_none()
+                                    && tool.environment == ConnectionEnvironment::None
                                     && !flags.running,
                                 |row| row.child(status_dot(theme.success)),
-                            ),
+                            )
+                            .children(pilot.and_then(|_| {
+                                self.render_mailhog_pilot(
+                                    ora_core::extension_ui::Slot::Sidebar,
+                                    theme,
+                                    cx,
+                                )
+                            })),
                     ),
             )
     }
@@ -777,6 +826,11 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
+        if let Some(panel) =
+            self.render_mailhog_pilot(ora_core::extension_ui::Slot::Explorer, theme, cx)
+        {
+            return Some(panel);
+        }
         let tool = self.tools.active_tool()?.clone();
         Some(match tool.kind {
             ToolKind::Redis => self
@@ -793,6 +847,11 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
+        if let Some(panel) =
+            self.render_mailhog_pilot(ora_core::extension_ui::Slot::Main, theme, cx)
+        {
+            return Some(panel);
+        }
         let tool = self.tools.active_tool()?.clone();
         Some(match tool.kind {
             ToolKind::Redis => self.render_redis_main(&tool, theme, cx).into_any_element(),

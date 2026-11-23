@@ -61,7 +61,6 @@ pub const SPACE_2: f32 = 8.0;
 pub const SPACE_3: f32 = 12.0;
 pub const SPACE_4: f32 = 16.0;
 pub const SPACE_6: f32 = 24.0;
-pub const SPACE_8: f32 = 32.0;
 
 // ---------------------------------------------------------------------------
 // Radius scale (spec §3)
@@ -70,7 +69,6 @@ pub const SPACE_8: f32 = 32.0;
 pub const RADIUS_SM: f32 = 4.0;
 pub const RADIUS_MD: f32 = 6.0;
 pub const RADIUS_LG: f32 = 8.0;
-pub const RADIUS_XL: f32 = 12.0;
 
 // ---------------------------------------------------------------------------
 // Typography sizes (spec §2). JetBrains Mono everywhere; line heights are
@@ -84,16 +82,13 @@ pub const FONT_HEADING_MD: f32 = 16.0;
 pub const FONT_BODY: f32 = 13.0;
 pub const FONT_LABEL: f32 = 12.0;
 pub const FONT_CAPTION: f32 = 11.0;
-pub const FONT_EDITOR: f32 = 13.0;
 pub const FONT_GRID: f32 = 12.0;
 
 pub const LEADING_HEADING_XL: f32 = 32.0;
-pub const LEADING_HEADING_LG: f32 = 28.0;
 pub const LEADING_HEADING_MD: f32 = 24.0;
 pub const LEADING_BODY: f32 = 20.0;
 pub const LEADING_LABEL: f32 = 18.0;
 pub const LEADING_CAPTION: f32 = 16.0;
-pub const LEADING_EDITOR: f32 = 22.0;
 pub const LEADING_GRID: f32 = 20.0;
 
 // ---------------------------------------------------------------------------

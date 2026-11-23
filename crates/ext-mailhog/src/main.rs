@@ -3,6 +3,7 @@
 //! (see `docs/extension-protocol.md`). Nothing but protocol messages may be
 //! written to stdout; anything for people goes to stderr.
 
+mod inbox_ui;
 mod service;
 
 use std::process::ExitCode;

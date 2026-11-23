@@ -21,6 +21,7 @@ pub mod extension_client;
 pub mod extension_host;
 pub mod extension_index;
 pub mod extension_serve;
+pub mod extension_ui;
 pub mod extension_wire;
 pub mod fetch;
 pub mod filter;
