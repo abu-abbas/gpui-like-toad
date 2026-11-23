@@ -834,6 +834,14 @@ impl Workbench {
         profile_ix: Option<usize>,
         cx: &mut Context<Self>,
     ) {
+        if !demo && !self.extensions.db_enabled(profile.kind) {
+            let name = extension_name(profile.kind.extension_id());
+            self.push_message(format!(
+                "Install {name} in Settings > Extensions to open this connection."
+            ));
+            cx.notify();
+            return;
+        }
         let resume = std::iter::once(&self.conn)
             .chain(&self.parked)
             .find(|conn| {
@@ -989,4 +997,9 @@ impl Workbench {
             }
         }
     }
+}
+
+/// Display name of an extension, for messages.
+fn extension_name(id: &str) -> &'static str {
+    store::extension_info(id).map_or("the extension", |e| e.name)
 }

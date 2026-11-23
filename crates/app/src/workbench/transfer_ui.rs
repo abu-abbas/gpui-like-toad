@@ -504,7 +504,11 @@ impl Workbench {
                             .flex_row()
                             .gap(px(SPACE_2))
                             .child(kind_button("tr-sk-oracle", DbKind::Oracle))
-                            .child(kind_button("tr-sk-sqlite", DbKind::Sqlite)),
+                            .children(
+                                self.extensions
+                                    .db_enabled(DbKind::Sqlite)
+                                    .then(|| kind_button("tr-sk-sqlite", DbKind::Sqlite)),
+                            ),
                     )
                     .child(form_label("Schema name in the script", theme))
                     .child(Input::new(&w.file_schema).w_full())

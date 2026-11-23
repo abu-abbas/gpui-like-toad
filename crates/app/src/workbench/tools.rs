@@ -625,13 +625,17 @@ impl Workbench {
         if folded {
             return section;
         }
-        if self.tools.instances.is_empty() {
+        let visible = |tool: &ToolInstance| self.extensions.tool_enabled(tool.kind);
+        if !self.tools.instances.iter().any(visible) {
             return section.child(div().px(px(SPACE_3)).py(px(SPACE_1)).child(caption_text(
                 "No developer tools yet. Add one with +.".into(),
                 theme,
             )));
         }
         for (ix, tool) in self.tools.instances.iter().enumerate() {
+            if !visible(tool) {
+                continue;
+            }
             section = section.child(self.render_tool_row(ix, tool, keyboard, theme, cx));
         }
         section
@@ -874,16 +878,20 @@ impl Workbench {
                     .gap(px(SPACE_2))
                     .px(px(SPACE_4))
                     .pb(px(SPACE_4))
-                    .child(choice(
-                        ToolKind::Redis,
-                        "Browse keys, read values, run commands.",
-                        cx,
-                    ))
-                    .child(choice(
-                        ToolKind::MailHog,
-                        "Read the emails your app sends in development.",
-                        cx,
-                    )),
+                    .children(self.extensions.tool_enabled(ToolKind::Redis).then(|| {
+                        choice(
+                            ToolKind::Redis,
+                            "Browse keys, read values, run commands.",
+                            cx,
+                        )
+                    }))
+                    .children(self.extensions.tool_enabled(ToolKind::MailHog).then(|| {
+                        choice(
+                            ToolKind::MailHog,
+                            "Read the emails your app sends in development.",
+                            cx,
+                        )
+                    })),
             )
             .child(
                 dialog_footer(theme).child(div().flex_1()).child(

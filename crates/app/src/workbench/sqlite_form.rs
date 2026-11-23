@@ -13,7 +13,16 @@ pub(super) enum ConnectionType {
 }
 
 impl ConnectionType {
-    pub(super) const ALL: [Self; 3] = [Self::OracleBasic, Self::OracleTns, Self::SqliteFile];
+    const ALL: [Self; 3] = [Self::OracleBasic, Self::OracleTns, Self::SqliteFile];
+
+    /// The choices of installed extensions, plus `current` so an existing
+    /// profile of an uninstalled kind still shows what it is.
+    pub(super) fn available(ext: &store::Extensions, current: Self) -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|c| c == &current || ext.db_enabled(c.kind()))
+            .collect()
+    }
 
     pub(super) fn of(kind: DbKind, use_tns: bool) -> Self {
         match kind {

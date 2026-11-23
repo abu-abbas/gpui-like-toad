@@ -491,6 +491,8 @@ pub struct Workbench {
     updates: UpdateState,
     /// Developer Tools (Redis, MailHog): saved instances and open views.
     tools: tools::ToolsState,
+    /// Installed extensions (Settings > Extensions).
+    extensions: store::Extensions,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -593,6 +595,7 @@ impl Workbench {
             completion,
             updates: UpdateState::load(cx),
             tools: tools::ToolsState::load(),
+            extensions: store::load_extensions(),
             _subscriptions: vec![appearance_sub, settings_search_sub, proxy_sub, quit_sub],
         }
     }

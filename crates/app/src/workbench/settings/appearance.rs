@@ -372,7 +372,7 @@ impl Workbench {
     }
 }
 
-fn setting_group(
+pub(super) fn setting_group(
     theme: &gpui_kit::component::Theme,
     rows: impl IntoIterator<Item = gpui_kit::Div>,
 ) -> gpui_kit::Div {
