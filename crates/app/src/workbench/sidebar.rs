@@ -176,7 +176,9 @@ impl Workbench {
             }
             if selected && !compact && panel == RailPanel::Connections {
                 nav = nav.child(self.render_profile_list(keyboard, theme, cx));
-                nav = nav.child(self.render_tools_section(keyboard, theme, cx));
+                if self.extensions.any_tool() {
+                    nav = nav.child(self.render_tools_section(keyboard, theme, cx));
+                }
             }
         }
         nav = nav.when(!compact, |nav| {

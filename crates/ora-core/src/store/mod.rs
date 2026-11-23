@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod extensions;
 mod history;
 mod json;
 mod layout;
@@ -33,6 +34,7 @@ mod theme;
 mod tools;
 mod update_prefs;
 
+pub use extensions::*;
 pub use history::*;
 pub use json::*;
 pub use layout::*;

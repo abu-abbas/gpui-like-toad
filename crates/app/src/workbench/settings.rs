@@ -1,6 +1,7 @@
 use super::*;
 
 mod appearance;
+mod extensions;
 mod logs;
 
 impl Workbench {
@@ -39,16 +40,18 @@ impl Workbench {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsPage {
     Appearance,
+    Extensions,
     Logs,
     About,
 }
 
 impl SettingsPage {
-    const ALL: [Self; 3] = [Self::Appearance, Self::Logs, Self::About];
+    const ALL: [Self; 4] = [Self::Appearance, Self::Extensions, Self::Logs, Self::About];
 
     fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
+            Self::Extensions => "Extensions",
             Self::Logs => "Logs",
             Self::About => concat!("About ", app_name!()),
         }
@@ -59,6 +62,7 @@ impl SettingsPage {
             Self::Appearance => {
                 "appearance theme light dark system color accent font size motion icon"
             }
+            Self::Extensions => "extensions install uninstall sqlite redis mailhog oracle database developer tools plugin",
             Self::Logs => "logs log error crash report bug",
             Self::About => "about kilat check for updates download version proxy network",
         }
@@ -67,6 +71,7 @@ impl SettingsPage {
     fn icon(self) -> IconName {
         match self {
             Self::Appearance => IconName::Sun,
+            Self::Extensions => IconName::Plug,
             Self::Logs => IconName::FileText,
             Self::About => IconName::Info,
         }
@@ -82,6 +87,7 @@ pub(super) struct SettingsState {
     log_entries: Vec<crate::diagnostics::Entry>,
     expanded_entry: Option<usize>,
     log_tab: logs::LogTab,
+    ext_filter: extensions::ExtFilter,
     /// Settings > Logs > Developer Tools: the server logs, the one shown,
     /// its tail, and whether "Clear" waits for a second click.
     dev_logs: Vec<devtools::server::LogFile>,
@@ -109,6 +115,7 @@ impl SettingsState {
             log_entries: Vec::new(),
             expanded_entry: None,
             log_tab: logs::LogTab::Errors,
+            ext_filter: extensions::ExtFilter::All,
             dev_logs: Vec::new(),
             dev_log: None,
             dev_log_text: String::new(),
@@ -263,6 +270,9 @@ impl Workbench {
                     .children(match page {
                         Some(SettingsPage::Appearance) => {
                             Some(self.render_appearance(theme, cx).into_any_element())
+                        }
+                        Some(SettingsPage::Extensions) => {
+                            Some(self.render_extensions(theme, cx).into_any_element())
                         }
                         Some(SettingsPage::Logs) => {
                             Some(self.render_logs(theme, cx).into_any_element())

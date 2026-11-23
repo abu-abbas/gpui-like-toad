@@ -198,6 +198,7 @@ impl Workbench {
         if !form.show_advanced {
             let current = ConnectionType::of(form.kind, form.use_tns);
             let view = cx.entity();
+            let choices = ConnectionType::available(&self.extensions, current);
             let connection_type = Button::new("connection-type")
                 .small()
                 .ghost()
@@ -206,7 +207,7 @@ impl Workbench {
                 .w_full()
                 .child(select_trigger(current.label().into(), theme))
                 .dropdown_menu(move |menu, _, _| {
-                    ConnectionType::ALL.into_iter().fold(menu, |menu, option| {
+                    choices.iter().copied().fold(menu, |menu, option| {
                         let view = view.clone();
                         menu.item(
                             PopupMenuItem::new(option.label())
