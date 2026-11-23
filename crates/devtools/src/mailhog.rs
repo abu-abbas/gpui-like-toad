@@ -107,7 +107,11 @@ impl SearchKind {
         }
     }
 
-    fn key(self) -> &'static str {
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.key() == key)
+    }
+
+    pub fn key(self) -> &'static str {
         match self {
             SearchKind::Containing => "containing",
             SearchKind::From => "from",
