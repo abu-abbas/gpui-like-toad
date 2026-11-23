@@ -16,7 +16,7 @@ on:
         description: 'Extension (folder di extensions/)'
         required: true
         type: choice
-        options: [sqlite]
+        options: [sqlite, postgres]
       version:
         description: 'Versi extension, mis. 1.0.0'
         required: true

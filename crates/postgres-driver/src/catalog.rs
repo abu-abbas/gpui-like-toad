@@ -1,0 +1,439 @@
+//! The explorer's catalog for PostgreSQL, from `pg_catalog`. Names and
+//! texts that go into SQL pass through [`lit`]; everything is read as text.
+
+use ora_core::completion::CatalogObject;
+use ora_core::{
+    ColumnDef, ConstraintDef, ConstraintKind, DbError, IndexDef, ObjectKind, SchemaObject,
+};
+
+use crate::conv::lit;
+use crate::PostgresClient;
+
+type Row = Vec<Option<String>>;
+
+fn col(row: &Row, i: usize) -> String {
+    row.get(i).cloned().flatten().unwrap_or_default()
+}
+
+fn flag(row: &Row, i: usize) -> bool {
+    col(row, i) == "t"
+}
+
+/// A list built with `array_to_string(.., E'\t')`.
+fn list(row: &Row, i: usize) -> Vec<String> {
+    let text = col(row, i);
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split('\t').map(str::to_string).collect()
+    }
+}
+
+/// Schemas the user can browse: `public` first, then by name. System
+/// schemas are left out, as Oracle's SYS objects are.
+pub(crate) fn list_schemas(db: &mut PostgresClient) -> Result<Vec<String>, DbError> {
+    let rows = db.text_rows(
+        "SELECT nspname FROM pg_namespace \
+         WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema' \
+         ORDER BY (nspname = 'public') DESC, nspname",
+    )?;
+    Ok(rows.iter().map(|r| col(r, 0)).collect())
+}
+
+pub(crate) fn list_objects(
+    db: &mut PostgresClient,
+    schema: &str,
+) -> Result<Vec<SchemaObject>, DbError> {
+    let s = lit(schema);
+    let sql = format!(
+        "SELECT c.relname, c.relkind::text, t.relname \
+         FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         LEFT JOIN pg_index ix ON ix.indexrelid = c.oid AND c.relkind IN ('i','I') \
+         LEFT JOIN pg_class t ON t.oid = ix.indrelid \
+         WHERE n.nspname = {s} AND c.relkind IN ('r','p','v','m','S','f','i') \
+           AND NOT (c.relkind = 'i' AND EXISTS \
+                (SELECT 1 FROM pg_constraint k WHERE k.conindid = c.oid)) \
+         UNION ALL \
+         SELECT p.proname, CASE p.prokind WHEN 'p' THEN 'P' ELSE 'F' END, NULL \
+         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = {s} AND p.prokind IN ('f','p') \
+         UNION ALL \
+         SELECT g.tgname, 'G', c.relname \
+         FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = {s} AND NOT g.tgisinternal \
+         ORDER BY 1"
+    );
+    let rows = db.text_rows(&sql)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for r in &rows {
+        let kind = match col(r, 1).as_str() {
+            "r" | "p" => ObjectKind::Table,
+            "v" => ObjectKind::View,
+            "m" => ObjectKind::MaterializedView,
+            "S" => ObjectKind::Sequence,
+            "i" => ObjectKind::Index,
+            "F" => ObjectKind::Function,
+            "P" => ObjectKind::Procedure,
+            "G" => ObjectKind::Trigger,
+            _ => ObjectKind::Other("FOREIGN TABLE".to_string()),
+        };
+        let name = col(r, 0);
+        // Overloaded functions show once.
+        if matches!(kind, ObjectKind::Function | ObjectKind::Procedure)
+            && !seen.insert((name.clone(), kind.clone().group_label().to_string()))
+        {
+            continue;
+        }
+        out.push(SchemaObject {
+            owner: schema.to_string(),
+            name,
+            kind,
+            parent: r.get(2).cloned().flatten(),
+            detail: None,
+        });
+    }
+    Ok(out)
+}
+
+pub(crate) fn describe_table(
+    db: &mut PostgresClient,
+    schema: &str,
+    name: &str,
+) -> Result<Vec<ColumnDef>, DbError> {
+    let sql = format!(
+        "SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, \
+                pg_get_expr(d.adbin, d.adrelid) \
+         FROM pg_attribute a \
+         JOIN pg_class c ON c.oid = a.attrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+         WHERE n.nspname = {} AND c.relname = {} AND a.attnum > 0 AND NOT a.attisdropped \
+         ORDER BY a.attnum",
+        lit(schema),
+        lit(name)
+    );
+    let rows = db.text_rows(&sql)?;
+    Ok(rows
+        .iter()
+        .map(|r| ColumnDef {
+            name: col(r, 0),
+            data_type: col(r, 1),
+            nullable: !flag(r, 2),
+            default: r.get(3).cloned().flatten(),
+        })
+        .collect())
+}
+
+/// Objects and the columns of tables and views in one query.
+pub(crate) fn catalog_objects(
+    db: &mut PostgresClient,
+    schema: &str,
+) -> Result<Vec<CatalogObject>, DbError> {
+    let objects = list_objects(db, schema)?;
+    let sql = format!(
+        "SELECT c.relname, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, \
+                pg_get_expr(d.adbin, d.adrelid) \
+         FROM pg_attribute a \
+         JOIN pg_class c ON c.oid = a.attrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+         WHERE n.nspname = {} AND c.relkind IN ('r','p','v','m','f') \
+           AND a.attnum > 0 AND NOT a.attisdropped \
+         ORDER BY c.relname, a.attnum",
+        lit(schema)
+    );
+    let rows = db.text_rows(&sql)?;
+    let mut by_table: std::collections::HashMap<String, Vec<ColumnDef>> = Default::default();
+    for r in &rows {
+        by_table.entry(col(r, 0)).or_default().push(ColumnDef {
+            name: col(r, 1),
+            data_type: col(r, 2),
+            nullable: !flag(r, 3),
+            default: r.get(4).cloned().flatten(),
+        });
+    }
+    Ok(objects
+        .into_iter()
+        .map(|o| CatalogObject {
+            columns: by_table.remove(&o.name).unwrap_or_default(),
+            name: o.name,
+            kind: o.kind,
+        })
+        .collect())
+}
+
+pub(crate) fn list_indexes(
+    db: &mut PostgresClient,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<IndexDef>, DbError> {
+    let sql = format!(
+        "SELECT i.relname, ix.indisunique, upper(am.amname), \
+                array_to_string(ARRAY(SELECT pg_get_indexdef(ix.indexrelid, k, true) \
+                    FROM generate_series(1, ix.indnatts) k ORDER BY k), E'\\t'), \
+                ix.indisvalid, 0 = ANY(ix.indkey::int2[]) \
+         FROM pg_index ix \
+         JOIN pg_class i ON i.oid = ix.indexrelid \
+         JOIN pg_class t ON t.oid = ix.indrelid \
+         JOIN pg_namespace n ON n.oid = t.relnamespace \
+         JOIN pg_am am ON am.oid = i.relam \
+         WHERE n.nspname = {} AND t.relname = {} \
+         ORDER BY i.relname",
+        lit(schema),
+        lit(table)
+    );
+    let rows = db.text_rows(&sql)?;
+    Ok(rows
+        .iter()
+        .map(|r| IndexDef {
+            name: col(r, 0),
+            unique: flag(r, 1),
+            index_type: if flag(r, 5) {
+                format!("FUNCTION-BASED {}", col(r, 2))
+            } else {
+                col(r, 2)
+            },
+            columns: list(r, 3),
+            status: if flag(r, 4) { "VALID" } else { "INVALID" }.to_string(),
+        })
+        .collect())
+}
+
+pub(crate) fn list_constraints(
+    db: &mut PostgresClient,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<ConstraintDef>, DbError> {
+    let names = |attrs: &str, rel: &str| {
+        format!(
+            "array_to_string(ARRAY(SELECT a.attname FROM unnest({attrs}) WITH ORDINALITY k(n, o) \
+             JOIN pg_attribute a ON a.attrelid = {rel} AND a.attnum = k.n ORDER BY k.o), E'\\t')"
+        )
+    };
+    let sql = format!(
+        "SELECT con.conname, con.contype::text, {}, rt.relname, {}, con.confdeltype::text, \
+                pg_get_constraintdef(con.oid), rn.nspname \
+         FROM pg_constraint con \
+         JOIN pg_class t ON t.oid = con.conrelid \
+         JOIN pg_namespace n ON n.oid = t.relnamespace \
+         LEFT JOIN pg_class rt ON rt.oid = con.confrelid \
+         LEFT JOIN pg_namespace rn ON rn.oid = rt.relnamespace \
+         WHERE n.nspname = {} AND t.relname = {} AND con.contype IN ('p','u','f','c') \
+         ORDER BY con.contype, con.conname",
+        names("con.conkey", "con.conrelid"),
+        names("con.confkey", "con.confrelid"),
+        lit(schema),
+        lit(table)
+    );
+    let rows = db.text_rows(&sql)?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let kind = match col(r, 1).as_str() {
+                "p" => ConstraintKind::PrimaryKey,
+                "u" => ConstraintKind::Unique,
+                "f" => ConstraintKind::ForeignKey,
+                _ => ConstraintKind::Check,
+            };
+            let def = col(r, 6);
+            ConstraintDef {
+                name: col(r, 0),
+                kind,
+                columns: list(r, 2),
+                // Only a parent in the same schema can be copied by name.
+                ref_table: if col(r, 7) == schema {
+                    col(r, 3)
+                } else {
+                    String::new()
+                },
+                ref_columns: list(r, 4),
+                on_delete: match col(r, 5).as_str() {
+                    "c" => "CASCADE",
+                    "n" => "SET NULL",
+                    _ => "NO ACTION",
+                }
+                .to_string(),
+                condition: if kind == ConstraintKind::Check {
+                    def.strip_prefix("CHECK ").unwrap_or(&def).to_string()
+                } else {
+                    String::new()
+                },
+            }
+        })
+        .collect())
+}
+
+pub(crate) fn trigger_scripts(
+    db: &mut PostgresClient,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>, DbError> {
+    let sql = format!(
+        "SELECT pg_get_triggerdef(g.oid) FROM pg_trigger g \
+         JOIN pg_class c ON c.oid = g.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = {} AND c.relname = {} AND NOT g.tgisinternal ORDER BY g.tgname",
+        lit(schema),
+        lit(table)
+    );
+    Ok(db.text_rows(&sql)?.iter().map(|r| col(r, 0)).collect())
+}
+
+fn quote(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+fn qualified(schema: &str, name: &str) -> String {
+    format!("{}.{}", quote(schema), quote(name))
+}
+
+/// The script of one object, as pg_dump would write its definition.
+pub(crate) fn object_ddl(
+    db: &mut PostgresClient,
+    schema: &str,
+    name: &str,
+    kind: &ObjectKind,
+) -> Result<String, DbError> {
+    let (s, n) = (lit(schema), lit(name));
+    let one = |db: &mut PostgresClient, sql: String| -> Result<Vec<String>, DbError> {
+        Ok(db.text_rows(&sql)?.iter().map(|r| col(r, 0)).collect())
+    };
+    let parts: Vec<String> = match kind {
+        ObjectKind::Table => table_ddl(db, schema, name)?,
+        ObjectKind::View => one(
+            db,
+            format!(
+                "SELECT 'CREATE OR REPLACE VIEW {} AS' || E'\\n' || pg_get_viewdef(c.oid, true) \
+                 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = {s} AND c.relname = {n} AND c.relkind = 'v'",
+                qualified(schema, name).replace('\'', "''")
+            ),
+        )?,
+        ObjectKind::MaterializedView => {
+            let mut parts = one(
+                db,
+                format!(
+                    "SELECT 'CREATE MATERIALIZED VIEW {} AS' || E'\\n' || pg_get_viewdef(c.oid, true) \
+                     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                     WHERE n.nspname = {s} AND c.relname = {n} AND c.relkind = 'm'",
+                    qualified(schema, name).replace('\'', "''")
+                ),
+            )?;
+            parts.extend(index_scripts(db, schema, name)?);
+            parts
+        }
+        ObjectKind::Index => one(
+            db,
+            format!(
+                "SELECT pg_get_indexdef(c.oid) FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = {s} AND c.relname = {n} AND c.relkind IN ('i','I')"
+            ),
+        )?,
+        ObjectKind::Sequence => one(
+            db,
+            format!(
+                "SELECT 'CREATE SEQUENCE {} AS ' || data_type::text || ' START WITH ' || start_value \
+                 || ' INCREMENT BY ' || increment_by || ' MINVALUE ' || min_value \
+                 || ' MAXVALUE ' || max_value || ' CACHE ' || cache_size \
+                 || CASE WHEN cycle THEN ' CYCLE' ELSE ' NO CYCLE' END \
+                 FROM pg_sequences WHERE schemaname = {s} AND sequencename = {n}",
+                qualified(schema, name).replace('\'', "''")
+            ),
+        )?,
+        ObjectKind::Function | ObjectKind::Procedure => one(
+            db,
+            format!(
+                "SELECT pg_get_functiondef(p.oid) FROM pg_proc p \
+                 JOIN pg_namespace n ON n.oid = p.pronamespace \
+                 WHERE n.nspname = {s} AND p.proname = {n} AND p.prokind IN ('f','p') \
+                 ORDER BY p.oid"
+            ),
+        )?,
+        ObjectKind::Trigger => one(
+            db,
+            format!(
+                "SELECT pg_get_triggerdef(g.oid) FROM pg_trigger g \
+                 JOIN pg_class c ON c.oid = g.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = {s} AND g.tgname = {n} AND NOT g.tgisinternal"
+            ),
+        )?,
+        other => {
+            return Err(DbError::new(format!(
+                "PostgreSQL: no script for {}",
+                other.group_label()
+            )))
+        }
+    };
+    if parts.is_empty() {
+        return Err(DbError::new(format!("PostgreSQL: {name} was not found")));
+    }
+    Ok(parts
+        .iter()
+        .map(|p| format!("{};", p.trim_end().trim_end_matches(';')))
+        .collect::<Vec<_>>()
+        .join("\n\n"))
+}
+
+/// `CREATE INDEX` of the indexes that no constraint owns.
+fn index_scripts(
+    db: &mut PostgresClient,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>, DbError> {
+    let sql = format!(
+        "SELECT pg_get_indexdef(ix.indexrelid) FROM pg_index ix \
+         JOIN pg_class t ON t.oid = ix.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace \
+         WHERE n.nspname = {} AND t.relname = {} \
+           AND NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conindid = ix.indexrelid) \
+         ORDER BY 1",
+        lit(schema),
+        lit(table)
+    );
+    Ok(db.text_rows(&sql)?.iter().map(|r| col(r, 0)).collect())
+}
+
+fn table_ddl(db: &mut PostgresClient, schema: &str, name: &str) -> Result<Vec<String>, DbError> {
+    let columns = describe_table(db, schema, name)?;
+    if columns.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut lines: Vec<String> = columns
+        .iter()
+        .map(|c| {
+            let mut line = format!("  {} {}", quote(&c.name), c.data_type);
+            if let Some(d) = &c.default {
+                line.push_str(&format!(" DEFAULT {d}"));
+            }
+            if !c.nullable {
+                line.push_str(" NOT NULL");
+            }
+            line
+        })
+        .collect();
+    let sql = format!(
+        "SELECT con.conname, pg_get_constraintdef(con.oid) FROM pg_constraint con \
+         JOIN pg_class t ON t.oid = con.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace \
+         WHERE n.nspname = {} AND t.relname = {} AND con.contype IN ('p','u','f','c','x') \
+         ORDER BY con.contype = 'f', con.contype, con.conname",
+        lit(schema),
+        lit(name)
+    );
+    for r in db.text_rows(&sql)? {
+        lines.push(format!(
+            "  CONSTRAINT {} {}",
+            quote(&col(&r, 0)),
+            col(&r, 1)
+        ));
+    }
+    let mut parts = vec![format!(
+        "CREATE TABLE {} (\n{}\n)",
+        qualified(schema, name),
+        lines.join(",\n")
+    )];
+    parts.extend(index_scripts(db, schema, name)?);
+    parts.extend(trigger_scripts(db, schema, name)?);
+    Ok(parts)
+}

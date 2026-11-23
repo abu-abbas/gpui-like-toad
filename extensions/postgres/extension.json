@@ -1,0 +1,8 @@
+{
+  "id": "postgres",
+  "name": "PostgreSQL",
+  "description": "Connect to PostgreSQL servers.",
+  "kind": "database",
+  "crate": "kilat-ext-postgres",
+  "min_app": "0.1.55"
+}
