@@ -32,6 +32,7 @@ impl Dialect for OracleDialect {
             row_id: true,
             sysdba: true,
             transactional_ddl: false,
+            row_edit: true,
             explain_text: true,
             truncate: true,
             special_tables: true,

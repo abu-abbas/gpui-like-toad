@@ -2,7 +2,7 @@
 
 use super::literal::{base_type, bool_digit, hex_upper, looks_numeric, no_nul, type_args};
 use super::{numeric_column, BindStyle, CanonType, Capabilities, DbKind, Dialect};
-use crate::model::Value;
+use crate::model::{ColumnDef, Value};
 
 pub struct MysqlDialect;
 
@@ -18,10 +18,11 @@ impl Dialect for MysqlDialect {
             password: true,
             network: true,
             // No physical row id: rows are found by primary key, which the
-            // data tab learns to use in the MySQL step.
+            // driver reads per table.
             row_id: false,
             sysdba: false,
             transactional_ddl: false,
+            row_edit: true,
             explain_text: true,
             truncate: true,
             special_tables: false,
@@ -60,6 +61,13 @@ impl Dialect for MysqlDialect {
         Err("MySQL has no row key to page by.".to_string())
     }
 
+    fn is_auto_generated(&self, column: &ColumnDef) -> bool {
+        column
+            .default
+            .as_deref()
+            .is_some_and(|d| d.eq_ignore_ascii_case("auto_increment"))
+    }
+
     fn default_clause(&self, expr: &str) -> String {
         // An expression default needs its own parentheses.
         let simple = expr.trim().starts_with('\'')
@@ -85,6 +93,14 @@ impl Dialect for MysqlDialect {
 
     fn index_refs(&self, schema: &str, index: &str, table: &str) -> (String, String) {
         (self.quote_ident(index), self.table_ref(schema, table))
+    }
+
+    fn key_type(&self, native: &str) -> Option<String> {
+        match base_type(native).as_str() {
+            "TINYTEXT" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT" => Some("VARCHAR(255)".to_string()),
+            "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB" => Some("VARBINARY(255)".to_string()),
+            _ => None,
+        }
     }
 
     fn date_literal(&self, iso: &str) -> String {

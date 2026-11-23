@@ -91,6 +91,7 @@ fn default_for(source: DbKind, target: DbKind, col: &ColumnDef) -> Option<String
         || upper.contains("NEXTVAL")
         || upper.contains("CURRVAL")
         || upper.contains("IDENTITY")
+        || upper == "AUTO_INCREMENT"
         || text.contains("\".\"")
         || super::spec::check_condition(text).is_err()
     {

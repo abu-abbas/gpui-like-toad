@@ -21,6 +21,7 @@ impl Dialect for SqliteDialect {
             row_id: true,
             sysdba: false,
             transactional_ddl: true,
+            row_edit: true,
             explain_text: false,
             truncate: false,
             special_tables: false,

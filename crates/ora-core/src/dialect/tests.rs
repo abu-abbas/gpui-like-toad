@@ -244,3 +244,17 @@ fn recordset_dates_use_each_engine_s_literal() {
         assert!(c[0].contains(lit), "{kind:?}: {}", c[0]);
     }
 }
+
+#[test]
+fn mysql_gives_keyed_text_columns_a_length() {
+    assert_eq!(
+        MysqlDialect.key_type("LONGTEXT").as_deref(),
+        Some("VARCHAR(255)")
+    );
+    assert_eq!(
+        MysqlDialect.key_type("longblob").as_deref(),
+        Some("VARBINARY(255)")
+    );
+    assert_eq!(MysqlDialect.key_type("VARCHAR(20)"), None);
+    assert_eq!(PostgresDialect.key_type("TEXT"), None);
+}

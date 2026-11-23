@@ -118,6 +118,10 @@ pub struct Capabilities {
     /// pending until Commit and undone by Rollback. Oracle and MySQL commit
     /// DDL at once.
     pub transactional_ddl: bool,
+    /// The data tab can edit rows: by a physical row id, or by the primary
+    /// key where the driver finds one (a table without either stays
+    /// read-only).
+    pub row_edit: bool,
     /// Explain Plan as formatted text (DBMS_XPLAN), next to the plan tree.
     pub explain_text: bool,
     /// `TRUNCATE TABLE`.
@@ -213,6 +217,12 @@ pub trait Dialect: Sync {
     /// parent must exist then) or added afterwards with `ALTER TABLE`.
     fn foreign_keys_inline(&self) -> bool {
         false
+    }
+
+    /// The type a column needs when it is part of a key or an index, if
+    /// the usual one cannot be indexed (MySQL cannot key a `LONGTEXT`).
+    fn key_type(&self, _native: &str) -> Option<String> {
+        None
     }
 
     /// The parent table in a `REFERENCES` clause.
