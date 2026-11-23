@@ -102,7 +102,7 @@ fn http_agent() -> Result<ureq::Agent, String> {
                 .root_certs(ureq::tls::RootCerts::PlatformVerifier)
                 .build(),
         )
-        .user_agent(concat!("gpui-like-toad/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("kilat/", env!("CARGO_PKG_VERSION")))
         .build()
         .into())
 }
@@ -149,7 +149,7 @@ fn download_agent() -> Result<ureq::Agent, String> {
                 .root_certs(ureq::tls::RootCerts::PlatformVerifier)
                 .build(),
         )
-        .user_agent(concat!("gpui-like-toad/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("kilat/", env!("CARGO_PKG_VERSION")))
         .build()
         .into())
 }

@@ -23,7 +23,11 @@ use crate::store::SavedProfile;
 use crate::DbKind;
 
 /// Service name of every keychain entry this app writes.
-pub const KEYCHAIN_SERVICE: &str = "gpui-like-toad";
+pub const KEYCHAIN_SERVICE: &str = "kilat";
+
+/// Service name before the rename. Entries found here are copied to
+/// [`KEYCHAIN_SERVICE`] on first read and left in place.
+pub const LEGACY_KEYCHAIN_SERVICE: &str = "gpui-like-toad";
 
 /// A keychain failure, as user-facing text.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -15,7 +15,7 @@ set -eu
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 bin_dir="${XDG_BIN_HOME:-$HOME/.local/bin}"
 data_dir="${XDG_DATA_HOME:-$HOME/.local/share}"
-app=gpui-like-toad
+app=kilat
 sizes="16 32 64 128 256 512"
 
 refresh() {
@@ -34,6 +34,13 @@ if [ "${1:-}" = "--uninstall" ]; then
     echo "Kilat removed."
     exit 0
 fi
+
+# Installs from before the rename used the name gpui-like-toad: remove them.
+old=gpui-like-toad
+rm -f "$bin_dir/$old" "$data_dir/applications/$old.desktop"
+for s in $sizes; do
+    rm -f "$data_dir/icons/hicolor/${s}x${s}/apps/$old.png"
+done
 
 mkdir -p "$bin_dir" "$data_dir/applications"
 install -m 755 "$here/$app" "$bin_dir/$app"

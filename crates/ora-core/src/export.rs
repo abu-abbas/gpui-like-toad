@@ -383,11 +383,9 @@ mod tests {
     fn xlsx_round_trips_through_a_file() {
         let bytes = to_xlsx(&sample()).unwrap();
         // Test-only scratch file, unique per process id; no secrets involved.
+        let name = format!("kilat-xlsx-test-{}.xlsx", std::process::id());
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        let path = std::env::temp_dir().join(format!(
-            "gpui-like-toad-xlsx-test-{}.xlsx",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(name);
         std::fs::write(&path, &bytes).unwrap();
         let read_back = std::fs::read(&path).unwrap();
         assert_eq!(read_back.len(), bytes.len());
@@ -489,10 +487,7 @@ mod tests {
     fn scratch(name: &str) -> std::path::PathBuf {
         // Test-only scratch directory, unique per process; no secrets involved.
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        let dir = std::env::temp_dir().join(format!(
-            "gpui-like-toad-export-{}-{name}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("kilat-export-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

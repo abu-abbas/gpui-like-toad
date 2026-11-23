@@ -521,12 +521,12 @@ mod tests {
     use super::*;
 
     fn temp() -> PathBuf {
+        // A counter, not a timestamp: tests run in parallel inside one
+        // process and must never share (and delete) each other's folder.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        let d = std::env::temp_dir().join(format!(
-            "kilat-server-{}-{}",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
-        ));
+        let d = std::env::temp_dir().join(format!("kilat-server-{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         d
     }

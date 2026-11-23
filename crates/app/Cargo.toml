@@ -1,5 +1,5 @@
 [package]
-name = "gpui-like-toad"
+name = "kilat"
 version = "0.1.0"
 description = "Kilat: lightweight database workbench built with Rust and gpui-kit"
 edition.workspace = true

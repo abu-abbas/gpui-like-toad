@@ -1045,7 +1045,7 @@ mod tests {
         // Test-only scratch dir, removed at the end; no security decision
         // depends on it.
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        let dir = std::env::temp_dir().join(format!("gpui-like-toad-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kilat-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("departments.csv");
         let mut client = demo();
@@ -1063,7 +1063,7 @@ mod tests {
         // Test-only scratch dir, removed at the end; no security decision
         // depends on it.
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        let dir = std::env::temp_dir().join(format!("gpui-like-toad-bad-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kilat-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bad.csv");
         std::fs::write(&path, "DEPARTMENT_ID,NOPE\n1,2\n").unwrap();
@@ -1077,7 +1077,7 @@ mod tests {
         // Test-only scratch dir, removed at the end; no security decision
         // depends on it.
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        let dir = std::env::temp_dir().join(format!("gpui-like-toad-big-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kilat-big-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("big.csv");
         let mut text = String::from("DEPARTMENT_ID,DEPARTMENT_NAME\n");
@@ -1098,7 +1098,7 @@ mod tests {
     #[test]
     fn table_export_can_write_spreadsheet_safe_csv() {
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        let dir = std::env::temp_dir().join(format!("gpui-like-toad-safe-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("kilat-safe-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("departments.csv");
         let mut client = demo();
