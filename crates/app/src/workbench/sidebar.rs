@@ -392,8 +392,8 @@ impl Workbench {
                             }))
                             .child(
                                 div()
-                                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
+                                    .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                                    .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
                                     .text_color(theme.foreground)
                                     .truncate()
                                     .child(preview),

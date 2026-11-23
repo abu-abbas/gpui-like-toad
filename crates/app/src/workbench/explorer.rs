@@ -5,7 +5,10 @@ use super::*;
 
 pub(super) const EXPLORER_CONTROL_HEIGHT: f32 = 30.;
 
-pub(super) fn control(id: &'static str, theme: &gpui_kit::component::Theme) -> Button {
+pub(super) fn control(
+    id: impl Into<gpui_kit::ElementId>,
+    theme: &gpui_kit::component::Theme,
+) -> Button {
     Button::new(id)
         .ghost()
         .bg(theme.background)
@@ -340,8 +343,8 @@ fn render_object_row(
         .h(px(TREE_ROW_HEIGHT))
         .px(px(SPACE_2))
         .rounded(px(RADIUS_SM))
-        .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-        .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
+        .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+        .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
         .on_click(cx.listener(move |this, event, window, cx| {
             this.on_object_click(click_object.clone(), event, window, cx);
         }));
@@ -368,7 +371,7 @@ fn render_object_row(
                 .min_w(px(0.))
                 .truncate()
                 .text_color(theme.muted_foreground)
-                .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
+                .text_size(crate::theme::ui_size(theme, FONT_CAPTION))
                 .children(match (&object.parent, &object.detail) {
                     _ if object.kind == ObjectKind::RecycleBin => object
                         .detail

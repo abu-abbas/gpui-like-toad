@@ -916,7 +916,7 @@ impl TableDelegate for ResultsDelegate {
     ) {
         self.last_visible = visible_range.clone();
         if let Some(handler) = self.on_visible_rows.clone() {
-            handler(visible_range, window, &mut **cx);
+            handler(visible_range, window, cx);
         }
     }
 
@@ -1149,7 +1149,7 @@ impl TableDelegate for ResultsDelegate {
         };
         let abs_row = self.absolute_row(row_ix);
         menu = self.load_cell_item(menu, abs_row, data_col);
-        menu = self.copy_menu(menu, row_ix, data_col, window, &mut **cx);
+        menu = self.copy_menu(menu, row_ix, data_col, window, cx);
         menu = menu.separator();
         if let (Some(handler), Some(request)) =
             (self.on_edit.clone(), self.edit_request(abs_row, data_col))
@@ -1256,7 +1256,7 @@ impl TableDelegate for ResultsDelegate {
         self.sort_by_column(col_ix, sort);
         // Other rows are on screen now: their CLOB starts are still due.
         if let Some(handler) = self.on_visible_rows.clone() {
-            handler(self.last_visible.clone(), window, &mut **cx);
+            handler(self.last_visible.clone(), window, cx);
         }
     }
 }
