@@ -364,8 +364,9 @@ mod tests {
 
     /// Run `script` (sh) as the extension.
     fn start(script: &str, id: &str) -> Result<ExtProcess, CallError> {
-        let dir =
-            std::env::temp_dir().join(format!("kilat-exthost-{}", crate::store::new_profile_id()));
+        let name = format!("kilat-exthost-{}", crate::store::new_profile_id());
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let dir = std::env::temp_dir().join(name);
         std::fs::create_dir_all(&dir).unwrap();
         let path: PathBuf = dir.join("ext.sh");
         std::fs::write(&path, script).unwrap();
