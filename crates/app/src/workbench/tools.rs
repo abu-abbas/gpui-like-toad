@@ -878,6 +878,11 @@ impl Workbench {
                     .gap(px(SPACE_2))
                     .px(px(SPACE_4))
                     .pb(px(SPACE_4))
+                    .children(
+                        (!self.extensions.tool_enabled(ToolKind::Redis)
+                            && !self.extensions.tool_enabled(ToolKind::MailHog))
+                        .then(|| caption_text("No developer tool is installed yet.".into(), theme)),
+                    )
                     .children(self.extensions.tool_enabled(ToolKind::Redis).then(|| {
                         choice(
                             ToolKind::Redis,
@@ -894,7 +899,18 @@ impl Workbench {
                     })),
             )
             .child(
-                dialog_footer(theme).child(div().flex_1()).child(
+                dialog_footer(theme)
+                    .child(
+                        Button::new("tool-picker-more")
+                            .ghost()
+                            .label("Get more in Settings > Extensions")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.tools.picker = false;
+                                this.open_extensions_page(window, cx);
+                            })),
+                    )
+                    .child(div().flex_1())
+                    .child(
                     Button::new("tool-picker-cancel")
                         .label("Cancel")
                         .min_w(px(88.))

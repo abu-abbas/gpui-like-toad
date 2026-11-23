@@ -836,7 +836,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !demo && !self.extensions.db_enabled(profile.kind) {
+        if !demo && !self.extension_ready(profile.kind.extension_id()) {
             // Say it where it can be seen: the Info panel is hidden when
             // nothing is connected, so open the page that fixes it.
             let name = extension_name(profile.kind.extension_id());
@@ -878,6 +878,16 @@ impl Workbench {
         }
         self.conn.demo_mode = demo;
         self.conn.connect_error = None;
+        self.conn.extension_label = (!demo && profile.kind != DbKind::Oracle)
+            .then(|| store::remote_install(profile.kind.extension_id()))
+            .flatten()
+            .map(|install| {
+                format!(
+                    "{} extension v{}",
+                    extension_name(profile.kind.extension_id()),
+                    install.version
+                )
+            });
         self.conn.last_connection = Some(LastConnection {
             profile: profile.clone(),
             demo,

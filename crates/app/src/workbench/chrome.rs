@@ -132,10 +132,14 @@ impl Workbench {
             } else {
                 "Connected"
             };
+            let detail = format!("{} @ {}", session.user, session.database);
             return (
                 theme.success,
                 mode,
-                format!("{} @ {}", session.user, session.database),
+                match &self.conn.extension_label {
+                    Some(label) => format!("{detail} · {label}"),
+                    None => detail,
+                },
             );
         }
         if self.conn.connect_error.is_some() {

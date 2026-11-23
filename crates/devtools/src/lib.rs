@@ -7,6 +7,7 @@
 
 pub mod console;
 pub mod mailhog;
+pub mod mailhog_wire;
 pub mod mime;
 pub mod redis_tool;
 pub mod server;

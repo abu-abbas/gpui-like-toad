@@ -41,7 +41,7 @@ installed under. Anything else is refused.
 Kilat sends `{"id":0,"method":"shutdown"}` and closes stdin. The extension
 should exit; if it is still running a second later it is killed.
 
-## Methods
+## Database methods
 The database methods mirror the `DbClient` trait in `ora-core`. Both sides
 are in `ora-core`: `extension_client.rs` (Kilat) and `extension_serve.rs`
 (the extension); the JSON shapes are in `extension_wire.rs`. `params` is
@@ -77,3 +77,27 @@ clipped.
 Limits for Kilat: the handshake must finish within 10 seconds, other calls
 may be silent for up to 10 minutes. A call that times out kills the program;
 the next `connect` starts a new one.
+
+## MailHog methods
+An extension of kind `tool` has its own methods. The MailHog extension
+(`crates/ext-mailhog`, id `mailhog`) wraps the MailHog HTTP API client of
+`crates/devtools`; the JSON of messages and targets is in
+`devtools/src/mailhog_wire.rs`, used by both sides. Kilat keeps drawing the
+Inbox; the extension only answers with data.
+
+| method | params | result |
+|---|---|---|
+| `connect` | `target` `{host, port, https, username, password}` | `{total}`; fails when the API does not answer like MailHog |
+| `disconnect` | none | `{}` |
+| `list` | `start` (messages to skip, newest first) | messages in chunks, then `{total, count}` |
+| `search` | `kind` (`containing`, `from`, `to`), `query`, `start` | like `list` |
+| `delete` | `id` | `{}` |
+| `delete_all` | none | `{}` |
+
+Every `chunk` of `list` and `search` is `{"messages": [message, ...]}`, at
+most about 512 KB each. A message has `id`, `from`, `to`, `cc`, `subject`,
+`date`, `created`, `size`, `headers` (list of `[name, value]`), `text`,
+`html` (both may be null), `attachments` (`{name, content_type, size}`)
+and `raw`. A message over 2 MB is sent without `raw` and with `text` and
+`html` cut at 512 KB. Any method before `connect` (or after `disconnect`)
+answers `not connected`.

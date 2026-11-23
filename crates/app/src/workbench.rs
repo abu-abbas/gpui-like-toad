@@ -243,6 +243,9 @@ struct ConnState {
     /// complete; the response itself is ignored.
     abandoned: bool,
     connect_error: Option<String>,
+    /// "SQLite extension v1.0.0" while connected through a downloaded
+    /// extension; shown in the status bar.
+    extension_label: Option<String>,
     connection_lost: bool,
     last_connection: Option<LastConnection>,
     /// Tab (by id) that the in-flight operation writes its result into, so
@@ -283,6 +286,7 @@ impl ConnState {
             op_generation: 0,
             abandoned: false,
             connect_error: None,
+            extension_label: None,
             connection_lost: false,
             last_connection: None,
             pending_tab: None,

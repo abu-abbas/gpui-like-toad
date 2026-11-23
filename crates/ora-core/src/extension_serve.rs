@@ -24,13 +24,37 @@ pub fn serve<R: BufRead, W: Write>(
     mut input: R,
     mut out: W,
 ) -> io::Result<()> {
-    let result = serve_loop(client, id, version, &mut input, &mut out);
+    let result = serve_loop(
+        &mut |method, params, emit| handle(client, method, params, emit),
+        id,
+        version,
+        &mut input,
+        &mut out,
+    );
     client.disconnect();
     result
 }
 
+/// What an extension does with one request: its method, its params, and a
+/// way to send `chunk`s before the result.
+pub type Handler<'a> =
+    dyn FnMut(&str, &Json, &mut dyn FnMut(Json) -> Result<(), String>) -> Result<Json, String> + 'a;
+
+/// [`serve`] for an extension that is not a database: `handler` answers
+/// every method except `hello` and `shutdown`. The caller closes whatever
+/// the handler opened once this returns.
+pub fn serve_with<R: BufRead, W: Write>(
+    handler: &mut Handler<'_>,
+    id: &str,
+    version: &str,
+    mut input: R,
+    mut out: W,
+) -> io::Result<()> {
+    serve_loop(handler, id, version, &mut input, &mut out)
+}
+
 fn serve_loop<R: BufRead, W: Write>(
-    client: &mut dyn DbClient,
+    handler: &mut Handler<'_>,
     ext_id: &str,
     version: &str,
     input: &mut R,
@@ -74,7 +98,7 @@ fn serve_loop<R: BufRead, W: Write>(
             }
             _ => {
                 let mut write_error = None;
-                let outcome = handle(client, &method, &params, &mut |chunk| {
+                let outcome = handler(&method, &params, &mut |chunk| {
                     send(out, id, "chunk", chunk).map_err(|e| {
                         write_error = Some(e);
                         "the host is gone".to_string()
