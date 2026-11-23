@@ -788,6 +788,7 @@ impl Workbench {
             } else {
                 self.connection_form.editing_profile
             },
+            window,
             cx,
         );
     }
@@ -823,7 +824,7 @@ impl Workbench {
         } else {
             Password::Typed(SecretString::from(String::new()))
         };
-        self.start_connect(profile, password, false, Some(ix), cx);
+        self.start_connect(profile, password, false, Some(ix), window, cx);
     }
 
     fn start_connect(
@@ -832,14 +833,17 @@ impl Workbench {
         password: Password,
         demo: bool,
         profile_ix: Option<usize>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !demo && !self.extensions.db_enabled(profile.kind) {
+            // Say it where it can be seen: the Info panel is hidden when
+            // nothing is connected, so open the page that fixes it.
             let name = extension_name(profile.kind.extension_id());
             self.push_message(format!(
                 "Install {name} in Settings > Extensions to open this connection."
             ));
-            cx.notify();
+            self.show_extension_needed(profile.kind.extension_id(), window, cx);
             return;
         }
         let resume = std::iter::once(&self.conn)
