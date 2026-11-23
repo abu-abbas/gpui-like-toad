@@ -126,7 +126,10 @@ impl ToolsState {
     pub fn is_live(&self, id: &str) -> bool {
         self.redis.get(id).is_some_and(|v| v.session.is_some())
             || self.mail.get(id).is_some_and(|v| v.reachable)
-            || self.pilot.as_ref().is_some_and(|v| v.instance == id && v.reachable())
+            || self
+                .pilot
+                .as_ref()
+                .is_some_and(|v| v.instance == id && v.reachable())
     }
 
     /// The active tool, if it still exists.
@@ -201,7 +204,12 @@ impl Workbench {
         };
         self.tools.active = Some(id.to_string());
         self.rail = RailPanel::Connections;
-        if self.tools.pilot.as_ref().is_some_and(|pilot| pilot.instance != id) {
+        if self
+            .tools
+            .pilot
+            .as_ref()
+            .is_some_and(|pilot| pilot.instance != id)
+        {
             self.close_mailhog_pilot(cx);
         }
         if tool.kind == ToolKind::MailHog && self.extensions.tool_enabled(tool.kind) {
@@ -257,7 +265,12 @@ impl Workbench {
     pub(super) fn close_tool(&mut self, id: &str, cx: &mut Context<Self>) {
         self.tools.redis.remove(id);
         self.tools.mail.remove(id);
-        if self.tools.pilot.as_ref().is_some_and(|pilot| pilot.instance == id) {
+        if self
+            .tools
+            .pilot
+            .as_ref()
+            .is_some_and(|pilot| pilot.instance == id)
+        {
             self.close_mailhog_pilot(cx);
         }
         if self.tools.active.as_deref() == Some(id) {
@@ -666,7 +679,11 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let live = self.tools.is_live(&tool.id);
-        let pilot = self.tools.pilot.as_ref().filter(|pilot| pilot.instance == tool.id);
+        let pilot = self
+            .tools
+            .pilot
+            .as_ref()
+            .filter(|pilot| pilot.instance == tool.id);
         let open = pilot.is_some()
             || self.tools.redis.contains_key(&tool.id)
             || self.tools.mail.contains_key(&tool.id);
@@ -675,8 +692,8 @@ impl Workbench {
         let kind = tool.kind;
         let view = cx.entity();
         let menu_id = tool.id.clone();
-        let managed_by_extension = kind == ToolKind::MailHog
-            && store::remote_install(super::mailhog_pilot::ID).is_some();
+        let managed_by_extension =
+            kind == ToolKind::MailHog && store::remote_install(super::mailhog_pilot::ID).is_some();
         let flags = self.server_flags(tool);
         div()
             .id(("tool-row", ix))
@@ -783,13 +800,18 @@ impl Workbench {
                                 )
                             })
                             .when(
-                                live && pilot.is_none() && tool.environment == ConnectionEnvironment::None
+                                live && pilot.is_none()
+                                    && tool.environment == ConnectionEnvironment::None
                                     && !flags.running,
                                 |row| row.child(status_dot(theme.success)),
                             )
-                            .children(pilot.and_then(|_| self.render_mailhog_pilot(
-                                ora_core::extension_ui::Slot::Sidebar, theme, cx,
-                            ))),
+                            .children(pilot.and_then(|_| {
+                                self.render_mailhog_pilot(
+                                    ora_core::extension_ui::Slot::Sidebar,
+                                    theme,
+                                    cx,
+                                )
+                            })),
                     ),
             )
     }
@@ -804,7 +826,9 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
-        if let Some(panel) = self.render_mailhog_pilot(ora_core::extension_ui::Slot::Explorer, theme, cx) {
+        if let Some(panel) =
+            self.render_mailhog_pilot(ora_core::extension_ui::Slot::Explorer, theme, cx)
+        {
             return Some(panel);
         }
         let tool = self.tools.active_tool()?.clone();
@@ -823,7 +847,9 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
-        if let Some(panel) = self.render_mailhog_pilot(ora_core::extension_ui::Slot::Main, theme, cx) {
+        if let Some(panel) =
+            self.render_mailhog_pilot(ora_core::extension_ui::Slot::Main, theme, cx)
+        {
             return Some(panel);
         }
         let tool = self.tools.active_tool()?.clone();

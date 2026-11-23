@@ -37,7 +37,10 @@ pub fn data_dir(config_dir: &Path, tool_name: &str) -> PathBuf {
 
 /// Per-instance PID journals for MailHog extension processes.
 pub fn mailhog_data_dir(config: &Path, id: &str) -> PathBuf {
-    config.join("server-data").join("mailhog-extension").join(file_name(id))
+    config
+        .join("server-data")
+        .join("mailhog-extension")
+        .join(file_name(id))
 }
 
 pub fn stop_mailhog_leftovers(config: &Path) {
