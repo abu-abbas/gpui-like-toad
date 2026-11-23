@@ -24,6 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod history;
 mod json;
 mod layout;
+mod migrate;
 mod profile_import;
 mod profiles;
 #[cfg(test)]
@@ -35,6 +36,7 @@ mod update_prefs;
 pub use history::*;
 pub use json::*;
 pub use layout::*;
+pub use migrate::*;
 pub use profile_import::*;
 pub use profiles::*;
 pub use theme::*;
@@ -52,27 +54,39 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Per-user config directory for this app:
-/// - macOS: `~/Library/Application Support/gpui-like-toad`
-/// - Windows: `%APPDATA%\gpui-like-toad`
-/// - Linux/other: `$XDG_CONFIG_HOME/gpui-like-toad` or `~/.config/gpui-like-toad`
-pub fn config_dir() -> PathBuf {
+/// Folder name before the rename to Kilat. Only used by the one-time
+/// migration in [`migrate_legacy_config_dir`].
+const LEGACY_DIR_NAME: &str = "gpui-like-toad";
+const DIR_NAME: &str = "Kilat";
+
+fn config_root() -> PathBuf {
     if cfg!(target_os = "macos") {
-        home_dir()
-            .join("Library")
-            .join("Application Support")
-            .join("gpui-like-toad")
+        home_dir().join("Library").join("Application Support")
     } else if cfg!(target_os = "windows") {
         env::var_os("APPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(home_dir)
-            .join("gpui-like-toad")
     } else {
         env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home_dir().join(".config"))
-            .join("gpui-like-toad")
     }
+}
+
+/// Per-user config directory for this app:
+/// - macOS: `~/Library/Application Support/Kilat`
+/// - Windows: `%APPDATA%\Kilat`
+/// - Linux/other: `$XDG_CONFIG_HOME/Kilat` or `~/.config/Kilat`
+///
+/// Installs from before the rename are moved over at startup, see
+/// [`migrate_legacy_config_dir`].
+pub fn config_dir() -> PathBuf {
+    config_root().join(DIR_NAME)
+}
+
+/// The pre-rename folder (`gpui-like-toad`) next to [`config_dir`].
+pub fn legacy_config_dir() -> PathBuf {
+    config_root().join(LEGACY_DIR_NAME)
 }
 
 // ---------------------------------------------------------------------------
