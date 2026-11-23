@@ -192,6 +192,142 @@ pub fn save_extensions(ext: &Extensions) -> std::io::Result<()> {
     save_extensions_in(&config_dir(), ext)
 }
 
+// ---------------------------------------------------------------------------
+// Downloaded extensions
+// ---------------------------------------------------------------------------
+//
+// Layout under the config dir:
+//   extensions/<id>/<version>/<file>   the verified program
+//   extensions/<id>/installed.json     {"version": "...", "file": "..."}
+// The caller verifies the file (checksum and signature) before
+// [`finish_remote_install`]; nothing here trusts the network.
+
+/// A downloaded extension that is installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteInstall {
+    pub id: String,
+    pub version: String,
+    pub file: String,
+    pub path: PathBuf,
+}
+
+fn remote_root_in(dir: &Path) -> PathBuf {
+    dir.join("extensions")
+}
+
+fn safe_part(part: &str) -> bool {
+    !part.is_empty()
+        && !part.starts_with('.')
+        && part
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// The installed version of a downloaded extension, if any.
+pub fn remote_install_in(dir: &Path, id: &str) -> Option<RemoteInstall> {
+    if !crate::extension_index::valid_id(id) {
+        return None;
+    }
+    let ext_dir = remote_root_in(dir).join(id);
+    let v = read_json_file(&ext_dir.join("installed.json"))?;
+    let version = v.get("version")?.as_str()?.to_string();
+    let file = v.get("file")?.as_str()?.to_string();
+    if !safe_part(&version) || !safe_part(&file) {
+        return None;
+    }
+    let path = ext_dir.join(&version).join(&file);
+    path.is_file().then(|| RemoteInstall {
+        id: id.to_string(),
+        version,
+        file,
+        path,
+    })
+}
+
+/// Move the verified `staged` file into place and record it. Older
+/// versions of the same extension are removed afterwards. Nothing becomes
+/// "installed" unless every step worked.
+pub fn finish_remote_install_in(
+    dir: &Path,
+    id: &str,
+    version: &str,
+    file: &str,
+    staged: &Path,
+) -> std::io::Result<RemoteInstall> {
+    use std::io::{Error, ErrorKind};
+    if !crate::extension_index::valid_id(id) || !safe_part(version) || !safe_part(file) {
+        return Err(Error::new(ErrorKind::InvalidInput, "unsafe extension name"));
+    }
+    let ext_dir = remote_root_in(dir).join(id);
+    let version_dir = ext_dir.join(version);
+    fs::create_dir_all(&version_dir)?;
+    let target = version_dir.join(file);
+    let part = version_dir.join(format!("{file}.part"));
+    let copied = fs::copy(staged, &part).and_then(|_| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&part, fs::Permissions::from_mode(0o755))?;
+        }
+        fs::rename(&part, &target)
+    });
+    if let Err(err) = copied {
+        let _ = fs::remove_file(&part);
+        return Err(err);
+    }
+    write_json_file(
+        &ext_dir,
+        "installed.json",
+        &Json::Obj(vec![
+            ("version".into(), Json::Str(version.into())),
+            ("file".into(), Json::Str(file.into())),
+        ]),
+    )?;
+    if let Ok(entries) = fs::read_dir(&ext_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if entry.path().is_dir() && name.to_string_lossy() != version {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    Ok(RemoteInstall {
+        id: id.to_string(),
+        version: version.into(),
+        file: file.into(),
+        path: target,
+    })
+}
+
+/// Delete a downloaded extension. Saved connections and tools are not
+/// touched.
+pub fn remove_remote_install_in(dir: &Path, id: &str) -> std::io::Result<()> {
+    if !crate::extension_index::valid_id(id) {
+        return Ok(());
+    }
+    match fs::remove_dir_all(remote_root_in(dir).join(id)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+pub fn remote_install(id: &str) -> Option<RemoteInstall> {
+    remote_install_in(&config_dir(), id)
+}
+
+pub fn finish_remote_install(
+    id: &str,
+    version: &str,
+    file: &str,
+    staged: &Path,
+) -> std::io::Result<RemoteInstall> {
+    finish_remote_install_in(&config_dir(), id, version, file, staged)
+}
+
+pub fn remove_remote_install(id: &str) -> std::io::Result<()> {
+    remove_remote_install_in(&config_dir(), id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +374,38 @@ mod tests {
         assert!(again.db_enabled(DbKind::Oracle));
         ext.uninstall("sqlite");
         assert!(!ext.db_enabled(DbKind::Sqlite));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remote_install_replaces_old_versions_and_removes_cleanly() {
+        let dir = temp_dir("remote");
+        let staged = dir.join("staged.bin");
+        fs::write(&staged, b"v1").unwrap();
+        assert!(remote_install_in(&dir, "sqlite").is_none());
+        let a = finish_remote_install_in(&dir, "sqlite", "1.0.0", "ext-sqlite", &staged).unwrap();
+        assert_eq!(fs::read(&a.path).unwrap(), b"v1");
+        fs::write(&staged, b"v2").unwrap();
+        let b = finish_remote_install_in(&dir, "sqlite", "1.1.0", "ext-sqlite", &staged).unwrap();
+        let now = remote_install_in(&dir, "sqlite").unwrap();
+        assert_eq!(now.version, "1.1.0");
+        assert_eq!(now.path, b.path);
+        assert!(!a.path.exists(), "old version folder is removed");
+        remove_remote_install_in(&dir, "sqlite").unwrap();
+        assert!(remote_install_in(&dir, "sqlite").is_none());
+        remove_remote_install_in(&dir, "sqlite").unwrap();
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remote_install_refuses_unsafe_names() {
+        let dir = temp_dir("unsafe");
+        let staged = dir.join("s");
+        fs::write(&staged, b"x").unwrap();
+        assert!(finish_remote_install_in(&dir, "../x", "1.0.0", "f", &staged).is_err());
+        assert!(finish_remote_install_in(&dir, "ok", "../1", "f", &staged).is_err());
+        assert!(finish_remote_install_in(&dir, "ok", "1.0.0", "a/b", &staged).is_err());
+        assert!(!dir.join("extensions").exists());
         let _ = fs::remove_dir_all(dir);
     }
 }
