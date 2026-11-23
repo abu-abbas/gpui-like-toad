@@ -1,7 +1,7 @@
 //! SQLite SQL. The driver is the `kilat-ext-sqlite` extension; this file is
 //! the part of it the app and the extension share.
 
-use super::literal::{base_type, hex_upper, looks_numeric, no_nul, quote_text};
+use super::literal::{base_type, bool_digit, hex_upper, looks_numeric, no_nul, quote_text};
 use super::{numeric_column, CanonType, Capabilities, DbKind, Dialect};
 use crate::model::Value;
 
@@ -20,6 +20,7 @@ impl Dialect for SqliteDialect {
             network: false,
             row_id: true,
             sysdba: false,
+            transactional_ddl: true,
             explain_text: false,
             truncate: false,
             special_tables: false,
@@ -27,6 +28,10 @@ impl Dialect for SqliteDialect {
             sequences: false,
             recycle_bin: false,
         }
+    }
+
+    fn new_table_types(&self) -> (&'static str, &'static str) {
+        ("INTEGER", "TEXT")
     }
 
     fn row_id_expr(&self) -> &'static str {
@@ -111,10 +116,14 @@ impl Dialect for SqliteDialect {
 
     fn text_literal(&self, column_type: &str, s: &str) -> Result<String, String> {
         no_nul(s)?;
-        if numeric_column(&base_type(column_type)) && looks_numeric(s) {
-            Ok(s.trim().to_string())
-        } else {
-            Ok(quote_text(s))
+        if numeric_column(&base_type(column_type)) {
+            if looks_numeric(s) {
+                return Ok(s.trim().to_string());
+            }
+            if let Some(digit) = bool_digit(s) {
+                return Ok(digit.to_string());
+            }
         }
+        Ok(quote_text(s))
     }
 }

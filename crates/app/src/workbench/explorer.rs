@@ -633,8 +633,14 @@ fn object_menu(
         })
         .when(
             !is_table
-                && ddl::drop_object_sql(&ora_core::dialect::OracleDialect, "O", "N", &object.kind)
-                    .is_some(),
+                && ddl::drop_object_sql(
+                    &ora_core::dialect::OracleDialect,
+                    "O",
+                    "N",
+                    &object.kind,
+                    Some("T"),
+                )
+                .is_some(),
             |menu| {
                 menu.separator().item(item(
                     &format!("Delete {}…", ddl::kind_noun(&object.kind)),

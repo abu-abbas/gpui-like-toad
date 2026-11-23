@@ -135,12 +135,13 @@ fn text_input(
 fn column_row(
     name: &str,
     data_type: &str,
+    example: &str,
     window: &mut Window,
     cx: &mut Context<Workbench>,
 ) -> ColumnRow {
     ColumnRow {
         name: text_input("Column name", name, window, cx),
-        data_type: text_input("Type, e.g. VARCHAR2(100)", data_type, window, cx),
+        data_type: text_input(&format!("Type, e.g. {example}"), data_type, window, cx),
         not_null: false,
         primary_key: false,
     }
@@ -390,9 +391,10 @@ impl Workbench {
         let name = text_input("Table name", "", window, cx);
         let directory = text_input("Directory object, e.g. DATA_PUMP_DIR", "", window, cx);
         let location = text_input("File name, e.g. people.csv", "", window, cx);
-        let mut id = column_row("ID", "NUMBER", window, cx);
+        let (id_type, text_type) = self.active_dialect().new_table_types();
+        let mut id = column_row("ID", id_type, text_type, window, cx);
         id.primary_key = true;
-        let columns = vec![id, column_row("", "VARCHAR2(100)", window, cx)];
+        let columns = vec![id, column_row("", text_type, text_type, window, cx)];
         let first = name.clone();
         self.object_dialog = Some(ObjectDialog {
             kind: DialogKind::NewTable(NewTableForm {
@@ -486,7 +488,7 @@ impl Workbench {
 
     /// OK in the open dialog: build the operation, or show what is wrong.
     pub(super) fn submit_object_dialog(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let sqlite = self.active_kind() == DbKind::Sqlite;
+        let sqlite = self.active_kind().capabilities().transactional_ddl;
         let dialect = self.active_dialect();
         let Some(dialog) = self.object_dialog.as_mut() else {
             return;
@@ -632,7 +634,7 @@ fn build_object_op(
             )
         }
         ObjectAction::Drop => {
-            let sql = ddl::drop_object_sql(dialect, owner, name, &object.kind)
+            let sql = ddl::drop_object_sql(dialect, owner, name, &object.kind, object.parent.as_deref())
                 .ok_or_else(|| "This kind of object cannot be deleted here.".to_string())?;
             let noun = ddl::kind_noun(&object.kind);
             (
@@ -669,7 +671,7 @@ fn build_object_op(
                 format!("Truncated {owner}.{name}."),
             ),
             false,
-            false,
+            sqlite,
             format!("Truncating {name}…"),
         ),
         ObjectAction::ResetSequence => {
@@ -769,12 +771,12 @@ fn confirm_text(action: ObjectAction, object: &ObjectRef, sqlite: bool) -> Strin
             "Delete table {target} with all its rows? The change is not final until you Commit."
         ),
         ObjectAction::Drop if object.kind == ObjectKind::Table => format!(
-            "Delete table {target} with all its rows? Oracle commits this at once; the table may stay in the recycle bin (FLASHBACK TABLE) until purged."
+            "Delete table {target} with all its rows? The database commits this at once; on Oracle the table may stay in the recycle bin (FLASHBACK TABLE) until purged."
         ),
         ObjectAction::Drop => format!(
             "Delete {} {target}? Anything that uses it stops working{}.",
             ddl::kind_noun(&object.kind),
-            if sqlite { "; not final until you Commit" } else { ", and Oracle commits this at once" }
+            if sqlite { "; not final until you Commit" } else { ", and the database commits this at once" }
         ),
         ObjectAction::DropConstraint => format!(
             "Delete constraint {target} from table {}? The rule is no longer enforced.",
@@ -783,8 +785,11 @@ fn confirm_text(action: ObjectAction, object: &ObjectRef, sqlite: bool) -> Strin
         ObjectAction::Empty => format!(
             "Delete every row of {target}? Nothing is final until you press Commit; Rollback undoes it."
         ),
+        ObjectAction::Truncate if sqlite => format!(
+            "Truncate {target}? Every row is removed at once. Nothing is final until you press Commit; Rollback undoes it."
+        ),
         ObjectAction::Truncate => format!(
-            "Truncate {target}? Every row is removed at once and Oracle commits immediately. This cannot be rolled back."
+            "Truncate {target}? Every row is removed at once and the database commits immediately. This cannot be rolled back."
         ),
         ObjectAction::ResetSequence => format!(
             "Restart sequence {target} so its next value is the number below. Rows that already use higher numbers can then collide with new ones."
@@ -821,7 +826,7 @@ impl Workbench {
         let Some(dialog) = self.object_dialog.as_ref() else {
             return div().into_any_element();
         };
-        let sqlite = self.active_kind() == DbKind::Sqlite;
+        let sqlite = self.active_kind().capabilities().transactional_ddl;
         let prod = dialog.confirm.is_some()
             && self.conn.access().environment == ConnectionEnvironment::Production;
         let (title, body, ok_label, danger, width) = match &dialog.kind {
@@ -1150,7 +1155,8 @@ impl Workbench {
                     .icon(IconName::Plus)
                     .label("Add column")
                     .on_click(cx.listener(|this, _, window, cx| {
-                        let row = column_row("", "VARCHAR2(100)", window, cx);
+                        let text_type = this.active_dialect().new_table_types().1;
+                        let row = column_row("", text_type, text_type, window, cx);
                         if let Some(ObjectDialog {
                             kind: DialogKind::NewTable(form),
                             ..

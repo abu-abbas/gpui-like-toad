@@ -162,6 +162,11 @@ fn native_types_settle_after_one_round_trip() {
 #[test]
 fn literals_follow_each_engine() {
     let text = |k: DbKind, ty: &str, s: &str| k.dialect().text_literal(ty, s).unwrap();
+    // A boolean from another engine fills a numeric column as 1 / 0.
+    assert_eq!(text(DbKind::Sqlite, "INTEGER", "true"), "1");
+    assert_eq!(text(DbKind::Oracle, "NUMBER", "false"), "0");
+    assert_eq!(text(DbKind::Mysql, "tinyint(1)", "t"), "1");
+    assert_eq!(text(DbKind::Postgres, "boolean", "true"), "'true'");
     assert_eq!(text(DbKind::Postgres, "integer", " 42 "), "42");
     assert_eq!(text(DbKind::Postgres, "text", "it's"), "'it''s'");
     assert_eq!(text(DbKind::Postgres, "date", "2024-01-31"), "'2024-01-31'");

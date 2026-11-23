@@ -434,8 +434,8 @@ impl Workbench {
                     .child(self.info_block(w.target.and_then(|id| self.open_conn(id)), theme));
             }
             TargetMode::File => {
-                let kind_button = |id: &'static str, kind: DbKind| {
-                    Button::new(id)
+                let kind_button = |kind: DbKind| {
+                    Button::new(("tr-sk", kind as usize))
                         .small()
                         .label(kind.label())
                         .selected(w.script_kind == kind)
@@ -503,11 +503,13 @@ impl Workbench {
                             .flex()
                             .flex_row()
                             .gap(px(SPACE_2))
-                            .child(kind_button("tr-sk-oracle", DbKind::Oracle))
                             .children(
-                                self.extensions
-                                    .db_enabled(DbKind::Sqlite)
-                                    .then(|| kind_button("tr-sk-sqlite", DbKind::Sqlite)),
+                                DbKind::ALL
+                                    .into_iter()
+                                    .filter(|k| {
+                                        *k == DbKind::Oracle || self.extensions.db_enabled(*k)
+                                    })
+                                    .map(kind_button),
                             ),
                     )
                     .child(form_label("Schema name in the script", theme))

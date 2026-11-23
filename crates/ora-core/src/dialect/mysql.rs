@@ -1,6 +1,6 @@
 //! MySQL and MariaDB SQL. A "schema" is a database.
 
-use super::literal::{base_type, hex_upper, looks_numeric, no_nul, type_args};
+use super::literal::{base_type, bool_digit, hex_upper, looks_numeric, no_nul, type_args};
 use super::{numeric_column, BindStyle, CanonType, Capabilities, DbKind, Dialect};
 use crate::model::Value;
 
@@ -21,6 +21,7 @@ impl Dialect for MysqlDialect {
             // data tab learns to use in the MySQL step.
             row_id: false,
             sysdba: false,
+            transactional_ddl: false,
             explain_text: true,
             truncate: true,
             special_tables: false,
@@ -28,6 +29,10 @@ impl Dialect for MysqlDialect {
             sequences: false,
             recycle_bin: false,
         }
+    }
+
+    fn new_table_types(&self) -> (&'static str, &'static str) {
+        ("BIGINT", "VARCHAR(100)")
     }
 
     fn quote_ident(&self, ident: &str) -> String {
@@ -152,8 +157,13 @@ impl Dialect for MysqlDialect {
 
     fn text_literal(&self, column_type: &str, s: &str) -> Result<String, String> {
         no_nul(s)?;
-        if numeric_column(&base_type(column_type)) && looks_numeric(s) {
-            return Ok(s.trim().to_string());
+        if numeric_column(&base_type(column_type)) {
+            if looks_numeric(s) {
+                return Ok(s.trim().to_string());
+            }
+            if let Some(digit) = bool_digit(s) {
+                return Ok(digit.to_string());
+            }
         }
         // Backslash is an escape character in MySQL strings by default.
         Ok(format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''")))

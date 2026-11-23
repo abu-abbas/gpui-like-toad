@@ -114,6 +114,10 @@ pub struct Capabilities {
     pub row_id: bool,
     /// "Connect as SYSDBA".
     pub sysdba: bool,
+    /// DDL (CREATE, DROP, RENAME, TRUNCATE) is part of the open transaction:
+    /// pending until Commit and undone by Rollback. Oracle and MySQL commit
+    /// DDL at once.
+    pub transactional_ddl: bool,
     /// Explain Plan as formatted text (DBMS_XPLAN), next to the plan tree.
     pub explain_text: bool,
     /// `TRUNCATE TABLE`.
@@ -219,6 +223,24 @@ pub trait Dialect: Sync {
     /// `(index, table)` as written in `CREATE INDEX <index> ON <table>`.
     fn index_refs(&self, schema: &str, index: &str, table: &str) -> (String, String) {
         (self.table_ref(schema, index), self.table_ref(schema, table))
+    }
+
+    /// Starting types of the New Table dialog: the key column's and a
+    /// text column's.
+    fn new_table_types(&self) -> (&'static str, &'static str);
+
+    /// `DROP <noun> ...` for an object of `noun` (upper-case, e.g.
+    /// `INDEX`); `parent` is the table of a trigger or constraint. `None`
+    /// when this engine cannot drop it from the name alone.
+    fn drop_object(
+        &self,
+        noun: &str,
+        owner: &str,
+        name: &str,
+        parent: Option<&str>,
+    ) -> Option<String> {
+        let _ = parent;
+        Some(format!("DROP {noun} {}", self.table_ref(owner, name)))
     }
 
     /// `RENAME` of a table, `new` already valid.

@@ -90,6 +90,7 @@ fn default_for(source: DbKind, target: DbKind, col: &ColumnDef) -> Option<String
         || upper == "NULL"
         || upper.contains("NEXTVAL")
         || upper.contains("CURRVAL")
+        || upper.contains("IDENTITY")
         || text.contains("\".\"")
         || super::spec::check_condition(text).is_err()
     {

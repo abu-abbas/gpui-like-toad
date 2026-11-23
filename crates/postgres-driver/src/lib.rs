@@ -14,8 +14,10 @@
 
 mod catalog;
 mod conv;
+mod rowkey;
 mod tls;
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use ora_core::dialect::{rewrite_binds, BindStyle};
@@ -23,7 +25,7 @@ use ora_core::model::parse_easy_connect;
 use ora_core::sql::clean_statement;
 use ora_core::{
     ColumnDef, ColumnInfo, ConnectionProfile, DbClient, DbError, DbInfo, DbKind, FetchLimits,
-    IndexDef, ObjectKind, QueryResult, RowCollector, SchemaObject,
+    IndexDef, ObjectKind, QueryResult, RowCollector, SchemaObject, TableFilter, TablePage, Value,
 };
 use postgres::types::ToSql;
 use postgres::{Client, Config, SimpleQueryMessage};
@@ -40,6 +42,8 @@ pub struct PostgresClient {
     client: Option<Client>,
     /// A transaction is open (pending changes).
     in_tx: bool,
+    /// Primary keys read so far, by (schema, table).
+    keys: HashMap<(String, String), Vec<catalog::KeyColumn>>,
 }
 
 impl PostgresClient {
@@ -101,6 +105,17 @@ impl PostgresClient {
             self.in_tx = true;
         }
         self.guarded(f)
+    }
+
+    /// The primary key of a table, read once per connection.
+    fn key_of(&mut self, owner: &str, table: &str) -> Result<Vec<catalog::KeyColumn>, DbError> {
+        let id = (owner.to_string(), table.to_string());
+        if let Some(key) = self.keys.get(&id) {
+            return Ok(key.clone());
+        }
+        let key = catalog::primary_key(self, owner, table)?;
+        self.keys.insert(id, key.clone());
+        Ok(key)
     }
 
     /// Text rows of a catalog query (every value as the server writes it).
@@ -340,6 +355,7 @@ impl DbClient for PostgresClient {
         // Dropping the client closes the session and rolls back.
         self.client = None;
         self.in_tx = false;
+        self.keys.clear();
     }
 
     fn is_connected(&self) -> bool {
@@ -368,7 +384,124 @@ impl DbClient for PostgresClient {
         self.read(sql, binds, limits)
     }
 
+    /// Rows are identified by the primary key when the table has one,
+    /// otherwise by `ctid` (see `rowkey`).
+    fn query_table(
+        &mut self,
+        owner: &str,
+        table: &str,
+        filter: &TableFilter,
+        page: TablePage,
+    ) -> Result<QueryResult, DbError> {
+        let expr = if page.rowid {
+            let key = self.key_of(owner, table)?;
+            if key.is_empty() {
+                self.dialect().row_id_expr().to_string()
+            } else {
+                rowkey::id_expr(&key)
+            }
+        } else {
+            String::new()
+        };
+        let query =
+            ora_core::filter::select_sql_keyed(self.dialect(), owner, table, filter, page, &expr);
+        self.read(&query.sql, &query.binds, FetchLimits::rows(page.limit))
+    }
+
+    fn fetch_cell(
+        &mut self,
+        owner: &str,
+        table: &str,
+        column: &str,
+        rowid: &str,
+        budget: usize,
+    ) -> Result<Value, DbError> {
+        let key = self.key_of(owner, table)?;
+        let d = self.dialect();
+        let sql = format!(
+            "SELECT {} FROM {} WHERE {}",
+            d.quote_ident(column),
+            d.table_ref(owner, table),
+            rowkey::matches(d, rowid, &key, 1)
+        );
+        let limits = FetchLimits::full_cell(budget);
+        let result = self.read(&sql, &[rowid.to_string()], limits)?;
+        match result
+            .rows
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next())
+        {
+            Some(Value::Clipped(c)) => Err(DbError::new(format!(
+                "The value is {}, larger than the {} that can be loaded into the grid.",
+                c.describe_len(),
+                ora_core::fetch::human_bytes(limits.max_cell_bytes)
+            ))),
+            Some(value) if value.heap_bytes() > budget => Err(DbError::new(format!(
+                "The value needs {}, more than the {} left in the open results.",
+                ora_core::fetch::human_bytes(value.heap_bytes()),
+                ora_core::fetch::human_bytes(budget)
+            ))),
+            Some(value) => Ok(value),
+            None => Err(DbError::new("Row no longer exists or its key changed")),
+        }
+    }
+
+    fn update_cell(
+        &mut self,
+        owner: &str,
+        table: &str,
+        column: &str,
+        rowid: &str,
+        value: Option<&str>,
+    ) -> Result<(), DbError> {
+        let key = self.key_of(owner, table)?;
+        let d = self.dialect();
+        let (target, column) = (d.table_ref(owner, table), d.quote_ident(column));
+        let (sql, binds) = match value {
+            Some(v) => (
+                format!(
+                    "UPDATE {target} SET {column} = :1 WHERE {}",
+                    rowkey::matches(d, rowid, &key, 2)
+                ),
+                vec![v.to_string(), rowid.to_string()],
+            ),
+            None => (
+                format!(
+                    "UPDATE {target} SET {column} = NULL WHERE {}",
+                    rowkey::matches(d, rowid, &key, 1)
+                ),
+                vec![rowid.to_string()],
+            ),
+        };
+        match self.execute_binds(&sql, &binds)? {
+            1 => Ok(()),
+            0 => Err(DbError::new("Row no longer exists or its key changed")),
+            n => Err(DbError::new(format!(
+                "Expected UPDATE to affect one row, but it affected {n}. Roll back the transaction."
+            ))),
+        }
+    }
+
+    fn delete_grid_row(&mut self, owner: &str, table: &str, rowid: &str) -> Result<(), DbError> {
+        let key = self.key_of(owner, table)?;
+        let d = self.dialect();
+        let sql = format!(
+            "DELETE FROM {} WHERE {}",
+            d.table_ref(owner, table),
+            rowkey::matches(d, rowid, &key, 1)
+        );
+        match self.execute_binds(&sql, &[rowid.to_string()])? {
+            1 => Ok(()),
+            n => Err(DbError::new(format!(
+                "Expected to delete one row, affected {n}"
+            ))),
+        }
+    }
+
     fn execute(&mut self, sql: &str) -> Result<u64, DbError> {
+        // A script may change keys: read them again afterwards.
+        self.keys.clear();
         let sql = clean_statement(sql);
         // Statements without binds may be several commands (a script).
         let messages = self.guarded_write(|c| c.simple_query(sql))?;
