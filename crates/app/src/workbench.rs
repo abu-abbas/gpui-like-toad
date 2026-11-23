@@ -84,6 +84,8 @@ mod sqlite_form;
 mod tabs;
 mod tools;
 mod tools_mail;
+mod extension_panel;
+mod mailhog_pilot;
 mod tools_redis;
 mod tools_server;
 mod transfer;
@@ -545,6 +547,7 @@ impl Workbench {
         // Servers Kilat started ("Start server from Kilat") follow Kilat:
         // stop them on quit, and stop leftovers of a run that crashed.
         devtools::server::stop_leftovers(&store::config_dir());
+        devtools::server::stop_mailhog_leftovers(&store::config_dir());
         let quit_sub = cx.on_app_quit(|this: &mut Workbench, _| {
             this.stop_all_servers_now();
             async {}

@@ -58,3 +58,19 @@ a minimum interval of one second. A reply without a polling interval stops polli
 A protocol violation closes the extension session. The renderer integration
 will surface Connection lost and offer Reconnect. The transport, renderer,
 manifest contributions and tool lifecycle are separate layers.
+
+## MailHog pilot
+
+Kilat uses the declarative Inbox when the signed MailHog package is installed
+and enabled. Existing tool profiles keep their IDs and keychain entries.
+The Workbench supplies their existing connection settings to the extension,
+which publishes the sidebar status, Explorer and Main view together.
+The bundled Inbox stays available for existing profiles without the pilot
+package. The pilot currently uses the built-in profile editor.
+
+The pilot supports inbox search, paging, message tabs, copying the subject
+and deleting a message with host confirmation. Read-only is also enforced
+by the MailHog service. The pilot caps the retained rows and message text.
+When a local server is requested, the extension reuses a listening instance
+or starts and owns a child process. The host exposes its log in Settings and
+cleans up recorded leftovers on a subsequent Kilat startup.

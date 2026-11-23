@@ -272,3 +272,70 @@ fn a_huge_message_arrives_without_its_raw_source() {
     assert!(text.len() <= 512 * 1024, "{}", text.len());
     assert_eq!(subject(&messages[1]), "Small");
 }
+
+#[test]
+fn declarative_inbox_selects_and_copies_without_native_mailhog_ui() {
+    use ora_core::extension_ui::{decode_update, Effect, Origin, Slot};
+    use ora_core::store::to_json;
+
+    let fake = Fake::new(vec![api_message("mail-1", "Welcome", "Hello")]);
+    let mut ext = start();
+    ext.call(
+        "connect",
+        params(json!({"target": fake.target(), "read_only": true})),
+        WAIT,
+    )
+    .unwrap();
+    let reply = ext
+        .call("ui.open", params(json!({"slot": "explorer"})), WAIT)
+        .unwrap();
+    let update = decode_update(&to_json(&reply), Origin::Open).unwrap();
+    assert_eq!(update.slots.len(), 3);
+    assert_eq!(update.poll_ms, Some(5000));
+
+    let reply = ext
+        .call(
+            "ui.event",
+            params(json!({
+                "revision": update.revision,
+                "slot": "explorer",
+                "node": "messages",
+                "event": {"type": "select", "item": "mail-1"}
+            })),
+            WAIT,
+        )
+        .unwrap();
+    let update = decode_update(&to_json(&reply), Origin::UserEvent).unwrap();
+    assert!(update
+        .slots
+        .iter()
+        .any(|slot| slot.slot == Slot::Main && slot.tree.is_some()));
+
+    let action = |node: &str, revision| {
+        params(json!({
+            "revision": revision,
+            "slot": "main",
+            "node": node,
+            "event": {"type": "click"}
+        }))
+    };
+    let reply = ext
+        .call("ui.event", action("copy-subject", update.revision), WAIT)
+        .unwrap();
+    let update = decode_update(&to_json(&reply), Origin::UserEvent).unwrap();
+    assert!(matches!(&update.effects[..], [Effect::Copy { text }] if text.as_str() == "Welcome"));
+    assert!(ext
+        .call("ui.event", action("delete-message", update.revision), WAIT)
+        .unwrap_err()
+        .to_string()
+        .contains("read-only"));
+    assert!(ext
+        .call("delete_all", params(json!({})), WAIT)
+        .unwrap_err()
+        .to_string()
+        .contains("read-only"));
+    assert!(fake
+        .requests()
+        .iter()
+        .all(|request| !request.starts_with("DELETE")));
+}
