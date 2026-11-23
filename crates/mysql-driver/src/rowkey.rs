@@ -1,13 +1,35 @@
 //! Row identity for the data tab.
 //!
-//! MySQL has no physical row id, so only a table with a primary key can be
-//! edited: the id of a row is the JSON array of its key values as text
-//! (`["1","a"]`), which stays valid after the row is updated. A table
-//! without one gets no id and its grid is read-only.
+//! MySQL has no physical row id. The id of a row is the JSON array of its
+//! primary key values as text (`["1","a"]`), which stays valid after the
+//! row is updated. A table without a primary key is found by all its
+//! columns that compare exactly (see [`RowKey`]); with none of those it
+//! gets no id and is read-only.
 
 use ora_core::store::{parse_json, Json};
 
 use crate::conv::quote;
+
+/// How the rows of a table are found again.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RowKey {
+    pub columns: Vec<KeyColumn>,
+    /// No primary key: the "key" is every column that compares reliably.
+    /// Identical rows cannot be told apart, so a change touches one of
+    /// them (`LIMIT 1`), and a changed value makes the id stale until the
+    /// next refresh.
+    pub all_columns: bool,
+}
+
+impl RowKey {
+    pub fn limit_one(&self) -> &'static str {
+        if self.all_columns {
+            " LIMIT 1"
+        } else {
+            ""
+        }
+    }
+}
 
 /// One column of a primary key, with the cast that keeps a bound text
 /// value exact against its column (a big integer must not pass through a

@@ -41,7 +41,7 @@ pub struct MysqlClient {
     /// The server is MariaDB (a few catalog columns differ).
     mariadb: bool,
     /// Primary keys read so far, by (schema, table).
-    keys: HashMap<(String, String), Vec<rowkey::KeyColumn>>,
+    keys: HashMap<(String, String), rowkey::RowKey>,
 }
 
 impl MysqlClient {
@@ -56,7 +56,7 @@ impl MysqlClient {
     }
 
     /// The primary key of a table, read once per connection.
-    fn key_of(&mut self, owner: &str, table: &str) -> Result<Vec<rowkey::KeyColumn>, DbError> {
+    fn key_of(&mut self, owner: &str, table: &str) -> Result<rowkey::RowKey, DbError> {
         let id = (owner.to_string(), table.to_string());
         if let Some(key) = self.keys.get(&id) {
             return Ok(key.clone());
@@ -295,7 +295,7 @@ impl DbClient for MysqlClient {
         page: TablePage,
     ) -> Result<Rows, DbError> {
         let expr = if page.rowid {
-            let key = self.key_of(owner, table)?;
+            let key = self.key_of(owner, table)?.columns;
             if key.is_empty() {
                 "NULL".to_string()
             } else {
@@ -324,10 +324,8 @@ impl DbClient for MysqlClient {
         budget: usize,
     ) -> Result<Value, DbError> {
         let key = self.key_of(owner, table)?;
-        let Some((cond, binds)) = rowkey::matches(rowid, &key) else {
-            return Err(DbError::new(
-                "This table has no primary key to find the row by",
-            ));
+        let Some((cond, binds)) = rowkey::matches(rowid, &key.columns) else {
+            return Err(DbError::new("This table has no key to find the row by"));
         };
         let d = self.dialect();
         let sql = format!(
@@ -367,19 +365,18 @@ impl DbClient for MysqlClient {
         value: Option<&str>,
     ) -> Result<(), DbError> {
         let key = self.key_of(owner, table)?;
-        let Some((cond, mut binds)) = rowkey::matches(rowid, &key) else {
-            return Err(DbError::new(
-                "This table has no primary key to find the row by",
-            ));
+        let Some((cond, mut binds)) = rowkey::matches(rowid, &key.columns) else {
+            return Err(DbError::new("This table has no key to find the row by"));
         };
+        let one = key.limit_one();
         let d = self.dialect();
         let (target, column) = (d.table_ref(owner, table), d.quote_ident(column));
         let sql = match value {
             Some(v) => {
                 binds.insert(0, v.to_string());
-                format!("UPDATE {target} SET {column} = ? WHERE {cond}")
+                format!("UPDATE {target} SET {column} = ? WHERE {cond}{one}")
             }
-            None => format!("UPDATE {target} SET {column} = NULL WHERE {cond}"),
+            None => format!("UPDATE {target} SET {column} = NULL WHERE {cond}{one}"),
         };
         match self.write(&sql, &binds)? {
             1 => Ok(()),
@@ -392,13 +389,15 @@ impl DbClient for MysqlClient {
 
     fn delete_grid_row(&mut self, owner: &str, table: &str, rowid: &str) -> Result<(), DbError> {
         let key = self.key_of(owner, table)?;
-        let Some((cond, binds)) = rowkey::matches(rowid, &key) else {
-            return Err(DbError::new(
-                "This table has no primary key to find the row by",
-            ));
+        let Some((cond, binds)) = rowkey::matches(rowid, &key.columns) else {
+            return Err(DbError::new("This table has no key to find the row by"));
         };
         let d = self.dialect();
-        let sql = format!("DELETE FROM {} WHERE {cond}", d.table_ref(owner, table));
+        let sql = format!(
+            "DELETE FROM {} WHERE {cond}{}",
+            d.table_ref(owner, table),
+            key.limit_one()
+        );
         match self.write(&sql, &binds)? {
             1 => Ok(()),
             n => Err(DbError::new(format!(

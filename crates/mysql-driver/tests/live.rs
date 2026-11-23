@@ -76,7 +76,8 @@ fn session_catalog_query_edit_and_transactions() {
     assert!(db.dialect().is_auto_generated(&cols[0]));
     assert_eq!(cols[1].data_type, "varchar(20)");
     assert_eq!(cols[2].data_type, "decimal(10,2)");
-    assert_eq!(cols[7].default.as_deref(), Some("'1'"));
+    // MariaDB writes a numeric default bare, MySQL as a string.
+    assert!(matches!(cols[7].default.as_deref(), Some("'1'" | "1")));
     let idx = db.list_indexes("kt_test", "emp").unwrap();
     assert_eq!(idx[0].name, "PRIMARY");
     assert!(idx
@@ -218,11 +219,15 @@ fn session_catalog_query_edit_and_transactions() {
         .unwrap();
     assert_eq!(text(&r.rows[0][0]), "1234.50", "rollback undid the edit");
 
-    // A table without a key shows no ids and cannot be edited by id.
-    db.execute("CREATE TABLE kt_test.loose (a TEXT, b TEXT)")
+    // A table without a key is found by all its comparable columns:
+    // identical rows are told apart by nothing, so one of them changes.
+    db.execute("CREATE TABLE kt_test.loose (a TEXT, b VARCHAR(10), n INT, d DATE, f DOUBLE)")
         .unwrap();
-    db.execute("INSERT INTO kt_test.loose VALUES ('x', 'y')")
-        .unwrap();
+    db.execute(
+        "INSERT INTO kt_test.loose VALUES ('x', 'y', NULL, '2024-02-01', 1.5), \
+         ('x', 'y', NULL, '2024-02-01', 1.5), ('p', NULL, 3, NULL, 2.5)",
+    )
+    .unwrap();
     db.commit().unwrap();
     let page = db
         .query_table(
@@ -232,10 +237,24 @@ fn session_catalog_query_edit_and_transactions() {
             TablePage::new(0, 10).with_rowid(true),
         )
         .unwrap();
-    assert_eq!(page.rows[0][0], Value::Null);
+    let id0 = text(&page.rows[0][0]);
+    assert!(id0.contains("null"), "{id0}");
+    db.update_cell("kt_test", "loose", "a", &id0, Some("z"))
+        .unwrap();
+    let r = db
+        .query(
+            "SELECT count(*) FROM kt_test.loose WHERE a = 'z'",
+            FetchLimits::rows(5),
+        )
+        .unwrap();
+    assert_eq!(r.rows[0][0], Value::Integer(1), "one of two equal rows");
+    // Its old id no longer finds anything (the row was changed).
+    let id2 = text(&page.rows[2][0]);
+    db.delete_grid_row("kt_test", "loose", &id2).unwrap();
     assert!(db
-        .update_cell("kt_test", "loose", "b", "x", Some("z"))
+        .update_cell("kt_test", "loose", "b", &id2, Some("q"))
         .is_err());
+    db.rollback().unwrap();
 
     // Keys that a floating-point comparison would confuse, and a text key
     // with a quote in it.
