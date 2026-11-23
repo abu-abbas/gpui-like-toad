@@ -137,6 +137,7 @@ impl Workbench {
         self.settings.previous_focus = window.focused(cx);
         self.settings.open = true;
         self.settings.log_tab = logs::LogTab::Errors;
+        self.settings.ext_online.refresh_installed();
         self.reload_settings_log();
         Self::set_input(&self.settings.search, String::new(), window, cx);
         self.settings
