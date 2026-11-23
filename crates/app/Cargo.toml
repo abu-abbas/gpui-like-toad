@@ -9,7 +9,6 @@ rust-version.workspace = true
 [dependencies]
 ora-core = { path = "../ora-core" }
 ora-driver = { path = "../ora-driver" }
-sqlite-driver = { path = "../sqlite-driver" }
 # Developer Tools backends (Redis, MailHog).
 devtools = { path = "../devtools" }
 # `syntect` enables SQL syntax highlighting in the editor with a small
@@ -58,6 +57,8 @@ winresource = "0.1"
 [dev-dependencies]
 # Parses the bundled theme files in a unit test with gpui-kit's own schema.
 serde_json = "1"
+# The worker tests use the SQLite driver directly; the app itself only loads it as an extension.
+sqlite-driver = { path = "../sqlite-driver" }
 # Headless GPUI windows for Workbench tests (`#[gpui_kit::test]`).
 gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
 

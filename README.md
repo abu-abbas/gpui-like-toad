@@ -143,7 +143,7 @@ crates/
                   edits, CSV/XLSX export, CSV import, profiles, update logic,
                   demo backend.
   ora-driver/     DbClient for Oracle on rust-oracledb (thin mode).
-  sqlite-driver/  DbClient for SQLite on rusqlite (bundled SQLite).
+  sqlite-driver/  DbClient for SQLite on rusqlite; shipped as the downloadable SQLite extension (crates/ext-sqlite), not linked into the app.
   app/            gpui-kit GUI: workbench, explorer, grid, editor, settings,
                   updater, one worker thread per connection.
 vendor/oracledb/  rust-oracledb pinned at b1adfff with the 10G verifier patch.
