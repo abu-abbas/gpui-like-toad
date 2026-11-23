@@ -1,6 +1,6 @@
 # Extension UI (design, not built yet)
 
-Status: proposal for review. Nothing in this document exists in the code.
+Status: decided in review (2026-11-23), not built yet. Nothing in this document exists in the code.
 
 ## Why
 Today SQLite is an extension (a separate program, `docs/extension-protocol.md`)
@@ -29,7 +29,7 @@ stdin and stdout, signed download, `hello` handshake, kill on violation.
 ## Slots
 | slot | where | filled by the extension |
 |---|---|---|
-| `sidebar` | one entry under Connections (icon, name, status dot, context menu) | `ui.open slot=sidebar` |
+| `sidebar` | one entry (icon, name, status dot, context menu): under Connections for a `database` extension, under "Developer Tools" for a `tool` (that heading shows only while a tool is installed) | `ui.open slot=sidebar` |
 | `explorer` | column 2 while the entry is active | `ui.open slot=explorer` |
 | `main` | column 3 | `ui.open slot=main` |
 | `form` | the "new / edit connection" dialog | the manifest (static, see below) |
@@ -52,6 +52,13 @@ Structure: `tabs` (`items`, `active`, one child per tab), `list`, `table`,
 page of rows, each with `id`, `title`, `subtitle`, `trailing`, `icon`,
 `selected`, and a `more` flag. When the user scrolls to the end Kilat sends
 the event `more`. A tree is therefore never large.
+
+Icons: `icon` and every `icon` field name an icon of Kilat's built-in
+interface set (search, trash, refresh, arrows, mail, key, ...). The extension's
+own identity icon (the MailHog or Redis logo) is not in Kilat: it is a small
+SVG (at most about 16 KB) in the extension's manifest entry in the signed
+index, which Kilat checks for size and shape before drawing. A new extension
+therefore never needs a new Kilat release for its logo.
 
 Colors are tokens (`primary`, `danger`, `muted`, ...), never raw values, so
 themes keep working. There is no custom drawing and no HTML. `html` mail is
@@ -76,7 +83,7 @@ a time, as it is today.
 `extensions/<id>/extension.json` gets a `contributes` block:
 
     "contributes": {
-      "sidebar": {"title": "MailHog", "icon": "mail"},
+      "sidebar": {"title": "MailHog"},
       "form": {"fields": [
         {"key": "host", "label": "Host", "type": "text", "default": "localhost"},
         {"key": "port", "label": "Port", "type": "number", "default": 8025},
@@ -141,14 +148,22 @@ downloads.
    Inbox stays until the pilot is stable, then is removed like SQLite.
 5. Redis the same way, then the Developer Tools code leaves the app.
 
-## Open questions
-1. **Local server start** (the "Start MailHog / redis-server from Kilat" feature
-   with logs and cleanup after a crash). Option A: the extension does it
-   itself, because it is already a process; it starts the server, and stops it
-   on `shutdown`. Option B: Kilat offers a generic "managed process" service.
-   A is smaller and keeps the app free of tool code; B shares one
-   implementation. Recommendation: A.
-2. **Icons**: a fixed set inside Kilat for version 1 (a MailHog and Redis
-   glyph are added to it). An extension-supplied SVG can come later.
-3. **Where does an instance live in the sidebar**: under the existing
-   "Developer Tools" heading, or in Connections beside databases?
+## Decisions (John, 2026-11-23)
+1. **Local server start**: the extension does it itself (option A). It
+   starts the server on `connect` when the instance asks for it, stops it on
+   `shutdown` and when stdin closes, and reuses a server that already listens
+   on the port. The code stays in `devtools::server` and is linked into both
+   extension programs; logs go to `server-logs/<id>/` (Settings > Logs reads
+   that folder by convention) and `running.pids` cleans up leftovers at the
+   next start. If the extension is killed, its server may outlive it until
+   then; a new `connect` reuses it.
+2. **Icons**: built-in interface set plus an SVG identity icon in the signed
+   index entry (see Components).
+3. **Sidebar**: by kind, `database` under Connections, `tool` under
+   Developer Tools.
+
+## When an extension crashes
+Kilat is a separate process and is not affected. The closed pipe or the
+timeout shows "Connection lost" with a Reconnect button, with the tail of
+stderr in the message and in `errors.log`. There is no automatic restart:
+only Reconnect starts a new process.
