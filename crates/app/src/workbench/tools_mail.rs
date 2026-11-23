@@ -662,23 +662,7 @@ impl Workbench {
             |tab: MailTab, label: &'static str, enabled: bool, cx: &mut Context<Self>| {
                 let selected = view.tab == tab;
                 let id = id.clone();
-                Button::new(label)
-                    .small()
-                    .ghost()
-                    .h(px(SUB_TAB_HEIGHT))
-                    .rounded_none()
-                    .border_b_2()
-                    .border_color(if selected {
-                        theme.primary
-                    } else {
-                        theme.transparent
-                    })
-                    .text_color(if selected {
-                        theme.foreground
-                    } else {
-                        theme.muted_foreground
-                    })
-                    .label(label)
+                mail_tab_button(label, label.into(), selected, theme)
                     .disabled(!enabled)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(v) = this.tools.mail.get_mut(&id) {
@@ -798,19 +782,6 @@ impl Workbench {
                         this.mail_delete(&id_delete, Some(message_id.clone()), cx)
                     })),
             );
-        let meta_row = |label: &str, value: String| {
-            div()
-                .flex()
-                .gap(px(SPACE_2))
-                .child(
-                    div()
-                        .w(px(44.))
-                        .flex_none()
-                        .text_color(theme.muted_foreground)
-                        .child(label.to_string()),
-                )
-                .child(div().flex_1().min_w(px(0.)).child(value))
-        };
         let mut header = div()
             .flex()
             .flex_col()
@@ -833,12 +804,12 @@ impl Workbench {
                         message.subject.clone()
                     }),
             )
-            .child(meta_row("From", message.from.clone()))
-            .child(meta_row("To", message.to.join(", ")));
+            .child(mail_meta_row("From", message.from.clone(), theme))
+            .child(mail_meta_row("To", message.to.join(", "), theme));
         if !message.cc.is_empty() {
-            header = header.child(meta_row("Cc", message.cc.join(", ")));
+            header = header.child(mail_meta_row("Cc", message.cc.join(", "), theme));
         }
-        header = header.child(meta_row("Date", full_time(&message.created)));
+        header = header.child(mail_meta_row("Date", full_time(&message.created), theme));
         if !message.attachments.is_empty() {
             let mut chips = div().flex().flex_wrap().gap(px(SPACE_2)).pt(px(SPACE_1));
             for a in &message.attachments {
@@ -859,19 +830,8 @@ impl Workbench {
             }
             header = header.child(chips);
         }
-        let mono = theme.mono_font_family.clone();
-        let body_text_div = |text: String, mono_font: bool| {
-            div()
-                .p(px(SPACE_3))
-                .rounded(px(RADIUS_MD))
-                .border_1()
-                .border_color(theme.border)
-                .text_size(crate::theme::ui_size(theme, FONT_LABEL))
-                .line_height(crate::theme::ui_size(theme, LEADING_BODY))
-                .whitespace_normal()
-                .when(mono_font, |d| d.font_family(mono.clone()))
-                .child(clip(&text, BODY_SHOWN))
-        };
+        let body_text_div =
+            |text: String, mono: bool| mail_body_text(clip(&text, BODY_SHOWN), mono, theme);
         let mut body = div().flex().flex_col().gap(px(SPACE_3));
         match tab {
             MailTab::Text => {
@@ -991,6 +951,68 @@ impl Workbench {
             )
             .into_any_element()
     }
+}
+
+pub(super) fn mail_tab_button(
+    id: impl Into<gpui_kit::ElementId>,
+    label: gpui_kit::SharedString,
+    selected: bool,
+    theme: &gpui_kit::component::Theme,
+) -> Button {
+    Button::new(id)
+        .small()
+        .ghost()
+        .h(px(SUB_TAB_HEIGHT))
+        .rounded_none()
+        .border_b_2()
+        .border_color(if selected {
+            theme.primary
+        } else {
+            theme.transparent
+        })
+        .text_color(if selected {
+            theme.foreground
+        } else {
+            theme.muted_foreground
+        })
+        .label(label)
+}
+
+pub(super) fn mail_meta_row(
+    label: &str,
+    value: String,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
+    div()
+        .flex()
+        .gap(px(SPACE_2))
+        .child(
+            div()
+                .w(px(44.))
+                .flex_none()
+                .text_color(theme.muted_foreground)
+                .child(label.to_owned()),
+        )
+        .child(div().flex_1().min_w(px(0.)).child(value))
+}
+
+pub(super) fn mail_body_text(
+    text: String,
+    mono: bool,
+    theme: &gpui_kit::component::Theme,
+) -> gpui_kit::Div {
+    div()
+        .p(px(SPACE_3))
+        .rounded(px(RADIUS_MD))
+        .border_1()
+        .border_color(theme.border)
+        .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+        .line_height(crate::theme::ui_size(theme, LEADING_BODY))
+        .whitespace_normal()
+        .when(mono, |view| {
+            view.font_family(theme.mono_font_family.clone())
+        })
+        .child(text)
 }
 
 fn render_mail_row(
