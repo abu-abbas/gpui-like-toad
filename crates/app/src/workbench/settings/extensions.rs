@@ -3,9 +3,10 @@
 //! A database that also exists as a downloadable extension (SQLite) is
 //! downloaded when installed: Install asks GitHub for the signed index,
 //! downloads and verifies the program, then switches the extension on, so
-//! there is no separate "check" step. If the download fails the bundled
-//! driver is switched on instead and the page says so. Saved connections,
-//! tools and passwords are never deleted.
+//! there is no separate "check" step. If the download fails nothing is
+//! switched on and the page says so. Such an extension counts as installed
+//! only while its program is on disk. Saved connections, tools and
+//! passwords are never deleted.
 
 use super::appearance::setting_group;
 use super::setting_row_owned;
@@ -136,7 +137,7 @@ impl Workbench {
 
     /// Install or update one extension. Downloadable ones are fetched from
     /// GitHub (index, program, signatures) in the background; if that
-    /// fails the bundled driver is switched on and the page says so.
+    /// fails nothing is switched on and the page says so.
     fn install_extension_flow(&mut self, id: &'static str, cx: &mut Context<Self>) {
         if self.settings.ext_online.working() {
             return;
@@ -166,6 +167,7 @@ impl Workbench {
             let _ = view.update(cx, |this, cx| {
                 let online = &mut this.settings.ext_online;
                 online.busy = None;
+                let ok = result.is_ok();
                 online.note = Some(match result {
                     Ok((index, installed)) => {
                         online.index = Some(index);
@@ -174,15 +176,14 @@ impl Workbench {
                             format!("{name} {} downloaded and verified.", installed.version),
                         )
                     }
-                    Err(err) => (
-                        true,
-                        format!(
-                            "Could not download {name}: {err} The built-in driver is used instead."
-                        ),
-                    ),
+                    Err(err) => (true, format!("Could not download {name}: {err}")),
                 });
                 online.refresh_installed();
-                this.set_extension_installed(id, true, cx);
+                if ok {
+                    this.set_extension_installed(id, true, cx);
+                } else {
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -211,6 +212,13 @@ impl Workbench {
         online.note = None;
         online.refresh_installed();
         self.set_extension_installed(id, false, cx);
+    }
+
+    /// Installed as far as this page is concerned: switched on and, for an
+    /// extension that is downloaded, its program is on disk.
+    fn extension_ready(&self, id: &str) -> bool {
+        self.extensions.is_installed(id)
+            && (!has_online_version(id) || self.settings.ext_online.installed.contains_key(id))
     }
 
     fn set_extension_installed(&mut self, id: &'static str, install: bool, cx: &mut Context<Self>) {
@@ -252,9 +260,9 @@ impl Workbench {
         let rows: Vec<_> = store::REGISTRY
             .iter()
             .enumerate()
-            .filter(|(_, info)| filter.matches(info, self.extensions.is_installed(info.id)))
+            .filter(|(_, info)| filter.matches(info, self.extension_ready(info.id)))
             .map(|(ix, info)| {
-                let installed = self.extensions.is_installed(info.id);
+                let installed = self.extension_ready(info.id);
                 let id = info.id;
                 let downloaded = online.installed.get(id);
                 let update = online.update_for(id).map(|u| u.version.to_string());
@@ -302,7 +310,6 @@ impl Workbench {
                         format!(" · Downloaded v{} · v{u} available", r.version)
                     }
                     (true, Some(r), None) => format!(" · Downloaded v{}", r.version),
-                    (true, None, _) if has_online_version(id) => " · Built-in driver".to_string(),
                     _ => String::new(),
                 };
                 setting_row_owned(
