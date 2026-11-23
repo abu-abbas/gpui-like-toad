@@ -75,7 +75,7 @@ The explorer works like Toad (pick a schema, then browse objects by type), the c
 
 ## Install
 
-Download the latest file for your system from [Releases](https://github.com/abu-abbas/gpui-like-toad/releases). Each release carries `SHA256SUMS` and a `.minisig` signature per file; see [docs/release-signing.md](docs/release-signing.md) to check them by hand.
+Download the latest file for your system from [Releases](https://github.com/abu-abbas/kilat/releases). Each release carries `SHA256SUMS` and a `.minisig` signature per file; see [docs/release-signing.md](docs/release-signing.md) to check them by hand.
 
 ### Windows (x86_64)
 
@@ -99,15 +99,15 @@ The installer adds a launcher entry and icons, so Kilat appears in the app menu.
 
 ### Where Kilat keeps its files
 
-Connections, settings, `errors.log` and `crash.log` live in a folder named `gpui-like-toad` (the project's original name, kept so existing setups keep working):
+Connections, settings, `errors.log` and `crash.log` live in a folder named `Kilat`. Installs from before the rename have their `gpui-like-toad` folder moved over automatically on first start (nothing is deleted if the move fails):
 
 | OS | Folder |
 |---|---|
-| macOS | `~/Library/Application Support/gpui-like-toad` |
-| Windows | `%APPDATA%\gpui-like-toad` |
-| Linux | `$XDG_CONFIG_HOME/gpui-like-toad`, usually `~/.config/gpui-like-toad` |
+| macOS | `~/Library/Application Support/Kilat` |
+| Windows | `%APPDATA%\Kilat` |
+| Linux | `$XDG_CONFIG_HOME/Kilat`, usually `~/.config/Kilat` |
 
-The binary, the macOS bundle identifier and the keychain service are also still called `gpui-like-toad`.
+The binary, the macOS bundle identifier and the keychain service are still called `gpui-like-toad`.
 
 ## Build from source
 

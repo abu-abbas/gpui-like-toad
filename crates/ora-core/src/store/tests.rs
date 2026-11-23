@@ -338,7 +338,8 @@ fn theme_names_round_trip_keep_other_keys() {
 #[test]
 fn config_dir_is_app_specific() {
     let dir = config_dir();
-    assert!(dir.ends_with("gpui-like-toad"));
+    assert!(dir.ends_with("Kilat"));
+    assert!(legacy_config_dir().ends_with("gpui-like-toad"));
     assert!(dir.is_absolute() || dir.starts_with("."));
 }
 
@@ -496,4 +497,76 @@ fn history_option_roundtrips_and_defaults_to_recording() {
     assert!(load_profiles_in(&dir)
         .iter()
         .all(|p| !p.access.skip_history));
+}
+
+#[test]
+fn migrate_renames_old_dir_with_all_data() {
+    let root = scratch("migrate-rename");
+    let (old, new) = (root.join("gpui-like-toad"), root.join("Kilat"));
+    fs::create_dir_all(old.join("server-logs/developer-tools")).unwrap();
+    fs::write(old.join("connections.json"), "c").unwrap();
+    fs::write(old.join("timing-on"), "").unwrap();
+    fs::write(
+        old.join("server-logs/developer-tools/running.pids"),
+        "1 redis\n",
+    )
+    .unwrap();
+    assert_eq!(migrate_dir(&old, &new), Migration::Renamed);
+    assert!(!old.exists());
+    assert_eq!(
+        fs::read_to_string(new.join("connections.json")).unwrap(),
+        "c"
+    );
+    assert!(new.join("timing-on").exists());
+    assert!(new
+        .join("server-logs/developer-tools/running.pids")
+        .exists());
+    // second run does nothing
+    assert_eq!(migrate_dir(&old, &new), Migration::NotNeeded);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn migrate_never_touches_existing_new_dir() {
+    let root = scratch("migrate-keep");
+    let (old, new) = (root.join("gpui-like-toad"), root.join("Kilat"));
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&new).unwrap();
+    fs::write(old.join("settings.json"), "old").unwrap();
+    fs::write(new.join("settings.json"), "new").unwrap();
+    assert_eq!(migrate_dir(&old, &new), Migration::NotNeeded);
+    assert_eq!(
+        fs::read_to_string(new.join("settings.json")).unwrap(),
+        "new"
+    );
+    assert_eq!(
+        fs::read_to_string(old.join("settings.json")).unwrap(),
+        "old"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn migrate_without_old_dir_is_noop() {
+    let root = scratch("migrate-none");
+    let new = root.join("Kilat");
+    assert_eq!(
+        migrate_dir(&root.join("gpui-like-toad"), &new),
+        Migration::NotNeeded
+    );
+    assert!(!new.exists());
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn migrate_copy_fallback_keeps_old_and_nests() {
+    let root = scratch("migrate-copy");
+    let old = root.join("gpui-like-toad");
+    fs::create_dir_all(old.join("a/b")).unwrap();
+    fs::write(old.join("a/b/f.txt"), "x").unwrap();
+    let tmp = root.join("Kilat.migrating");
+    migrate::copy_tree(&old, &tmp).unwrap();
+    assert_eq!(fs::read_to_string(tmp.join("a/b/f.txt")).unwrap(), "x");
+    assert!(old.join("a/b/f.txt").exists());
+    let _ = fs::remove_dir_all(&root);
 }

@@ -5,9 +5,27 @@
 
 use crate::store::{parse_json, Json};
 
+/// GitHub `owner/name` of the repository releases are published from.
+/// The single place the repo name lives in code. The repo used to be
+/// `abu-abbas/gpui-like-toad`; GitHub redirects the old name.
+pub const REPO_SLUG: &str = "abu-abbas/kilat";
+
+/// Former slug, still accepted for download URLs of releases listed before
+/// the rename.
+const LEGACY_REPO_SLUG: &str = "abu-abbas/gpui-like-toad";
+
 /// Public endpoint of the latest (non-draft, non-prerelease) release.
-pub const LATEST_RELEASE_API: &str =
-    "https://api.github.com/repos/abu-abbas/gpui-like-toad/releases/latest";
+pub const LATEST_RELEASE_API: &str = "https://api.github.com/repos/abu-abbas/kilat/releases/latest";
+
+/// `https://api.github.com/repos/<slug>/releases/tags/<tag>`
+pub fn release_by_tag_api(tag: &str) -> String {
+    format!("https://api.github.com/repos/{REPO_SLUG}/releases/tags/{tag}")
+}
+
+/// `https://github.com/<slug>/releases/tag/<tag>`
+pub fn release_page_url(tag: &str) -> String {
+    format!("https://github.com/{REPO_SLUG}/releases/tag/{tag}")
+}
 
 /// Minimum time between automatic checks at startup.
 pub const AUTO_CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
@@ -40,7 +58,14 @@ impl std::fmt::Display for Version {
 }
 
 /// Only assets under this prefix are ever downloaded.
-pub const DOWNLOAD_PREFIX: &str = "https://github.com/abu-abbas/gpui-like-toad/releases/download/";
+pub const DOWNLOAD_PREFIX: &str = "https://github.com/abu-abbas/kilat/releases/download/";
+
+fn is_download_url(url: &str) -> bool {
+    url.starts_with(DOWNLOAD_PREFIX)
+        || url.starts_with(&format!(
+            "https://github.com/{LEGACY_REPO_SLUG}/releases/download/"
+        ))
+}
 
 /// One downloadable file of a release.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,7 +154,7 @@ pub fn parse_release(body: &str) -> Option<ReleaseInfo> {
                 && name
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
-            (safe && url.starts_with(DOWNLOAD_PREFIX)).then(|| Asset {
+            (safe && is_download_url(&url)).then(|| Asset {
                 name,
                 url,
                 size: a.get("size").and_then(Json::as_u64).unwrap_or(0),
@@ -159,10 +184,28 @@ pub fn should_auto_check(auto_check: bool, last_checked: u64, now: u64) -> bool 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repo_urls_use_one_slug() {
+        assert!(LATEST_RELEASE_API.contains(REPO_SLUG));
+        assert!(DOWNLOAD_PREFIX.contains(REPO_SLUG));
+        assert!(release_by_tag_api("v1.0.0").contains(REPO_SLUG));
+        assert!(release_page_url("v1.0.0").contains(REPO_SLUG));
+    }
+
+    #[test]
+    fn legacy_download_urls_still_accepted() {
+        assert!(is_download_url(
+            "https://github.com/abu-abbas/gpui-like-toad/releases/download/v1/x.dmg"
+        ));
+        assert!(!is_download_url(
+            "https://github.com/evil/kilat/releases/download/v1/x"
+        ));
+    }
+
     use super::*;
 
     const BODY: &str = r#"{"tag_name":"v0.1.10","name":"Ora The Explorer 0.1.10",
-        "html_url":"https://github.com/abu-abbas/gpui-like-toad/releases/tag/v0.1.10",
+        "html_url":"https://github.com/abu-abbas/kilat/releases/tag/v0.1.10",
         "draft":false,"prerelease":false,"body":"- fix a\n- fix b"}"#;
 
     #[test]
@@ -196,7 +239,7 @@ mod tests {
     fn picks_asset_per_os_and_rejects_foreign_hosts() {
         let base = DOWNLOAD_PREFIX;
         let body = format!(
-            r#"{{"tag_name":"v0.2.0","html_url":"https://github.com/abu-abbas/gpui-like-toad/releases/tag/v0.2.0",
+            r#"{{"tag_name":"v0.2.0","html_url":"https://github.com/abu-abbas/kilat/releases/tag/v0.2.0",
             "assets":[
              {{"name":"Ora-The-Explorer-0.2.0-macos-arm64.dmg","browser_download_url":"{base}v0.2.0/a.dmg","size":5}},
              {{"name":"Ora-The-Explorer-0.2.0-windows-x86_64.exe","browser_download_url":"{base}v0.2.0/w.exe","size":6}},

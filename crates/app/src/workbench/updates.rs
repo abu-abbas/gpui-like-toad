@@ -220,9 +220,7 @@ impl Workbench {
         self.open_whats_new();
 
         let task = cx.background_executor().spawn(async move {
-            let url = format!(
-                "https://api.github.com/repos/abu-abbas/gpui-like-toad/releases/tags/v{current}"
-            );
+            let url = ora_core::update::release_by_tag_api(&format!("v{current}"));
             let release = fetch_release(&url)?;
             if release.version == current {
                 Ok(release)
@@ -791,8 +789,7 @@ impl Workbench {
             .p(px(SPACE_6));
         if self.updates.installed_notes_selected {
             let current = env!("CARGO_PKG_VERSION");
-            let url =
-                format!("https://github.com/abu-abbas/gpui-like-toad/releases/tag/v{current}");
+            let url = ora_core::update::release_page_url(&format!("v{current}"));
             return page
                 .child(
                     div()

@@ -8,9 +8,10 @@
 
 /// Display name shown to people: window title, macOS app menu, Home and
 /// About. A macro (not a const) so it can be used inside `concat!`.
-/// Crate/binary name, config directory, bundle identifier and keychain
-/// service intentionally stay `gpui-like-toad` so existing profiles and
-/// saved passwords keep working.
+/// Crate/binary name, bundle identifier and keychain service intentionally
+/// stay `gpui-like-toad` so saved passwords and OTA updates keep working.
+/// The config directory is `Kilat`; the old `gpui-like-toad` one is moved
+/// over once at startup.
 macro_rules! app_name {
     () => {
         "Kilat"
@@ -76,7 +77,12 @@ fn main() {
     if macos_bundle::relaunch_from_renamed_bundle() {
         return;
     }
+    // Before anything reads or writes the config folder.
+    let migration_error = ora_core::store::migrate_legacy_config_dir();
     crash_log::install();
+    if let Some(message) = migration_error {
+        error_log::append(&format!("config folder migration failed: {message}"));
+    }
     let app = application()
         // AllAssets, NOT Assets: the default bundle embeds only the 106
         // icons in default-icons.txt, so every other Lucide icon used by
