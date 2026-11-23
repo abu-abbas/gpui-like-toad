@@ -17,6 +17,7 @@ pub mod demo;
 pub mod dialect;
 pub mod edit;
 pub mod export;
+pub mod extension_index;
 pub mod fetch;
 pub mod filter;
 pub mod import;

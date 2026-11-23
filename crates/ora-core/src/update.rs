@@ -121,6 +121,44 @@ pub struct ReleaseInfo {
     pub assets: Vec<Asset>,
 }
 
+/// The safe assets of a release JSON: a plain file name and a download URL
+/// on this repo's releases. Anything else is dropped.
+fn release_assets(json: &Json) -> Vec<Asset> {
+    json.get("assets")
+        .and_then(Json::as_arr)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|a| {
+            let name = a.get("name")?.as_str()?.to_string();
+            let url = a.get("browser_download_url")?.as_str()?.to_string();
+            let safe = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+            (safe && is_download_url(&url)).then(|| Asset {
+                name,
+                url,
+                size: a.get("size").and_then(Json::as_u64).unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+/// The assets of a release whose tag is not a plain `vX.Y.Z` (extension
+/// releases are tagged `ext-<id>-<version>`). The caller checks the tag.
+/// `None` for a draft, a prerelease or unreadable JSON.
+pub fn parse_tagged_assets(body: &str, expected_tag: &str) -> Option<Vec<Asset>> {
+    let json = parse_json(body).ok()?;
+    let flag = |k: &str| json.get(k).and_then(Json::as_bool).unwrap_or(false);
+    if flag("draft") || flag("prerelease") {
+        return None;
+    }
+    if json.get("tag_name")?.as_str()? != expected_tag {
+        return None;
+    }
+    Some(release_assets(&json))
+}
+
 /// Parse the GitHub "latest release" JSON. `None` if it lacks a usable tag
 /// or page URL. Drafts and prereleases are skipped.
 pub fn parse_release(body: &str) -> Option<ReleaseInfo> {
@@ -140,27 +178,7 @@ pub fn parse_release(body: &str) -> Option<ReleaseInfo> {
             .unwrap_or_default()
             .to_string()
     };
-    // Keep only assets with a safe file name hosted on this repo's
-    // release downloads.
-    let assets = json
-        .get("assets")
-        .and_then(Json::as_arr)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|a| {
-            let name = a.get("name")?.as_str()?.to_string();
-            let url = a.get("browser_download_url")?.as_str()?.to_string();
-            let safe = !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
-            (safe && is_download_url(&url)).then(|| Asset {
-                name,
-                url,
-                size: a.get("size").and_then(Json::as_u64).unwrap_or(0),
-            })
-        })
-        .collect();
+    let assets = release_assets(&json);
     Some(ReleaseInfo {
         assets,
         version: Version::parse(&tag)?,

@@ -130,6 +130,22 @@ impl ReleaseProof {
     }
 }
 
+/// Check the signed extension index. The trusted comment must say
+/// `version:<revision>` with the revision inside the file, so an older
+/// signed index cannot pass as a newer one, and a signed file that is not
+/// an index (a checksum list, say) is not accepted.
+pub fn verify_index(
+    text: &str,
+    signature: &str,
+    public_key: &str,
+) -> Result<ora_core::extension_index::ExtensionIndex, String> {
+    let comment = verify::verify_minisign_bytes(text.as_bytes(), &[public_key], signature)
+        .map_err(|e| format!("The extension index signature is not valid: {e}"))?;
+    let index = ora_core::extension_index::ExtensionIndex::parse(text)?;
+    check_signed_version(&comment, &index.revision.to_string(), "extension index")?;
+    Ok(index)
+}
+
 /// The trusted comment must carry `version:<version>` exactly.
 fn check_signed_version(comment: &str, version: &str, what: &str) -> Result<(), String> {
     match verify::signed_version(comment) {
@@ -288,5 +304,15 @@ mod tests {
         assert!(check_signed_version("version:v0.1.35", "0.1.35", "x").is_ok());
         assert!(check_signed_version("timestamp:1 file:x", "0.1.35", "x").is_err());
         assert!(check_signed_version("version:0.1.3", "0.1.35", "x").is_err());
+    }
+
+    #[test]
+    fn index_needs_a_valid_signature() {
+        let index = r#"{"schema":1,"revision":1,"extensions":[]}"#;
+        assert!(verify_index(index, "not a signature", key()).is_err());
+        // A real signature over other content (the release checksum list)
+        // does not vouch for this text.
+        let sums_sig = "untrusted comment: x\nRWQ=\ntrusted comment: version:1\nAAAA\n";
+        assert!(verify_index(index, sums_sig, key()).is_err());
     }
 }

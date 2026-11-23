@@ -5,6 +5,8 @@
 
 use std::time::Duration;
 
+use ora_core::extension_index::{self, ExtensionIndex, IndexEntry};
+use ora_core::store;
 use ora_core::update::{self, ReleaseInfo};
 
 use crate::release_verify::{self, ReleaseProof};
@@ -168,8 +170,17 @@ fn fetch_text(agent: &ureq::Agent, asset: &update::Asset) -> Result<String, Stri
 /// `asset`. A release without them is refused here, before the file
 /// itself is downloaded.
 fn fetch_proof(info: &ReleaseInfo, asset: &update::Asset) -> Result<ReleaseProof, String> {
+    fetch_proof_from(&info.assets, &info.version.to_string(), asset)
+}
+
+/// Same, for any release's assets and the version its files are signed for.
+fn fetch_proof_from(
+    assets: &[update::Asset],
+    version: &str,
+    asset: &update::Asset,
+) -> Result<ReleaseProof, String> {
     let find = |name: &str| {
-        info.assets.iter().find(|a| a.name == name).ok_or_else(|| {
+        assets.iter().find(|a| a.name == name).ok_or_else(|| {
             format!("this release is not signed ({name} is missing), so it was not downloaded")
         })
     };
@@ -179,7 +190,7 @@ fn fetch_proof(info: &ReleaseInfo, asset: &update::Asset) -> Result<ReleaseProof
     let agent = http_agent()?;
     ReleaseProof::new(
         &asset.name,
-        &info.version.to_string(),
+        version,
         &fetch_text(&agent, sums)?,
         &fetch_text(&agent, sums_sig)?,
         &fetch_text(&agent, asset_sig)?,
@@ -187,16 +198,12 @@ fn fetch_proof(info: &ReleaseInfo, asset: &update::Asset) -> Result<ReleaseProof
     )
 }
 
-/// Blocking: download `asset` into a fresh owner-only temp directory,
-/// verify it, and only then copy it into the Downloads folder. A file that
-/// fails any check is deleted with the temp directory and never reaches
-/// Downloads.
-pub(crate) fn download_asset(
-    info: &ReleaseInfo,
+/// Download `asset` into a fresh owner-only temp directory (the caller
+/// verifies it, then the directory is dropped).
+fn download_to_staging(
     asset: &update::Asset,
-) -> Result<std::path::PathBuf, String> {
+) -> Result<(tempfile::TempDir, std::path::PathBuf), String> {
     use std::io::Write as _;
-    let proof = fetch_proof(info, asset)?;
     if asset.size > MAX_DOWNLOAD_BYTES {
         return Err(format!("{} is larger than the download limit", asset.name));
     }
@@ -223,7 +230,92 @@ pub(crate) fn download_asset(
             ));
         }
     }
+    Ok((staging, temp))
+}
+
+/// Blocking: download `asset` into a fresh owner-only temp directory,
+/// verify it, and only then copy it into the Downloads folder. A file that
+/// fails any check is deleted with the temp directory and never reaches
+/// Downloads.
+pub(crate) fn download_asset(
+    info: &ReleaseInfo,
+    asset: &update::Asset,
+) -> Result<std::path::PathBuf, String> {
+    let proof = fetch_proof(info, asset)?;
+    let (_staging, temp) = download_to_staging(asset)?;
     proof.verify_and_deliver(&temp, &download_dir(), release_verify::release_public_key())
+}
+
+// ---------------------------------------------------------------------------
+// Extensions
+// ---------------------------------------------------------------------------
+
+/// Blocking GET of a release by tag, as JSON text.
+fn fetch_release_by_tag(tag: &str) -> Result<String, String> {
+    let agent = http_agent()?;
+    let mut resp = agent
+        .get(&update::release_by_tag_api(tag))
+        .header("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(net_err)?;
+    resp.body_mut()
+        .with_config()
+        .limit(2 * 1024 * 1024)
+        .read_to_string()
+        .map_err(net_err)
+}
+
+/// Blocking: fetch `extensions.json` and its signature from the index
+/// release and return the index only if the signature checks out.
+pub(crate) fn fetch_extension_index() -> Result<ExtensionIndex, String> {
+    let body = fetch_release_by_tag(extension_index::INDEX_TAG)?;
+    let assets = update::parse_tagged_assets(&body, extension_index::INDEX_TAG)
+        .ok_or_else(|| "The extension index release could not be read.".to_string())?;
+    let find = |name: &str| {
+        assets
+            .iter()
+            .find(|a| a.name == name)
+            .ok_or_else(|| format!("The extension index is not signed ({name} is missing)."))
+    };
+    let file = find(extension_index::INDEX_FILE)?;
+    let sig = find(&release_verify::signature_name(extension_index::INDEX_FILE))?;
+    let agent = http_agent()?;
+    release_verify::verify_index(
+        &fetch_text(&agent, file)?,
+        &fetch_text(&agent, sig)?,
+        release_verify::release_public_key(),
+    )
+}
+
+/// Blocking: download one extension for this machine, verify checksum
+/// and signature (signed for exactly `entry.version`), and put it under
+/// the config folder. Refuses a build for another app version or platform.
+pub(crate) fn install_extension(entry: &IndexEntry) -> Result<store::RemoteInstall, String> {
+    let app = update::Version::parse(env!("CARGO_PKG_VERSION"))
+        .ok_or_else(|| "Unknown app version.".to_string())?;
+    if !entry.compatible_with(app) {
+        return Err(format!(
+            "{} {} does not work with Kilat {app}.",
+            entry.name, entry.version
+        ));
+    }
+    let platform = extension_index::current_platform();
+    let file = entry
+        .file_for(&platform)
+        .ok_or_else(|| format!("{} is not available for {platform}.", entry.name))?;
+    let body = fetch_release_by_tag(&entry.tag)?;
+    let assets = update::parse_tagged_assets(&body, &entry.tag)
+        .ok_or_else(|| format!("The release {} could not be read.", entry.tag))?;
+    let asset = assets
+        .iter()
+        .find(|a| a.name == file)
+        .cloned()
+        .ok_or_else(|| format!("{file} is missing from release {}.", entry.tag))?;
+    let proof = fetch_proof_from(&assets, &entry.version.to_string(), &asset)?;
+    let (_staging, temp) = download_to_staging(&asset)?;
+    proof.verify_file(&temp, release_verify::release_public_key())?;
+    store::finish_remote_install(&entry.id, &entry.version.to_string(), &asset.name, &temp)
+        .map_err(|e| format!("Could not install {}: {e}", entry.name))
 }
 
 /// The release the app already fetched, shaped for gpui-updater-core: the
