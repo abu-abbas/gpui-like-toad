@@ -70,7 +70,9 @@ mod data_tab;
 mod db_events;
 mod db_icon;
 mod explorer;
+mod extension_panel;
 mod grid_clipboard;
+mod mailhog_pilot;
 mod object_ops;
 mod profiles;
 mod query;
@@ -545,6 +547,7 @@ impl Workbench {
         // Servers Kilat started ("Start server from Kilat") follow Kilat:
         // stop them on quit, and stop leftovers of a run that crashed.
         devtools::server::stop_leftovers(&store::config_dir());
+        devtools::server::stop_mailhog_leftovers(&store::config_dir());
         let quit_sub = cx.on_app_quit(|this: &mut Workbench, _| {
             this.stop_all_servers_now();
             async {}

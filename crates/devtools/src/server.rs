@@ -35,6 +35,23 @@ pub fn data_dir(config_dir: &Path, tool_name: &str) -> PathBuf {
         .join(file_name(tool_name))
 }
 
+/// Per-instance PID journals for MailHog extension processes.
+pub fn mailhog_data_dir(config: &Path, id: &str) -> PathBuf {
+    config
+        .join("server-data")
+        .join("mailhog-extension")
+        .join(file_name(id))
+}
+
+pub fn stop_mailhog_leftovers(config: &Path) {
+    let root = config.join("server-data").join("mailhog-extension");
+    for entry in fs::read_dir(root).into_iter().flatten().flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            stop_leftovers(&entry.path());
+        }
+    }
+}
+
 fn file_name(tool_name: &str) -> String {
     let mut name: String = tool_name
         .trim()
@@ -502,6 +519,18 @@ pub fn list_logs(config_dir: &Path) -> Vec<LogFile> {
             Some(LogFile { name, path, size })
         })
         .collect();
+    let tools = config_dir.join("server-logs");
+    for entry in fs::read_dir(tools).into_iter().flatten().flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let path = entry.path().join("mailhog.log");
+        if let Ok(meta) = fs::metadata(&path) {
+            let name = format!("MailHog ({})", entry.file_name().to_string_lossy());
+            let size = meta.len() + fs::metadata(rotated(&path)).map(|m| m.len()).unwrap_or(0);
+            out.push(LogFile { name, path, size });
+        }
+    }
     out.sort_by_key(|l| l.name.to_lowercase());
     out
 }

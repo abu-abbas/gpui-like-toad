@@ -42,13 +42,12 @@ impl ExtFilter {
     }
 }
 
-/// Does a downloadable build of this extension exist for the app to run?
-/// Only database engines the app knows; developer tools would need a UI
-/// protocol that does not exist yet.
+/// Does this build know how to run the downloaded extension?
 fn has_online_version(id: &str) -> bool {
-    ora_core::DbKind::ALL
-        .iter()
-        .any(|k| *k != ora_core::DbKind::Oracle && k.key() == id)
+    id == super::super::mailhog_pilot::ID
+        || ora_core::DbKind::ALL
+            .iter()
+            .any(|k| *k != ora_core::DbKind::Oracle && k.key() == id)
 }
 
 fn extension_matches(info: &store::ExtensionInfo, search: &str) -> bool {
@@ -201,6 +200,14 @@ impl Workbench {
     /// Nothing is switched off when the program cannot be removed.
     fn uninstall_extension_flow(&mut self, id: &'static str, cx: &mut Context<Self>) {
         if self.settings.ext_online.working() {
+            return;
+        }
+        if id == super::super::mailhog_pilot::ID && !self.stop_mailhog_before_uninstall() {
+            self.settings.ext_online.note = Some((
+                true,
+                "Wait for the MailHog request to finish, then retry.".into(),
+            ));
+            cx.notify();
             return;
         }
         if self.settings.ext_online.installed.contains_key(id) {

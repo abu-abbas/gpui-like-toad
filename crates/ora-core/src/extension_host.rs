@@ -16,7 +16,8 @@
 //! wrong id, silence) is killed and the process counts as broken. Its
 //! stderr is only ever logged, never parsed.
 
-use crate::store::{parse_json, to_json, Json};
+use crate::extension_ui::MAX_WIRE_DEPTH;
+use crate::store::{parse_json, parse_json_with_depth, to_json, Json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -228,7 +229,11 @@ impl ExtProcess {
                     return Err(self.closed());
                 }
             };
-            let Ok(message) = parse_json(&line) else {
+            let parsed = match method {
+                "ui.open" | "ui.event" | "ui.tick" => parse_json_with_depth(&line, MAX_WIRE_DEPTH),
+                _ => parse_json(&line),
+            };
+            let Ok(message) = parsed else {
                 return Err(self.fail("a line is not JSON"));
             };
             if message.get("id").and_then(Json::as_u64) != Some(id) {

@@ -20,6 +20,7 @@ rust-embed = { version = "8", features = ["debug-embed"] }
 # gpui-kit does not re-export. Versions follow gpui-kit's own.
 lsp-types = "0.97"
 anyhow = "1"
+serde_json = "1"
 chrono = "0.4"
 regex = "1"
 # Update check: one anonymous GET to the GitHub Releases API (rustls, no
@@ -55,8 +56,6 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["NSD
 winresource = "0.1"
 
 [dev-dependencies]
-# Parses the bundled theme files in a unit test with gpui-kit's own schema.
-serde_json = "1"
 # The worker tests use the SQLite driver directly; the app itself only loads it as an extension.
 sqlite-driver = { path = "../sqlite-driver" }
 # Headless GPUI windows for Workbench tests (`#[gpui_kit::test]`).
