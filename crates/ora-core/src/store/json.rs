@@ -57,9 +57,14 @@ impl Json {
 /// Parse a JSON document. Returns a human-readable error on malformed
 /// input; the store's loaders treat that as "use the default".
 pub fn parse_json(input: &str) -> Result<Json, String> {
+    parse_json_with_depth(input, 64)
+}
+
+pub(crate) fn parse_json_with_depth(input: &str, max_depth: usize) -> Result<Json, String> {
     let mut p = Parser {
         chars: input.chars().collect(),
         pos: 0,
+        max_depth,
     };
     p.skip_ws();
     let value = p.parse_value(0)?;
@@ -73,6 +78,7 @@ pub fn parse_json(input: &str) -> Result<Json, String> {
 struct Parser {
     chars: Vec<char>,
     pos: usize,
+    max_depth: usize,
 }
 
 impl Parser {
@@ -103,7 +109,7 @@ impl Parser {
     }
 
     fn parse_value(&mut self, depth: usize) -> Result<Json, String> {
-        if depth >= 64 {
+        if depth >= self.max_depth {
             return Err("JSON is nested too deeply".into());
         }
         self.skip_ws();
