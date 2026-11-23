@@ -42,7 +42,38 @@ Kilat sends `{"id":0,"method":"shutdown"}` and closes stdin. The extension
 should exit; if it is still running a second later it is killed.
 
 ## Methods
-The database methods mirror the `DbClient` trait in `ora-core`
-(`connect`, `query`, `list_objects`, ...). Their parameters and results are
-specified together with the SQLite pilot; this file only fixes the
-transport and handshake.
+The database methods mirror the `DbClient` trait in `ora-core`. Both sides
+are in `ora-core`: `extension_client.rs` (Kilat) and `extension_serve.rs`
+(the extension); the JSON shapes are in `extension_wire.rs`. `params` is
+always an object. A method an extension cannot do answers with an error.
+
+| method | params | result |
+|---|---|---|
+| `connect` | `profile`, `password` | `{user, database, version}` |
+| `disconnect` | none | `{}` |
+| `query` | `sql`, `binds` (text list), `limits` | rows in chunks, then the result head |
+| `query_table` | `owner`, `table`, `filter`, `page` | like `query` |
+| `execute` | `sql`, `binds` | `{affected}` |
+| `commit`, `rollback` | none | `{}` |
+| `list_schemas` | none | list of names |
+| `list_objects` | `owner` | list of `{owner,name,kind,parent,detail}` |
+| `object_ddl` | `owner`, `name`, `kind`, `show_storage` | text |
+| `describe_table` | `owner`, `name` | list of `{name,type,nullable,default}` |
+| `list_indexes`, `list_constraints`, `trigger_scripts` | `owner`, `table` | lists |
+| `explain_plan`, `explain_plan_nodes` | `sql` | text lines / plan nodes |
+
+Row results: every `chunk` is `{"rows": [row, ...]}` (a row is a list of
+cells, see below), at most about 512 KB each. The closing `result` has the
+other fields of a query result (`columns`, `truncated`, `byte_limited`,
+`elapsed_ms`, `fetch_ms`) and an empty `rows`. Kilat refuses more rows than
+the `limits` it sent (`max_rows`, `max_cell_bytes`, `max_result_bytes`,
+`read_lobs`) and kills the program if it sends them.
+
+Cells: `null`, a string (text), an integer (up to 2^53), or a single-key
+object for the rest: `{"i":"<decimal>"}`, `{"f":<n>|"NaN"|...}`,
+`{"x":"<hex>"}` bytes, `{"c":{"p":<cell>,"n":<len>,"u":"bytes"|"chars"}}`
+clipped.
+
+Limits for Kilat: the handshake must finish within 10 seconds, other calls
+may be silent for up to 10 minutes. A call that times out kills the program;
+the next `connect` starts a new one.

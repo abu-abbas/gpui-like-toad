@@ -44,6 +44,7 @@ impl ExportFormat {
         }
     }
 }
+use ora_core::extension_client::RemoteClient;
 use ora_driver::ThinClient;
 use sqlite_driver::SqliteClient;
 
@@ -484,8 +485,27 @@ fn new_client(kind: DbKind, demo: bool) -> Box<dyn DbClient> {
     }
     match kind {
         DbKind::Oracle => Box::new(ThinClient::new()),
-        DbKind::Sqlite => Box::new(SqliteClient::new()),
+        DbKind::Sqlite => match downloaded_extension(DbKind::Sqlite) {
+            Some(client) => Box::new(client),
+            None => Box::new(SqliteClient::new()),
+        },
     }
+}
+
+/// The downloaded extension for `kind` (Settings > Extensions > Available
+/// online), when one is installed. It then replaces the driver bundled in
+/// the app; uninstalling it brings the bundled one back. A downloaded
+/// extension that cannot start is reported on connect, not hidden by a
+/// silent fallback.
+fn downloaded_extension(kind: DbKind) -> Option<RemoteClient> {
+    let id = kind.key();
+    let install = ora_core::store::remote_install(id)?;
+    Some(RemoteClient::new(
+        install.path,
+        id,
+        kind,
+        env!("CARGO_PKG_VERSION"),
+    ))
 }
 
 fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
