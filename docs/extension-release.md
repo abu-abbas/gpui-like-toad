@@ -24,7 +24,7 @@ Actions > Release extension > Run workflow, pick the extension and a new
 version (`X.Y.Z`). The workflow checks the signing key, builds Linux x86_64,
 Windows x86_64 and macOS arm64, checks that each program answers the
 handshake, signs, verifies like the app does, publishes `ext-<id>-<version>`
-and then rewrites the index. It refuses a version that already exists.
+and then rewrites the index. The optional **notes** field is put above the standard text in the release's description on the Releases page. The workflow refuses a version that already exists.
 If it fails after the release was created but before the index was updated,
 delete the `ext-<id>-<version>` release and its tag, then run it again.
 

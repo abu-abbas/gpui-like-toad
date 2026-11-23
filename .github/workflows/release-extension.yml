@@ -20,6 +20,10 @@ on:
       version:
         description: 'Versi extension, mis. 1.0.0'
         required: true
+      notes:
+        description: 'Catatan rilis (opsional), tampil di halaman Releases'
+        required: false
+        default: ''
 
 concurrency:
   group: release-extension
@@ -31,6 +35,7 @@ permissions:
 env:
   EXT: ${{ inputs.extension }}
   VERSION: ${{ inputs.version }}
+  NOTES: ${{ inputs.notes }}
 
 jobs:
   preflight:
@@ -186,9 +191,12 @@ jobs:
         run: .github/scripts/verify-release.sh out "$VERSION" release-key.pub "kilat-ext-$EXT-"
       - name: Terbitkan rilis extension (bukan latest)
         run: |
+          body="Extension $EXT $VERSION untuk Kilat. Dibangun dari ${{ github.sha }}. Dipasang dari Settings > Extensions, bukan diunduh manual."
+          if [ -n "$NOTES" ]; then
+            body="$NOTES"$'\n\n'"$body"
+          fi
           gh release create "ext-$EXT-$VERSION" out/* --target "${{ github.sha }}" \
-            --title "$EXT extension $VERSION" --latest=false \
-            --notes "Extension $EXT $VERSION untuk Kilat. Dibangun dari ${{ github.sha }}. Dipasang dari Settings > Extensions, bukan diunduh manual."
+            --title "$EXT extension $VERSION" --latest=false --notes "$body"
       - name: Perbarui index extensions.json
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
