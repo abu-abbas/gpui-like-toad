@@ -818,6 +818,10 @@ impl Workbench {
         let profile_id = profile.id.clone();
         let parent_folder = profile.folder.clone();
         let view = cx.entity();
+        // Greyed out while the extension for its engine is not installed.
+        let extension = profile.kind.extension_id();
+        let available = self.extension_ready(extension);
+        let extension_name = store::extension_info(extension).map_or("the", |e| e.name);
         div()
             .id(("profile-row", ix))
             .on_drag(
@@ -908,7 +912,14 @@ impl Workbench {
                 sidebar::tree_button(Button::new(("profile", ix)), keyboard, cx)
                     .small()
                     .w_full()
-                    .tooltip(profile.name.clone())
+                    .tooltip(if available {
+                        profile.name.clone()
+                    } else {
+                        format!(
+                            "{}: install the {extension_name} extension in Settings > Extensions to open it.",
+                            profile.name
+                        )
+                    })
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         let Some(ix) = this
                             .profiles
@@ -934,6 +945,14 @@ impl Workbench {
                             theme,
                         )
                         .gap(px(8.))
+                        .when(!available, |row| {
+                            row.text_color(theme.muted_foreground).child(
+                                div()
+                                    .flex_none()
+                                    .text_size(theme::ui_size(theme, FONT_CAPTION))
+                                    .child(format!("Install {extension_name}")),
+                            )
+                        })
                         .when(active || focused, |row| {
                             row.font_weight(FontWeight::SEMIBOLD)
                         })

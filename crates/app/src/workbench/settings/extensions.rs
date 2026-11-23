@@ -51,6 +51,13 @@ fn has_online_version(id: &str) -> bool {
         .any(|k| *k != ora_core::DbKind::Oracle && k.key() == id)
 }
 
+fn extension_matches(info: &store::ExtensionInfo, search: &str) -> bool {
+    search.is_empty()
+        || info.name.to_lowercase().contains(search)
+        || info.description.to_lowercase().contains(search)
+        || info.id.contains(search)
+}
+
 /// Downloaded extensions and the last check of the online index.
 #[derive(Default)]
 pub(super) struct OnlineState {
@@ -66,7 +73,7 @@ pub(super) struct OnlineState {
 }
 
 impl OnlineState {
-    pub(super) fn refresh_installed(&mut self) {
+    pub(in crate::workbench) fn refresh_installed(&mut self) {
         self.installed = store::REGISTRY
             .iter()
             .filter(|e| has_online_version(e.id))
@@ -214,6 +221,18 @@ impl Workbench {
         self.set_extension_installed(id, false, cx);
     }
 
+    /// Open Settings > Extensions (the "Get more" links).
+    pub(in crate::workbench) fn open_extensions_page(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings(window, cx);
+        self.settings.page = SettingsPage::Extensions;
+        self.settings.ext_filter = ExtFilter::All;
+        cx.notify();
+    }
+
     /// A connection needs an extension that is not installed: open Settings >
     /// Extensions and say so there.
     pub(in crate::workbench) fn show_extension_needed(
@@ -233,7 +252,7 @@ impl Workbench {
 
     /// Installed as far as this page is concerned: switched on and, for an
     /// extension that is downloaded, its program is on disk.
-    fn extension_ready(&self, id: &str) -> bool {
+    pub(in crate::workbench) fn extension_ready(&self, id: &str) -> bool {
         self.extensions.is_installed(id)
             && (!has_online_version(id) || self.settings.ext_online.installed.contains_key(id))
     }
@@ -274,10 +293,24 @@ impl Workbench {
         );
         let online = &self.settings.ext_online;
         let working = online.working();
+        // The search box of the Settings dialog also narrows this list, as
+        // long as something in it matches.
+        let search = Self::input_text(&self.settings.search, cx).to_lowercase();
+        let search = if store::REGISTRY
+            .iter()
+            .any(|e| extension_matches(e, &search))
+        {
+            search
+        } else {
+            String::new()
+        };
         let rows: Vec<_> = store::REGISTRY
             .iter()
             .enumerate()
-            .filter(|(_, info)| filter.matches(info, self.extension_ready(info.id)))
+            .filter(|(_, info)| {
+                filter.matches(info, self.extension_ready(info.id))
+                    && extension_matches(info, &search)
+            })
             .map(|(ix, info)| {
                 let installed = self.extension_ready(info.id);
                 let id = info.id;
