@@ -221,11 +221,7 @@ pub fn rename_table_sql(
     if new == old {
         return Err("The new name is the same as the old one.".to_string());
     }
-    Ok(format!(
-        "ALTER TABLE {} RENAME TO {}",
-        dialect.table_ref(owner, old),
-        dialect.quote_ident(new)
-    ))
+    Ok(dialect.rename_table(owner, old, new))
 }
 
 /// `CREATE TABLE ... AS SELECT`. Copies columns and rows only: indexes,

@@ -194,16 +194,17 @@ impl Workbench {
                     ("Database Type", kind.label().to_string()),
                 ];
                 if let Some(p) = profile {
-                    match kind {
-                        DbKind::Oracle => match parse_easy_connect(&p.connect_string) {
+                    if kind.capabilities().network {
+                        match parse_easy_connect(&p.connect_string) {
                             Some((host, port, service)) => {
                                 info.push(("Host", host));
                                 info.push(("Port", port));
-                                info.push(("Service", service));
+                                info.push((kind.dialect().database_label(), service));
                             }
                             None => info.push(("Connect string", p.connect_string.clone())),
-                        },
-                        DbKind::Sqlite => info.push(("File", p.connect_string.clone())),
+                        }
+                    } else {
+                        info.push(("File", p.connect_string.clone()));
                     }
                 }
                 if let Some(s) = &c.session {

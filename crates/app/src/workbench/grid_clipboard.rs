@@ -85,7 +85,7 @@ impl Workbench {
             .filter(|c| !data.hidden.contains(*c))
             .cloned()
             .collect();
-        let auto = ora_core::edit::auto_generated_columns(defs);
+        let auto = ora_core::edit::auto_generated_columns(self.active_kind().dialect(), defs);
         let values: Vec<Vec<String>> = rows
             .iter()
             .map(|row| ora_core::edit::duplicate_row_values(&visible, row, &auto))

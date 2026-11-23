@@ -12,6 +12,8 @@ fn svg(kind: DbKind) -> &'static [u8] {
     match kind {
         DbKind::Oracle => include_bytes!("../../assets/db/oracle.svg"),
         DbKind::Sqlite => include_bytes!("../../assets/db/sqlite.svg"),
+        DbKind::Postgres => include_bytes!("../../assets/db/postgres.svg"),
+        DbKind::Mysql => include_bytes!("../../assets/db/mysql.svg"),
     }
 }
 
@@ -24,6 +26,10 @@ fn color(kind: DbKind, theme: &Theme) -> Hsla {
         (DbKind::Oracle, false) => (2., 0.72, 0.47),
         (DbKind::Sqlite, true) => (200., 0.92, 0.58),
         (DbKind::Sqlite, false) => (200., 0.85, 0.39),
+        (DbKind::Postgres, true) => (210., 0.60, 0.65),
+        (DbKind::Postgres, false) => (210., 0.55, 0.42),
+        (DbKind::Mysql, true) => (28., 0.85, 0.60),
+        (DbKind::Mysql, false) => (28., 0.80, 0.42),
     };
     hsla(hue / 360., saturation, lightness, 1.)
 }

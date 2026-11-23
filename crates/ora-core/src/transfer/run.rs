@@ -657,7 +657,12 @@ fn copy_rows(
                     ),
                 );
             }
-            let mut paging = Paging::Keyset(Resume::Start);
+            // An engine without a row id has no key to page by.
+            let mut paging = if sd.capabilities().row_id {
+                Paging::Keyset(Resume::Start)
+            } else {
+                Paging::Offset(0)
+            };
             let mut first = true;
             loop {
                 if cx.cancelled() {
