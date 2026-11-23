@@ -520,8 +520,7 @@ impl Workbench {
         let scratch_tab = QueryTab::new(0, String::new(), "", &completion, window, cx);
 
         // Follow OS appearance changes while the preference is System.
-        let appearance_sub = window
-            .observe_window_appearance(|window, cx| theme::sync_system_appearance(window, cx));
+        let appearance_sub = window.observe_window_appearance(theme::sync_system_appearance);
 
         let settings = settings::SettingsState::new(window, cx);
         let settings_search_sub = cx.subscribe(&settings.search, |_, _, event: &InputEvent, cx| {
