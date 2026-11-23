@@ -77,8 +77,8 @@ jobs:
           key: cargo-ci-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-ci-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.version }}-
       - run: cargo fmt --check
-      - run: cargo clippy -p ora-core -p ora-driver -p sqlite-driver -p devtools -p kilat-ext-sqlite -p kilat-ext-mailhog --all-targets --locked -- -D warnings
-      - run: cargo test -p ora-core -p ora-driver -p sqlite-driver -p devtools -p kilat-ext-sqlite -p kilat-ext-mailhog --locked
+      - run: cargo clippy -p ora-core -p ora-driver -p sqlite-driver -p devtools -p kilat-ext-sqlite -p kilat-ext-mailhog -p postgres-driver -p kilat-ext-postgres --all-targets --locked -- -D warnings
+      - run: cargo test -p ora-core -p ora-driver -p sqlite-driver -p devtools -p kilat-ext-sqlite -p kilat-ext-mailhog -p postgres-driver -p kilat-ext-postgres --locked
 
   # Kompilasi GUI pertama dan satu-satunya yang terpercaya: VM dev tidak
   # cukup RAM untuk gpui-kit. Job ini juga menjalankan unit test app crate.
