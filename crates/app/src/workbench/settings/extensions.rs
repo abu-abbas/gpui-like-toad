@@ -214,6 +214,23 @@ impl Workbench {
         self.set_extension_installed(id, false, cx);
     }
 
+    /// A connection needs an extension that is not installed: open Settings >
+    /// Extensions and say so there.
+    pub(in crate::workbench) fn show_extension_needed(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = store::extension_info(id).map_or(id, |i| i.name);
+        self.open_settings(window, cx);
+        self.settings.page = SettingsPage::Extensions;
+        self.settings.ext_filter = ExtFilter::All;
+        self.settings.ext_online.note =
+            Some((true, format!("Install {name} to open this connection.")));
+        cx.notify();
+    }
+
     /// Installed as far as this page is concerned: switched on and, for an
     /// extension that is downloaded, its program is on disk.
     fn extension_ready(&self, id: &str) -> bool {
