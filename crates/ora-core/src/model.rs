@@ -560,14 +560,15 @@ pub fn compose_easy_connect(host: &str, port: &str, service: &str) -> String {
 /// Name for a profile saved without one: `user@connect string` for a
 /// database with logins, the file name for a SQLite file.
 pub fn default_profile_name(kind: DbKind, username: &str, connect_string: &str) -> String {
-    match kind {
-        DbKind::Sqlite => std::path::Path::new(connect_string)
+    if kind.capabilities().password {
+        format!("{username}@{connect_string}")
+    } else {
+        std::path::Path::new(connect_string)
             .file_name()
             .map_or_else(
                 || connect_string.to_string(),
                 |name| name.to_string_lossy().into_owned(),
-            ),
-        DbKind::Oracle => format!("{username}@{connect_string}"),
+            )
     }
 }
 

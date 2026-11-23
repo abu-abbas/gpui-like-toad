@@ -101,10 +101,8 @@ pub fn generate(
             // `next` fits: it is at most hi + 1.
             RangeKind::Integer => format!("{f} >= {from} AND {f} < {next}"),
             RangeKind::Date => {
-                let lit = |d: i128| match source {
-                    DbKind::Oracle => format!("DATE '{}'", format_date(d as i64)),
-                    DbKind::Sqlite => format!("'{}'", format_date(d as i64)),
-                };
+                let dialect = source.dialect();
+                let lit = |d: i128| dialect.date_literal(&format_date(d as i64));
                 format!("{f} >= {} AND {f} < {}", lit(from), lit(next))
             }
         });
