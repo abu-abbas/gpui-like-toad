@@ -439,12 +439,23 @@ pub fn select_sql(
     filter: &TableFilter,
     page: TablePage,
 ) -> BoundQuery {
+    select_sql_keyed(dialect, owner, table, filter, page, dialect.row_id_expr())
+}
+
+/// Like [`select_sql`], with `row_id_expr` as the row's id when the page
+/// asks for one: a driver that identifies rows by something other than the
+/// dialect's physical id (a primary key) passes its own expression.
+pub fn select_sql_keyed(
+    dialect: &dyn Dialect,
+    owner: &str,
+    table: &str,
+    filter: &TableFilter,
+    page: TablePage,
+    row_id_expr: &str,
+) -> BoundQuery {
     let target = dialect.table_ref(owner, table);
     let mut sql = if page.rowid {
-        format!(
-            "SELECT {} AS \"{ROWID_COLUMN}\", t.* FROM {target} t",
-            dialect.row_id_expr()
-        )
+        format!("SELECT {row_id_expr} AS \"{ROWID_COLUMN}\", t.* FROM {target} t")
     } else {
         format!("SELECT * FROM {target}")
     };

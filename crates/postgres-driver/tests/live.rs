@@ -151,13 +151,17 @@ fn session_catalog_query_edit_and_transactions() {
         )
         .unwrap();
     assert_eq!(page.columns[0].name, "__ROWID__");
+    // A table with a primary key is edited by it: the id survives updates.
     let rowid = text(&page.rows[0][0]);
-    assert!(rowid.starts_with('('), "{rowid}");
+    assert_eq!(rowid, "[1]");
     db.update_cell("kt_test", "emp", "salary", &rowid, Some("99.5"))
         .unwrap();
-    // The updated row has a new ctid: the old id no longer matches.
+    db.update_cell("kt_test", "emp", "note", &rowid, Some("edited twice"))
+        .unwrap();
+    db.update_cell("kt_test", "emp", "note", &rowid, None)
+        .unwrap();
     let err = db
-        .update_cell("kt_test", "emp", "salary", &rowid, Some("1"))
+        .update_cell("kt_test", "emp", "note", "[999]", Some("x"))
         .unwrap_err();
     assert!(err.0.contains("no longer exists"), "{err}");
     // The failed statement did not abort the transaction.
@@ -169,6 +173,15 @@ fn session_catalog_query_edit_and_transactions() {
         )
         .unwrap();
     assert_eq!(text(&r.rows[0][0]), "99.50");
+    let cell = db
+        .fetch_cell("kt_test", "emp", "name", &rowid, 1000)
+        .unwrap();
+    assert_eq!(text(&cell), "Ana");
+    db.delete_grid_row("kt_test", "emp", "[2]").unwrap();
+    let r = db
+        .query("SELECT count(*) FROM kt_test.emp", FetchLimits::rows(5))
+        .unwrap();
+    assert_eq!(r.rows[0][0], Value::Integer(1));
     db.rollback().unwrap();
     let r = db
         .query(
@@ -177,6 +190,62 @@ fn session_catalog_query_edit_and_transactions() {
         )
         .unwrap();
     assert_eq!(text(&r.rows[0][0]), "1234.50", "rollback undid the edit");
+
+    // A table without a key falls back to ctid, which an update changes.
+    db.execute("CREATE TABLE kt_test.loose (a text, b text)")
+        .unwrap();
+    db.execute("INSERT INTO kt_test.loose VALUES ('x', 'y')")
+        .unwrap();
+    db.commit().unwrap();
+    let page = db
+        .query_table(
+            "kt_test",
+            "loose",
+            &TableFilter::default(),
+            TablePage::new(0, 10).with_rowid(true),
+        )
+        .unwrap();
+    let ctid = text(&page.rows[0][0]);
+    assert!(ctid.starts_with('('), "{ctid}");
+    db.update_cell("kt_test", "loose", "b", &ctid, Some("z"))
+        .unwrap();
+    let err = db
+        .update_cell("kt_test", "loose", "b", &ctid, Some("w"))
+        .unwrap_err();
+    assert!(err.0.contains("no longer exists"), "{err}");
+    db.rollback().unwrap();
+
+    // Identity columns count as generated, and the table script keeps them.
+    db.execute(
+        "CREATE TABLE kt_test.ident (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, v text)",
+    )
+    .unwrap();
+    db.commit().unwrap();
+    let cols = db.describe_table("kt_test", "ident").unwrap();
+    assert!(db.dialect().is_auto_generated(&cols[0]));
+    let ddl = db
+        .object_ddl("kt_test", "ident", &ObjectKind::Table)
+        .unwrap();
+    assert!(ddl.contains("GENERATED ALWAYS AS IDENTITY"), "{ddl}");
+    assert!(!ddl.contains("DEFAULT GENERATED"), "{ddl}");
+
+    // DDL is transactional: a rolled back CREATE leaves nothing.
+    db.execute("CREATE TABLE kt_test.temp_t (a int)").unwrap();
+    db.rollback().unwrap();
+    assert!(db
+        .query("SELECT * FROM kt_test.temp_t", FetchLimits::rows(1))
+        .is_err());
+    assert_eq!(
+        ora_core::ddl::drop_object_sql(
+            db.dialect(),
+            "kt_test",
+            "g",
+            &ObjectKind::Trigger,
+            Some("emp")
+        )
+        .unwrap(),
+        "DROP TRIGGER \"g\" ON \"kt_test\".\"emp\""
+    );
 
     // Errors are readable and leave the session usable.
     let err = db

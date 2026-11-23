@@ -56,6 +56,14 @@ pub const REGISTRY: &[ExtensionInfo] = &[
         version: env!("CARGO_PKG_VERSION"),
     },
     ExtensionInfo {
+        id: "mysql",
+        name: "MySQL",
+        description: "Connect to MySQL and MariaDB servers.",
+        kind: ExtensionKind::Database,
+        built_in: false,
+        version: env!("CARGO_PKG_VERSION"),
+    },
+    ExtensionInfo {
         id: "redis",
         name: "Redis",
         description: "Browse keys, read values and run commands.",

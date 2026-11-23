@@ -31,6 +31,8 @@ impl Dialect for PostgresDialect {
             network: true,
             row_id: true,
             sysdba: false,
+            transactional_ddl: true,
+            row_edit: true,
             explain_text: true,
             truncate: true,
             special_tables: false,
@@ -38,6 +40,28 @@ impl Dialect for PostgresDialect {
             sequences: false,
             recycle_bin: false,
         }
+    }
+
+    fn new_table_types(&self) -> (&'static str, &'static str) {
+        ("bigint", "varchar(100)")
+    }
+
+    fn drop_object(
+        &self,
+        noun: &str,
+        owner: &str,
+        name: &str,
+        parent: Option<&str>,
+    ) -> Option<String> {
+        if noun == "TRIGGER" {
+            // A trigger is named per table.
+            return Some(format!(
+                "DROP TRIGGER {} ON {}",
+                self.quote_ident(name),
+                self.table_ref(owner, parent?)
+            ));
+        }
+        Some(format!("DROP {noun} {}", self.table_ref(owner, name)))
     }
 
     fn bind_style(&self) -> BindStyle {
@@ -71,9 +95,8 @@ impl Dialect for PostgresDialect {
 
     fn is_auto_generated(&self, column: &ColumnDef) -> bool {
         column.default.as_deref().is_some_and(|expr| {
-            expr.trim_start()
-                .to_ascii_lowercase()
-                .starts_with("nextval(")
+            let lower = expr.trim_start().to_ascii_lowercase();
+            lower.starts_with("nextval(") || lower.contains("as identity")
         })
     }
 
