@@ -341,12 +341,12 @@ impl Workbench {
                     .flex()
                     .items_center()
                     .gap(px(SPACE_2))
-                    .child(div().flex_1().child(caption_text(
+                    .child(div().flex_1().min_w(px(0.)).child(caption_text(
                         "Uninstalling keeps your saved connections and passwords; they open again once the extension is back. Downloads come from this project's GitHub Releases and are checked against its signing key before they are saved.".into(),
                         theme,
                     )))
                     .child(
-                        Button::new("ext-check-updates")
+                        div().flex_none().child(Button::new("ext-check-updates")
                             .small()
                             .label(if online.checking {
                                 "Checking…"
@@ -356,7 +356,7 @@ impl Workbench {
                             .disabled(working)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.check_online_extensions(cx)
-                            })),
+                            }))),
                     ),
             )
     }
