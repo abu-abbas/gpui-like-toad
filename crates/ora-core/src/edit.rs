@@ -8,15 +8,10 @@ use crate::filter::BoundQuery;
 use crate::model::ColumnDef;
 
 /// Columns the database fills in by itself: identity columns and columns
-/// whose default draws from a sequence. Oracle stores both as a default
-/// expression ending in `.NEXTVAL`.
-pub fn auto_generated_columns(defs: &[ColumnDef]) -> Vec<String> {
+/// whose default draws from a sequence, as `dialect` stores them.
+pub fn auto_generated_columns(dialect: &dyn Dialect, defs: &[ColumnDef]) -> Vec<String> {
     defs.iter()
-        .filter(|d| {
-            d.default
-                .as_deref()
-                .is_some_and(|expr| expr.to_ascii_uppercase().contains(".NEXTVAL"))
-        })
+        .filter(|d| dialect.is_auto_generated(d))
         .map(|d| d.name.clone())
         .collect()
 }
@@ -150,7 +145,7 @@ mod tests {
             def("NAME", None),
             def("STATUS", Some("'A'")),
         ];
-        let auto = auto_generated_columns(&defs);
+        let auto = auto_generated_columns(&OracleDialect, &defs);
         assert_eq!(auto, ["ID", "SEQ_NO"]);
         let columns: Vec<String> = ["ID", "NAME", "SEQ_NO", "STATUS"]
             .map(String::from)

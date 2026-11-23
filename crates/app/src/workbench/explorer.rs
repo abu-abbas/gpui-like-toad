@@ -826,12 +826,17 @@ impl Workbench {
             .map_or(ObjectKind::Table, |o| o.kind.clone());
         self.add_tab(window, cx);
         let view = cx.entity().downgrade();
-        let editable = kind == ObjectKind::Table;
+        let editable = kind == ObjectKind::Table && self.active_kind().capabilities().row_id;
         let table_name = self.active_dialect().table_ref(owner, name);
         let data = DataTab::new(owner, name, kind, window, cx);
         let table_state = self.active_tab().table_state.clone();
         let observe = cx.observe(&table_state, |_, _, cx| cx.notify());
         let mut data = data;
+        // An engine without a physical row id selects none, so cells cannot
+        // be edited by it.
+        if !self.active_kind().capabilities().row_id {
+            data.page = data.page.with_rowid(false);
+        }
         data._grid_observe = Some(observe);
         let tab = self.active_tab_mut();
         tab.title = format!("{owner}.{name}");

@@ -484,6 +484,14 @@ fn new_client(kind: DbKind, demo: bool) -> Result<Box<dyn DbClient>, String> {
     }
     match kind {
         DbKind::Oracle => Ok(Box::new(ThinClient::new())),
+        DbKind::Postgres | DbKind::Mysql => match downloaded_extension(kind) {
+            Some(client) => Ok(Box::new(client)),
+            None => Err(format!(
+                "{} is an extension. Install it in Settings > Extensions, \
+                 then connect again.",
+                kind.label()
+            )),
+        },
         DbKind::Sqlite => match downloaded_extension(DbKind::Sqlite) {
             Some(client) => Ok(Box::new(client)),
             // Tests exercise the worker with the driver crate directly, so

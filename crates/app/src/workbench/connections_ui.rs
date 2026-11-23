@@ -212,8 +212,10 @@ impl Workbench {
                         menu.item(
                             PopupMenuItem::new(option.label())
                                 .checked(option == current)
-                                .on_click(move |_, _, cx| {
-                                    view.update(cx, |this, cx| this.set_connection_type(option, cx))
+                                .on_click(move |_, window, cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.set_connection_type(option, window, cx)
+                                    })
                                 }),
                         )
                     })
@@ -229,7 +231,7 @@ impl Workbench {
                     ),
             );
             match current {
-                ConnectionType::SqliteFile => {
+                ConnectionType::File(_) => {
                     body = body.child(
                         row()
                             .items_end()
@@ -253,7 +255,7 @@ impl Workbench {
                         .flex_none(),
                     );
                 }
-                ConnectionType::OracleBasic => {
+                ConnectionType::Basic(basic_kind) => {
                     body =
                         body.child(
                             row()
@@ -266,7 +268,10 @@ impl Workbench {
                                         .child(input_field("Port", Input::new(&form.port_input))),
                                 )
                                 .child(div().flex().w(relative(0.31)).flex_none().child(
-                                    input_field("Service name", Input::new(&form.service_input)),
+                                    input_field(
+                                        basic_kind.dialect().database_label(),
+                                        Input::new(&form.service_input),
+                                    ),
                                 )),
                         );
                 }
