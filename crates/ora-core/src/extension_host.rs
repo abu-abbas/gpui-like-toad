@@ -81,6 +81,7 @@ pub struct ExtProcess {
     stdin: Option<ChildStdin>,
     lines: Receiver<Result<String, String>>,
     stderr: Arc<Mutex<String>>,
+    stderr_thread: Option<std::thread::JoinHandle<()>>,
     next_id: u64,
     broken: bool,
     pub hello: Hello,
@@ -120,15 +121,16 @@ impl ExtProcess {
         let (tx, lines) = mpsc::channel();
         std::thread::spawn(move || read_lines(stdout, tx));
         let stderr = Arc::new(Mutex::new(String::new()));
-        if let Some(pipe) = stderr_pipe {
+        let stderr_thread = stderr_pipe.map(|pipe| {
             let keep = Arc::clone(&stderr);
-            std::thread::spawn(move || keep_stderr(pipe, keep));
-        }
+            std::thread::spawn(move || keep_stderr(pipe, keep))
+        });
         let mut process = Self {
             child,
             stdin,
             lines,
             stderr,
+            stderr_thread,
             next_id: 1,
             broken: false,
             hello: Hello {
@@ -195,7 +197,7 @@ impl ExtProcess {
         on_chunk: &mut dyn FnMut(Json),
     ) -> Result<Json, CallError> {
         if self.broken {
-            return Err(CallError::Closed(self.stderr_tail()));
+            return Err(self.closed());
         }
         let id = self.next_id;
         self.next_id += 1;
@@ -212,7 +214,7 @@ impl ExtProcess {
             .map(|s| s.write_all(line.as_bytes()).and_then(|_| s.flush()));
         if !matches!(wrote, Some(Ok(()))) {
             self.kill();
-            return Err(CallError::Closed(self.stderr_tail()));
+            return Err(self.closed());
         }
         loop {
             let line = match self.lines.recv_timeout(timeout) {
@@ -224,7 +226,7 @@ impl ExtProcess {
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     self.kill();
-                    return Err(CallError::Closed(self.stderr_tail()));
+                    return Err(self.closed());
                 }
             };
             let Ok(message) = parse_json(&line) else {
@@ -278,6 +280,22 @@ impl ExtProcess {
             }
         }
         self.kill();
+    }
+
+    /// "The program is gone", with what it last wrote to stderr. The
+    /// stderr reader gets a moment to finish, so the message is not empty
+    /// just because the program died faster than its output was read.
+    fn closed(&mut self) -> CallError {
+        if let Some(thread) = self.stderr_thread.take() {
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while !thread.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if thread.is_finished() {
+                let _ = thread.join();
+            }
+        }
+        CallError::Closed(self.stderr_tail())
     }
 
     fn fail(&mut self, why: &str) -> CallError {
