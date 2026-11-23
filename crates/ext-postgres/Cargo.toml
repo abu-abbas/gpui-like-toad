@@ -1,0 +1,15 @@
+[package]
+name = "kilat-ext-postgres"
+version = "1.0.0"
+description = "The PostgreSQL extension of Kilat: postgres-driver as a separate program that speaks the extension protocol"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "kilat-ext-postgres"
+path = "src/main.rs"
+
+[dependencies]
+ora-core = { path = "../ora-core" }
+postgres-driver = { path = "../postgres-driver" }

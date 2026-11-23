@@ -1,7 +1,7 @@
 //! Oracle 12c+ SQL.
 
 use super::literal::{
-    base_type, hex_upper, looks_numeric, no_nul, quote_text, split_timestamp, type_args,
+    base_type, bool_digit, hex_upper, looks_numeric, no_nul, quote_text, split_timestamp, type_args,
 };
 use super::{CanonType, Capabilities, DbKind, Dialect};
 use crate::filter::TablePage;
@@ -31,6 +31,8 @@ impl Dialect for OracleDialect {
             network: true,
             row_id: true,
             sysdba: true,
+            transactional_ddl: false,
+            row_edit: true,
             explain_text: true,
             truncate: true,
             special_tables: true,
@@ -46,6 +48,10 @@ impl Dialect for OracleDialect {
 
     fn database_label(&self) -> &'static str {
         "Service name"
+    }
+
+    fn new_table_types(&self) -> (&'static str, &'static str) {
+        ("NUMBER", "VARCHAR2(100)")
     }
 
     fn row_id_expr(&self) -> &'static str {
@@ -170,6 +176,11 @@ impl Dialect for OracleDialect {
         );
         if numeric && looks_numeric(s) {
             return Ok(s.trim().to_string());
+        }
+        if numeric {
+            if let Some(digit) = bool_digit(s) {
+                return Ok(digit.to_string());
+            }
         }
         if base == "DATE" || (base.starts_with("TIMESTAMP") && !base.contains("TIME ZONE")) {
             if let Some((main, frac)) = split_timestamp(s) {

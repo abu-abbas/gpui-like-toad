@@ -15,6 +15,16 @@ pub(crate) fn quote_text(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
+/// A boolean as text (`true`/`false`, `t`/`f`) as the digit a numeric
+/// column keeps it as. Other engines write booleans that way.
+pub(crate) fn bool_digit(text: &str) -> Option<&'static str> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "true" | "t" => Some("1"),
+        "false" | "f" => Some("0"),
+        _ => None,
+    }
+}
+
 pub(crate) fn hex_upper(bytes: &[u8]) -> String {
     bytes.iter().map(|x| format!("{x:02X}")).collect()
 }
