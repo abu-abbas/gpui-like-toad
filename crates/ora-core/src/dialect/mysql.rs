@@ -1,8 +1,8 @@
 //! MySQL and MariaDB SQL. A "schema" is a database.
 
-use super::literal::{base_type, hex_upper, looks_numeric, no_nul, type_args};
+use super::literal::{base_type, bool_digit, hex_upper, looks_numeric, no_nul, type_args};
 use super::{numeric_column, BindStyle, CanonType, Capabilities, DbKind, Dialect};
-use crate::model::Value;
+use crate::model::{ColumnDef, Value};
 
 pub struct MysqlDialect;
 
@@ -18,9 +18,11 @@ impl Dialect for MysqlDialect {
             password: true,
             network: true,
             // No physical row id: rows are found by primary key, which the
-            // data tab learns to use in the MySQL step.
+            // driver reads per table.
             row_id: false,
             sysdba: false,
+            transactional_ddl: false,
+            row_edit: true,
             explain_text: true,
             truncate: true,
             special_tables: false,
@@ -28,6 +30,10 @@ impl Dialect for MysqlDialect {
             sequences: false,
             recycle_bin: false,
         }
+    }
+
+    fn new_table_types(&self) -> (&'static str, &'static str) {
+        ("BIGINT", "VARCHAR(100)")
     }
 
     fn quote_ident(&self, ident: &str) -> String {
@@ -55,6 +61,13 @@ impl Dialect for MysqlDialect {
         Err("MySQL has no row key to page by.".to_string())
     }
 
+    fn is_auto_generated(&self, column: &ColumnDef) -> bool {
+        column
+            .default
+            .as_deref()
+            .is_some_and(|d| d.eq_ignore_ascii_case("auto_increment"))
+    }
+
     fn default_clause(&self, expr: &str) -> String {
         // An expression default needs its own parentheses.
         let simple = expr.trim().starts_with('\'')
@@ -80,6 +93,14 @@ impl Dialect for MysqlDialect {
 
     fn index_refs(&self, schema: &str, index: &str, table: &str) -> (String, String) {
         (self.quote_ident(index), self.table_ref(schema, table))
+    }
+
+    fn key_type(&self, native: &str) -> Option<String> {
+        match base_type(native).as_str() {
+            "TINYTEXT" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT" => Some("VARCHAR(255)".to_string()),
+            "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB" => Some("VARBINARY(255)".to_string()),
+            _ => None,
+        }
     }
 
     fn date_literal(&self, iso: &str) -> String {
@@ -152,8 +173,13 @@ impl Dialect for MysqlDialect {
 
     fn text_literal(&self, column_type: &str, s: &str) -> Result<String, String> {
         no_nul(s)?;
-        if numeric_column(&base_type(column_type)) && looks_numeric(s) {
-            return Ok(s.trim().to_string());
+        if numeric_column(&base_type(column_type)) {
+            if looks_numeric(s) {
+                return Ok(s.trim().to_string());
+            }
+            if let Some(digit) = bool_digit(s) {
+                return Ok(digit.to_string());
+            }
         }
         // Backslash is an escape character in MySQL strings by default.
         Ok(format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''")))

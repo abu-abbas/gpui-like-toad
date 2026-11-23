@@ -162,6 +162,11 @@ fn native_types_settle_after_one_round_trip() {
 #[test]
 fn literals_follow_each_engine() {
     let text = |k: DbKind, ty: &str, s: &str| k.dialect().text_literal(ty, s).unwrap();
+    // A boolean from another engine fills a numeric column as 1 / 0.
+    assert_eq!(text(DbKind::Sqlite, "INTEGER", "true"), "1");
+    assert_eq!(text(DbKind::Oracle, "NUMBER", "false"), "0");
+    assert_eq!(text(DbKind::Mysql, "tinyint(1)", "t"), "1");
+    assert_eq!(text(DbKind::Postgres, "boolean", "true"), "'true'");
     assert_eq!(text(DbKind::Postgres, "integer", " 42 "), "42");
     assert_eq!(text(DbKind::Postgres, "text", "it's"), "'it''s'");
     assert_eq!(text(DbKind::Postgres, "date", "2024-01-31"), "'2024-01-31'");
@@ -238,4 +243,18 @@ fn recordset_dates_use_each_engine_s_literal() {
         let c = generate(kind, "d", RangeKind::Date, "2024-01-01", "2024-01-10", 1).unwrap();
         assert!(c[0].contains(lit), "{kind:?}: {}", c[0]);
     }
+}
+
+#[test]
+fn mysql_gives_keyed_text_columns_a_length() {
+    assert_eq!(
+        MysqlDialect.key_type("LONGTEXT").as_deref(),
+        Some("VARCHAR(255)")
+    );
+    assert_eq!(
+        MysqlDialect.key_type("longblob").as_deref(),
+        Some("VARBINARY(255)")
+    );
+    assert_eq!(MysqlDialect.key_type("VARCHAR(20)"), None);
+    assert_eq!(PostgresDialect.key_type("TEXT"), None);
 }
