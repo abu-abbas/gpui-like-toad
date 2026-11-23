@@ -154,7 +154,7 @@ pub(crate) fn open(cx: &mut App) {
         }),
         is_resizable: false,
         is_minimizable: false,
-        app_id: Some("gpui-like-toad".into()),
+        app_id: Some("kilat".into()),
         ..Default::default()
     };
     match gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| About)) {

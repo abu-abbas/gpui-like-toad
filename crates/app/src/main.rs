@@ -8,10 +8,10 @@
 
 /// Display name shown to people: window title, macOS app menu, Home and
 /// About. A macro (not a const) so it can be used inside `concat!`.
-/// Crate/binary name, bundle identifier and keychain service intentionally
-/// stay `gpui-like-toad` so saved passwords and OTA updates keep working.
-/// The config directory is `Kilat`; the old `gpui-like-toad` one is moved
-/// over once at startup.
+/// Crate, binary, bundle identifier and keychain service are all `kilat`.
+/// Installs from before the rename keep working: the old `gpui-like-toad`
+/// config folder is moved over once at startup, and saved passwords are
+/// copied from the old keychain service when first read.
 macro_rules! app_name {
     () => {
         "Kilat"
@@ -252,10 +252,10 @@ fn open_main_window(cx: &mut App) {
         width: gpui_kit::px(820.),
         height: gpui_kit::px(520.),
     });
-    // Linux: Wayland/X11 match this against `gpui-like-toad.desktop`
+    // Linux: Wayland/X11 match this against `kilat.desktop`
     // (installed by the release tarball's install.sh) for the launcher and
     // taskbar icon. Same id as the binary and config dir on purpose.
-    options.app_id = Some("gpui-like-toad".into());
+    options.app_id = Some("kilat".into());
     // X11 also takes the window icon directly, so it shows even without
     // the .desktop file installed (Wayland ignores this).
     #[cfg(target_os = "linux")]

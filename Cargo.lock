@@ -2733,35 +2733,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui-like-toad"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "devtools",
- "gpui-kit",
- "gpui-pre",
- "gpui-updater-core",
- "image",
- "keyring",
- "lsp-types",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "ora-core",
- "ora-driver",
- "regex",
- "rodio",
- "rust-embed",
- "rustix",
- "serde_json",
- "sqlite-driver",
- "tempfile",
- "ureq",
- "winresource",
-]
-
-[[package]]
 name = "gpui-pre"
 version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4103,6 +4074,35 @@ name = "khronos_api"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
+
+[[package]]
+name = "kilat"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "devtools",
+ "gpui-kit",
+ "gpui-pre",
+ "gpui-updater-core",
+ "image",
+ "keyring",
+ "lsp-types",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "ora-core",
+ "ora-driver",
+ "regex",
+ "rodio",
+ "rust-embed",
+ "rustix",
+ "serde_json",
+ "sqlite-driver",
+ "tempfile",
+ "ureq",
+ "winresource",
+]
 
 [[package]]
 name = "kqueue"

@@ -107,7 +107,7 @@ Connections, settings, `errors.log` and `crash.log` live in a folder named `Kila
 | Windows | `%APPDATA%\Kilat` |
 | Linux | `$XDG_CONFIG_HOME/Kilat`, usually `~/.config/Kilat` |
 
-The binary, the macOS bundle identifier and the keychain service are still called `gpui-like-toad`.
+The binary, the macOS bundle identifier and the keychain service are called `kilat`. Saved passwords from `gpui-like-toad` builds are copied to the new keychain service the first time they are needed; the old entries are left in place.
 
 ## Build from source
 
@@ -126,7 +126,7 @@ Requirements:
 - **macOS** 15+: Xcode Command Line Tools.
 
 ```sh
-cargo run -p gpui-like-toad
+cargo run -p kilat
 ```
 
 The first build takes a while because gpui-kit is large. Set `ORA_DEMO=1` to get a **Demo** connection in the sidebar: an in-memory Oracle look-alike with `EMPLOYEES`, `DEPARTMENTS` and `DUAL`, handy for trying the UI without a server. The screenshots above were taken that way, under Xvfb on Linux.

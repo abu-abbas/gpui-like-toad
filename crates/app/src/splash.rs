@@ -91,7 +91,7 @@ pub(crate) fn show_then(cx: &mut App, open_main: fn(&mut App)) {
         focus: false,
         // Only the rounded card shows, not a square window behind it.
         window_background: WindowBackgroundAppearance::Transparent,
-        app_id: Some("gpui-like-toad".into()),
+        app_id: Some("kilat".into()),
         ..Default::default()
     };
     let opened = gpui_kit::open_window(options, cx, |window, cx| {

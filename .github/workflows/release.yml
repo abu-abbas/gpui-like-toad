@@ -125,22 +125,22 @@ jobs:
           for line in lines:
               if line.startswith("[[package]]"):
                   in_pkg = False
-              if line.strip() == 'name = "gpui-like-toad"':
+              if line.strip() == 'name = "kilat"':
                   in_pkg = True
               if in_pkg and not done and line.startswith("version = "):
                   line = f'version = "{version}"\n'
                   done = True
               out.append(line)
-          assert done, "gpui-like-toad entry not found in Cargo.lock"
+          assert done, "kilat entry not found in Cargo.lock"
           lock.write_text("".join(out))
           print([line for line in updated.splitlines() if line.startswith("version")])
       - name: Build biner rilis
-        run: cargo build --locked --release -p gpui-like-toad
+        run: cargo build --locked --release -p kilat
       - name: Smoke test --version dan siapkan artifact
         shell: bash
         run: |
           VERSION="${VERSION#v}"
-          bin="target/release/gpui-like-toad${{ matrix.ext }}"
+          bin="target/release/kilat${{ matrix.ext }}"
           out="Kilat-$VERSION-${{ matrix.suffix }}${{ matrix.ext }}"
           "$bin" --version
           test "$("$bin" --version)" = "Kilat $VERSION"
@@ -155,17 +155,17 @@ jobs:
           if [ "${{ runner.os }}" = "Linux" ]; then
             pkg="$RUNNER_TEMP/linux-pkg"
             rm -rf "$pkg" && mkdir -p "$pkg/share/applications"
-            install -m 755 target/release/gpui-like-toad "$pkg/gpui-like-toad"
+            install -m 755 target/release/kilat "$pkg/kilat"
             install -m 644 crates/app/assets/linux/install.sh "$pkg/install.sh"
-            install -m 644 crates/app/assets/linux/gpui-like-toad.desktop \
-              "$pkg/share/applications/gpui-like-toad.desktop"
+            install -m 644 crates/app/assets/linux/kilat.desktop \
+              "$pkg/share/applications/kilat.desktop"
             iconset=crates/app/assets/icon/AppIcon.iconset
             for pair in 16:icon_16x16 32:icon_32x32 64:icon_32x32@2x \
                 128:icon_128x128 256:icon_256x256 512:icon_512x512; do
               size="${pair%%:*}"
               dir="$pkg/share/icons/hicolor/${size}x${size}/apps"
               mkdir -p "$dir"
-              install -m 644 "$iconset/${pair#*:}.png" "$dir/gpui-like-toad.png"
+              install -m 644 "$iconset/${pair#*:}.png" "$dir/kilat.png"
             done
             tar -czf "out/$out.tar.gz" -C "$pkg" .
             tar -tzvf "out/$out.tar.gz"
@@ -173,10 +173,10 @@ jobs:
             check="$RUNNER_TEMP/install-check"
             mkdir -p "$check/x" && tar -xzf "out/$out.tar.gz" -C "$check/x"
             env -u XDG_DATA_HOME -u XDG_BIN_HOME HOME="$check/home" sh "$check/x/install.sh"
-            test -x "$check/home/.local/bin/gpui-like-toad"
-            test -f "$check/home/.local/share/icons/hicolor/256x256/apps/gpui-like-toad.png"
-            grep -q "^Exec=$check/home/.local/bin/gpui-like-toad$" \
-              "$check/home/.local/share/applications/gpui-like-toad.desktop"
+            test -x "$check/home/.local/bin/kilat"
+            test -f "$check/home/.local/share/icons/hicolor/256x256/apps/kilat.png"
+            grep -q "^Exec=$check/home/.local/bin/kilat$" \
+              "$check/home/.local/share/applications/kilat.desktop"
           fi
           ls -la out/
       - if: runner.os == 'macOS'
@@ -186,11 +186,10 @@ jobs:
           VERSION="${VERSION#v}"
           app="bundle/Kilat.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          cp "target/release/gpui-like-toad" "$app/Contents/MacOS/gpui-like-toad"
+          cp "target/release/kilat" "$app/Contents/MacOS/kilat"
           sh crates/app/assets/icon/compile-macos-icon.sh "$app/Contents/Resources"
-          # Nama tampilan "Kilat"; CFBundleIdentifier dan nama
-          # executable sengaja tetap gpui-like-toad supaya izin Keychain dan
-          # preferensi macOS dari build lama tidak hilang.
+          # Nama executable dan CFBundleIdentifier sekarang kilat (dulu
+          # gpui-like-toad); password lama dipindah saat dibaca pertama kali.
           cat > "$app/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -201,13 +200,13 @@ jobs:
             <key>CFBundleDisplayName</key>
             <string>Kilat</string>
             <key>CFBundleIdentifier</key>
-            <string>com.github.abu-abbas.gpui-like-toad</string>
+            <string>com.github.abu-abbas.kilat</string>
             <key>CFBundleVersion</key>
             <string>$VERSION</string>
             <key>CFBundleShortVersionString</key>
             <string>$VERSION</string>
             <key>CFBundleExecutable</key>
-            <string>gpui-like-toad</string>
+            <string>kilat</string>
             <key>CFBundleIconName</key>
             <string>Kilat</string>
             <key>CFBundleIconFile</key>
@@ -226,8 +225,8 @@ jobs:
           codesign --force --deep --sign - "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           # Smoke test biner di dalam bundel (bukan cuma biner mentahnya).
-          "$app/Contents/MacOS/gpui-like-toad" --version
-          test "$("$app/Contents/MacOS/gpui-like-toad" --version)" = "Kilat $VERSION"
+          "$app/Contents/MacOS/kilat" --version
+          test "$("$app/Contents/MacOS/kilat" --version)" = "Kilat $VERSION"
           # DMG: .app + symlink ke /Applications (drag-and-drop).
           mkdir -p dmg-staging
           cp -R "$app" dmg-staging/

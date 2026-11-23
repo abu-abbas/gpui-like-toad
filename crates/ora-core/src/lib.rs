@@ -1,4 +1,4 @@
-//! Headless core of gpui-like-toad.
+//! Headless core of kilat.
 //!
 //! Everything in this crate is UI-free on purpose: the database client trait,
 //! the result model, CSV export, SQL text helpers, and an in-memory demo

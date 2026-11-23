@@ -4,7 +4,7 @@ use super::*;
 use crate::credentials::{CredentialStore, ExposeSecret as _, SecretString};
 use crate::redact::{join_proxy_password, proxy_has_user, split_proxy_password};
 
-/// Keychain account (service `gpui-like-toad`) for the proxy password. Not
+/// Keychain account (service `kilat`) for the proxy password. Not
 /// a profile id: those are `p<hex>-...`.
 pub const PROXY_CREDENTIAL_ACCOUNT: &str = "network-proxy";
 
