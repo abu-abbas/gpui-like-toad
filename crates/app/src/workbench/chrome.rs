@@ -473,8 +473,12 @@ impl Workbench {
                         .primary()
                         .icon(IconName::Play)
                         .loading(busy)
-                        .tooltip_with_action("Run", &RunQuery, Some("Workbench"))
-                        .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
+                        .tooltip_with_action(
+                            "Run selection or current statement",
+                            &RunCurrent,
+                            Some("Workbench"),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.run_current(cx))),
                 );
         }
 
@@ -504,8 +508,12 @@ impl Workbench {
                         .ghost()
                         .icon(IconName::ListEnd)
                         .disabled(busy)
-                        .tooltip("Run selection or current statement")
-                        .on_click(cx.listener(|this, _, _, cx| this.run_current(cx))),
+                        .tooltip_with_action(
+                            "Run as script (all statements, or the selection)",
+                            &RunQuery,
+                            Some("Workbench"),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
                 );
         }
         bar.child(

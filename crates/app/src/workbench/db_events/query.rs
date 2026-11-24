@@ -35,6 +35,82 @@ impl Workbench {
         self.enforce_result_budget(cx);
     }
 
+    /// A mixed script (F5): rows go to the result list like a SELECT
+    /// script, everything else to Messages (one line per statement).
+    pub(super) fn on_script_ran(
+        &mut self,
+        cid: u64,
+        steps: Vec<crate::worker::ScriptStep>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::worker::{StatementResult, StepOk};
+        let Some(ix) = self.target_ix_for(cid) else {
+            return;
+        };
+        let total = steps.len();
+        let mut results = Vec::new();
+        let mut failed = false;
+        for (n, step) in steps.into_iter().enumerate() {
+            let head = step.sql.lines().next().unwrap_or("").trim().to_string();
+            let head: String = head.chars().take(60).collect();
+            match step.outcome {
+                Ok(ok) => {
+                    self.record_run_for(cid, &step.sql);
+                    match ok {
+                        StepOk::Rows(result) => {
+                            self.push_message_for(
+                                cid,
+                                format!("[{}] {head}: {} rows.", n + 1, result.row_count()),
+                            );
+                            results.push(StatementResult {
+                                sql: step.sql,
+                                started: step.started,
+                                outcome: Ok(result),
+                            });
+                        }
+                        StepOk::Affected(affected) => self.push_message_for(
+                            cid,
+                            format!("[{}] {head}: affected rows {affected}.", n + 1),
+                        ),
+                    }
+                }
+                Err(err) => {
+                    failed = true;
+                    self.push_message_for(cid, format!("[{}] {head}: {err}", n + 1));
+                    results.push(StatementResult {
+                        sql: step.sql,
+                        started: step.started,
+                        outcome: Err(err),
+                    });
+                }
+            }
+        }
+        self.tabs[ix].result_connection = self
+            .conn_by_id(cid)
+            .and_then(|c| {
+                c.session
+                    .as_ref()
+                    .map(|info| format!("{}  ·  {}", c.label(), info.database))
+            })
+            .unwrap_or_default();
+        self.set_status_for(
+            cid,
+            if failed {
+                format!("Script stopped at statement {total} (earlier changes are uncommitted).")
+            } else {
+                format!("Script completed: {total} statements (uncommitted).")
+            },
+        );
+        let has_rows = !results.is_empty();
+        self.tabs[ix].statement_results = results;
+        if has_rows {
+            self.show_statement_result(ix, 0, cx);
+        } else {
+            self.tabs[ix].results_tab = ResultsTab::Messages;
+        }
+        self.enforce_result_budget(cx);
+    }
+
     pub(super) fn on_query_done(
         &mut self,
         cid: u64,
