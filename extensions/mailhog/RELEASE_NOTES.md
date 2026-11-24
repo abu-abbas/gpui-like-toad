@@ -1,5 +1,13 @@
 # MailHog extension release notes
 
+## 1.0.1 · Unreleased
+
+Minimum Kilat version `0.1.60`.
+
+- Local MailHog logs are saved under `server-logs/developer-tools/mailhog/<instance-id>/` and appear in Settings → Logs → Developer Tools.
+- Existing logs and their rotated copies move when the local server next starts. If both locations already have logs, Settings still lists both.
+- Every new line starts with a local timestamp and UTC offset.
+
 ## [1.0.0](https://github.com/abu-abbas/kilat/releases/tag/ext-mailhog-1.0.0) · 2026-11-24
 
 Minimum Kilat version `0.1.55`.

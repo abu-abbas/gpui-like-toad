@@ -26,6 +26,33 @@ pub fn log_path(config_dir: &Path, tool_name: &str) -> PathBuf {
     log_dir(config_dir).join(format!("{}.log", file_name(tool_name)))
 }
 
+fn mailhog_log_dir(config_dir: &Path) -> PathBuf {
+    log_dir(config_dir).join("mailhog")
+}
+
+/// Move this instance's old log directory, including its rotated log, before
+/// opening a writer. If the destination already exists or the move fails, the
+/// app can still list the legacy log independently.
+pub fn prepare_mailhog_log(config_dir: &Path, id: &str) -> PathBuf {
+    let id = file_name(id);
+    let dir = mailhog_log_dir(config_dir);
+    let instance = dir.join(&id);
+    let legacy = config_dir.join("server-logs").join(&id);
+    let old_log = legacy.join("mailhog.log");
+    if !id.eq_ignore_ascii_case("developer-tools")
+        && fs::symlink_metadata(&legacy).is_ok_and(|meta| meta.is_dir())
+        && [&old_log, &rotated(&old_log)]
+            .iter()
+            .any(|path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file()))
+        && fs::symlink_metadata(&instance)
+            .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+        && fs::create_dir_all(&dir).is_ok()
+    {
+        let _ = fs::rename(legacy, &instance);
+    }
+    instance.join("mailhog.log")
+}
+
 /// The folder a tool's server runs in, so files it writes by relative
 /// path (Redis' dump.rdb) stay apart per tool and survive restarts.
 pub fn data_dir(config_dir: &Path, tool_name: &str) -> PathBuf {
@@ -169,7 +196,8 @@ impl LogWriter {
     }
 
     fn line(&mut self, text: &str) {
-        let line = format!("{text}\n");
+        let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z");
+        let line = format!("[{stamp}] {text}\n");
         if self.size + line.len() as u64 > LOG_LIMIT && self.size > 0 {
             let _ = self.rotate();
         }
@@ -184,10 +212,6 @@ fn rotated(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(".1");
     PathBuf::from(s)
-}
-
-fn stamp() -> String {
-    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 /// A server started by Kilat.
@@ -232,8 +256,7 @@ impl ServerProcess {
             .map_err(|e| format!("Could not start {}: {e}", exe.display()))?;
         if let Ok(mut l) = log.lock() {
             l.line(&format!(
-                "--- {} Kilat started: {command} (pid {})",
-                stamp(),
+                "--- Kilat started: {command} (pid {})",
                 child.id()
             ));
         }
@@ -307,7 +330,7 @@ impl ServerProcess {
             let _ = self.child.wait();
         }
         if let Ok(mut l) = self.log.lock() {
-            l.line(&format!("--- {} Kilat stopped the server", stamp()));
+            l.line("--- Kilat stopped the server");
         }
     }
 }
@@ -519,20 +542,34 @@ pub fn list_logs(config_dir: &Path) -> Vec<LogFile> {
             Some(LogFile { name, path, size })
         })
         .collect();
-    let tools = config_dir.join("server-logs");
-    for entry in fs::read_dir(tools).into_iter().flatten().flatten() {
-        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            continue;
-        }
-        let path = entry.path().join("mailhog.log");
-        if let Ok(meta) = fs::metadata(&path) {
-            let name = format!("MailHog ({})", entry.file_name().to_string_lossy());
-            let size = meta.len() + fs::metadata(rotated(&path)).map(|m| m.len()).unwrap_or(0);
-            out.push(LogFile { name, path, size });
-        }
-    }
+    out.extend(mailhog_logs(&mailhog_log_dir(config_dir), false));
+    out.extend(mailhog_logs(&config_dir.join("server-logs"), true));
     out.sort_by_key(|l| l.name.to_lowercase());
     out
+}
+
+fn mailhog_logs(dir: &Path, legacy: bool) -> impl Iterator<Item = LogFile> {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(move |entry| {
+            let id = entry.file_name();
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir())
+                || (legacy && id.eq_ignore_ascii_case("developer-tools"))
+            {
+                return None;
+            }
+            let path = entry.path().join("mailhog.log");
+            let meta = fs::metadata(&path).ok()?;
+            if !meta.is_file() {
+                return None;
+            }
+            let suffix = if legacy { " (legacy)" } else { "" };
+            let name = format!("MailHog ({}){suffix}", id.to_string_lossy());
+            let size = meta.len() + fs::metadata(rotated(&path)).map(|m| m.len()).unwrap_or(0);
+            Some(LogFile { name, path, size })
+        })
 }
 
 /// Empty a log and drop its rotated part. A running server keeps writing
@@ -592,12 +629,61 @@ mod tests {
         w.size = LOG_LIMIT - 3;
         w.line("hello");
         assert!(rotated(&path).exists());
-        assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
+        let text = fs::read_to_string(&path).unwrap();
+        let (stamp, body) = text.strip_prefix('[').unwrap().split_once("] ").unwrap();
+        let stamp = chrono::DateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M:%S %:z").unwrap();
+        assert_eq!(stamp.offset(), stamp.with_timezone(&chrono::Local).offset());
+        assert_eq!(body, "hello\n");
         w.line("second");
-        assert_eq!(tail(&path, 7), "second\n");
+        assert!(tail(&path, 50).ends_with("] second\n"));
         clear_log(&path).unwrap();
         assert!(!rotated(&path).exists());
         assert_eq!(fs::read_to_string(&path).unwrap(), "");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn moves_legacy_mailhog_logs_and_lists_them_with_redis() {
+        let dir = temp();
+        let legacy = dir.join("server-logs/tool-1/mailhog.log");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, "current").unwrap();
+        fs::write(rotated(&legacy), "older").unwrap();
+        assert_eq!(list_logs(&dir)[0].path, legacy);
+
+        let path = prepare_mailhog_log(&dir, "tool-1");
+        assert_eq!(path, log_dir(&dir).join("mailhog/tool-1/mailhog.log"));
+        assert!(!legacy.parent().unwrap().exists());
+        assert_eq!(fs::read_to_string(rotated(&path)).unwrap(), "older");
+        assert_eq!(prepare_mailhog_log(&dir, "tool-1"), path);
+
+        let redis = log_path(&dir, "Redis");
+        fs::write(&redis, "redis").unwrap();
+        let logs = list_logs(&dir);
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].path, path);
+        assert_eq!(logs[0].size, 12);
+        assert_eq!(logs[1].path, redis);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keeps_both_mailhog_logs_when_the_destination_exists() {
+        let dir = temp();
+        let path = prepare_mailhog_log(&dir, "tool-1");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "new").unwrap();
+        let legacy = dir.join("server-logs/tool-1/mailhog.log");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, "old").unwrap();
+
+        assert_eq!(prepare_mailhog_log(&dir, "tool-1"), path);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&legacy).unwrap(), "old");
+        let logs = list_logs(&dir);
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].name, "MailHog (tool-1)");
+        assert_eq!(logs[1].name, "MailHog (tool-1) (legacy)");
         let _ = fs::remove_dir_all(dir);
     }
 

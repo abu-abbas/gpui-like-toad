@@ -167,7 +167,7 @@ impl Workbench {
                 .gap(px(SPACE_2))
                 .text_size(theme::ui_size(theme, FONT_LABEL))
                 .child(caption_text(
-                    "Output of the Redis and MailHog servers Kilat starts. Each log keeps about 5 MB plus one older part.".into(),
+                    "Output of the Redis and MailHog servers Kilat starts. New entries show local time with its UTC offset. Each log keeps about 5 MB plus one older part.".into(),
                     theme,
                 ))
                 .child(tabs)
