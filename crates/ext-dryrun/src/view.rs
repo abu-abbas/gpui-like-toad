@@ -310,7 +310,13 @@ mod tests {
             locked: Some(Duration::from_secs(0)),
         })
         .to_string();
-        assert!(view.contains(r#"{"old":"100","text":"110"}"#), "{view}");
+        // Key order depends on serde_json's preserve_order, which the
+        // workspace build turns on through another crate.
+        assert!(
+            view.contains(r#"{"old":"100","text":"110"}"#)
+                || view.contains(r#"{"text":"110","old":"100"}"#),
+            "{view}"
+        );
         assert!(view.contains("5:00"));
         assert!(view.contains(r#""id":"commit""#), "{view}");
         // The unchanged NAME column is not drawn, the key is.
