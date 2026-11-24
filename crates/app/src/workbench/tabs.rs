@@ -219,14 +219,38 @@ impl Workbench {
                             theme.muted_foreground
                         },
                     ))
-                    .child(
-                        div()
+                    .child({
+                        let label = div()
+                            .flex()
+                            .flex_row()
                             .text_size(crate::theme::ui_size(theme, FONT_LABEL))
                             .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(label_color)
-                            .child(tab.title.clone()),
-                    )
+                            .text_color(label_color);
+                        // Two tables with the same name in different
+                        // databases differ in the first part, so show it in
+                        // the accent colour and bold.
+                        let split = tab
+                            .data
+                            .as_ref()
+                            .and_then(|d| d.database.as_deref())
+                            .and_then(|db| tab.title.strip_prefix(db))
+                            .filter(|rest| rest.starts_with('.'));
+                        match split {
+                            Some(rest) => {
+                                let db = &tab.title[..tab.title.len() - rest.len()];
+                                label
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme.primary)
+                                            .child(db.to_string()),
+                                    )
+                                    .child(rest.to_string())
+                            }
+                            None => label.child(tab.title.clone()),
+                        }
+                    })
                     .children(
                         tab.conn
                             .and_then(|id| self.conn_by_id(id))

@@ -96,6 +96,8 @@ pub(super) struct DataTab {
     pub(super) show_filters: bool,
     /// The row Details panel on the right of the grid.
     pub(super) show_details: bool,
+    /// The Page / Offset / Go boxes are open (click the row range to open).
+    pub(super) jump_open: bool,
     /// Details fields (by column name) shown pretty-printed.
     pub(super) pretty_fields: HashSet<String>,
     /// Redraws the workbench when the grid's selected row changes.
@@ -208,6 +210,7 @@ impl DataTab {
             show_sql: false,
             show_filters: false,
             show_details: false,
+            jump_open: false,
             pretty_fields: HashSet::new(),
             _grid_observe: None,
             next_row_id: 0,
@@ -1391,13 +1394,17 @@ impl Workbench {
             .data
             .as_ref()
             .map_or(RowCount::Unknown, |d| d.count.value);
-        let mut text = match &tab.last_result {
+        let range = match &tab.last_result {
             Some(result) => {
                 let rows = result.row_count();
                 let mut text = if rows == 0 {
                     "0 rows".to_string()
                 } else {
-                    format!("Rows {}–{}", page.offset + 1, page.offset + rows)
+                    format!(
+                        "{}–{}",
+                        group_digits((page.offset + 1) as u64),
+                        group_digits((page.offset + rows) as u64)
+                    )
                 };
                 match total {
                     RowCount::Known(n) => {
@@ -1410,9 +1417,10 @@ impl Workbench {
             }
             None => String::new(),
         };
-        if let Some(ms) = tab.elapsed_ms {
-            text.push_str(&format!(" · {ms} ms"));
-        }
+        let took = tab
+            .elapsed_ms
+            .map(|ms| format!("{ms} ms"))
+            .unwrap_or_default();
         let shown = tab.last_result.as_ref().map_or(0, |r| r.row_count());
         let more = tab.last_result.as_ref().is_some_and(|r| r.truncated)
             && !matches!(total, RowCount::Known(n) if (page.offset + shown) as u64 >= n);
@@ -1463,7 +1471,8 @@ impl Workbench {
         if on_data {
             if let Some(data) = tab.data.as_ref() {
                 let step = page.limit;
-                let pager = div()
+                let jump_open = data.jump_open;
+                let mut pager = div()
                     .flex()
                     .flex_row()
                     .flex_wrap()
@@ -1480,34 +1489,68 @@ impl Workbench {
                                 this.go_page(Some(page.prev().offset), window, cx)
                             })),
                     )
+                    // The rows shown, as one phrase. Click it to type a page
+                    // number or an offset.
+                    .child(
+                        Button::new("page-range")
+                            .small()
+                            .ghost()
+                            .label(if range.is_empty() {
+                                "—".to_string()
+                            } else {
+                                range
+                            })
+                            .selected(jump_open)
+                            .tooltip("Rows shown. Click to jump to a page or an offset")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(data) = this.data_mut() {
+                                    data.jump_open = !data.jump_open;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("page-next")
+                            .small()
+                            .icon(IconName::ChevronRight)
+                            .tooltip("Next page")
+                            .disabled(busy || !more)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.go_page(Some(page.next().offset), window, cx)
+                            })),
+                    )
                     .child(caption_text("Limit".to_string(), theme))
                     .child(
                         div()
                             .flex_none()
                             .w(px(64.))
                             .child(Input::new(&data.limit_input).small().w_full()),
-                    )
-                    .child(caption_text("Page".to_string(), theme))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(56.))
-                            .child(Input::new(&data.page_input).small().w_full()),
-                    )
-                    .children(match total {
-                        RowCount::Known(n) => Some(caption_text(
-                            format!("of {}", group_digits(page_count(n, page.limit))),
-                            theme,
-                        )),
-                        _ => None,
-                    })
-                    .child(caption_text("Offset".to_string(), theme))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(80.))
-                            .child(Input::new(&data.offset_input).small().w_full()),
-                    )
+                    );
+                if jump_open {
+                    pager = pager
+                        .child(caption_text("Page".to_string(), theme))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(56.))
+                                .child(Input::new(&data.page_input).small().w_full()),
+                        )
+                        .children(match total {
+                            RowCount::Known(n) => Some(caption_text(
+                                format!("of {}", group_digits(page_count(n, page.limit))),
+                                theme,
+                            )),
+                            _ => None,
+                        })
+                        .child(caption_text("Offset".to_string(), theme))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(80.))
+                                .child(Input::new(&data.offset_input).small().w_full()),
+                        );
+                }
+                pager = pager
                     .child(
                         Button::new("page-go")
                             .small()
@@ -1519,16 +1562,6 @@ impl Workbench {
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.go_page(None, window, cx)),
                             ),
-                    )
-                    .child(
-                        Button::new("page-next")
-                            .small()
-                            .icon(IconName::ChevronRight)
-                            .tooltip("Next page")
-                            .disabled(busy || !more)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.go_page(Some(page.next().offset), window, cx)
-                            })),
                     )
                     .child(
                         Button::new("details-toggle")
@@ -1549,9 +1582,8 @@ impl Workbench {
                     .child(
                         div()
                             .flex_none()
-                            .min_w(px(130.))
                             .whitespace_nowrap()
-                            .child(caption_text(text, theme)),
+                            .child(caption_text(took, theme)),
                     )
                     // SQL Server pages need an order; without a key there is
                     // none to promise.
@@ -1590,7 +1622,7 @@ impl Workbench {
                                 .label(if total == RowCount::Counting {
                                     "Counting…"
                                 } else {
-                                    "Count"
+                                    "Count rows"
                                 })
                                 .tooltip(
                                     "Count all rows under the filter (can be slow on a big table)",
