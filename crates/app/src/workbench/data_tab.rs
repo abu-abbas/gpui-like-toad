@@ -724,24 +724,14 @@ impl Workbench {
             data.applied.clone(),
             data.page,
         );
-        let query = select_sql_in(
-            self.active_dialect(),
-            &TableTarget::new(database.as_deref(), &owner, &name),
+        let log = self.data_load_log(
+            database.as_deref(),
+            &owner,
+            &name,
             &filter,
             page,
-            self.active_dialect().row_id_expr(),
             &data.order_by,
         );
-        let mut log = query.sql.clone();
-        if !query.binds.is_empty() {
-            let binds: Vec<String> = query
-                .binds
-                .iter()
-                .enumerate()
-                .map(|(ix, v)| format!(":{} = '{v}'", ix + 1))
-                .collect();
-            log.push_str(&format!("   [{}]", binds.join(", ")));
-        }
         self.push_message(log);
         self.conn.status = format!("Loading {owner}.{name}…");
         // Not recorded in query history: the statement has bind
@@ -1612,6 +1602,38 @@ impl Workbench {
             }
         }
         footer
+    }
+
+    /// The statement a page load is logged as. `order_by` is the key order
+    /// the load really used, so the Info panel shows what was executed.
+    pub(super) fn data_load_log(
+        &self,
+        database: Option<&str>,
+        owner: &str,
+        name: &str,
+        filter: &TableFilter,
+        page: TablePage,
+        order_by: &[String],
+    ) -> String {
+        let query = select_sql_in(
+            self.active_dialect(),
+            &TableTarget::new(database, owner, name),
+            filter,
+            page,
+            self.active_dialect().row_id_expr(),
+            order_by,
+        );
+        let mut log = query.sql.clone();
+        if !query.binds.is_empty() {
+            let binds: Vec<String> = query
+                .binds
+                .iter()
+                .enumerate()
+                .map(|(ix, v)| format!(":{} = '{v}'", ix + 1))
+                .collect();
+            log.push_str(&format!("   [{}]", binds.join(", ")));
+        }
+        log
     }
 
     /// The Columns dropdown: tick which columns the grid shows. The last

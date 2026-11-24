@@ -129,9 +129,31 @@ impl Workbench {
         let order_by = result.order_by.clone();
         let tab = self.target_tab_for_mut(cid);
         tab.elapsed_ms = Some(elapsed);
+        // The first load is logged before the key order is known; once the
+        // result names it, show the statement that actually ran.
+        let mut relog = None;
         if let Some(data) = tab.data.as_mut() {
+            if data.order_by.is_empty() && !order_by.is_empty() {
+                relog = Some((
+                    data.database.clone(),
+                    data.owner.clone(),
+                    data.name.clone(),
+                    data.applied.clone(),
+                    data.page,
+                    order_by.clone(),
+                ));
+            }
             data.set_columns(column_names);
             data.order_by = order_by;
+        }
+        if let (Some((database, owner, name, filter, page, order)), true) =
+            (relog, cid == self.conn.id)
+        {
+            let old = self.data_load_log(database.as_deref(), &owner, &name, &filter, page, &[]);
+            let new = self.data_load_log(database.as_deref(), &owner, &name, &filter, page, &order);
+            if old != new {
+                self.replace_message(&old, new);
+            }
         }
         self.set_grid_result_for(cid, result, cx);
         self.target_tab_for_mut(cid).results_tab = ResultsTab::Results;

@@ -640,6 +640,22 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Swap the newest logged message equal to `old` for `new`, keeping its
+    /// place. Does nothing if it has scrolled out of the log.
+    pub(crate) fn replace_message(&mut self, old: &str, new: String) {
+        let tail = format!("] {old}");
+        if let Some(slot) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.as_str() == old || m.ends_with(&tail))
+        {
+            // Keep the "[connection] " label a multi-connection log adds.
+            let label_len = slot.len() - old.len();
+            *slot = format!("{}{new}", &slot[..label_len]);
+        }
+    }
+
     pub(crate) fn push_message(&mut self, message: String) {
         self.push_message_with(self.conn.id, message, false);
     }
