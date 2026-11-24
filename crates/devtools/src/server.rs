@@ -73,13 +73,33 @@ pub fn redis_log_path(config_dir: &Path, id: &str) -> PathBuf {
         .join("redis.log")
 }
 
+/// `server-data/developer-tools/`: every Developer Tools server keeps
+/// its files under `<kind>/<tool id>/` here, next to the logs layout.
+fn tools_data_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("server-data").join("developer-tools")
+}
+
 /// The folder a Redis instance runs in (its `dump.rdb`):
-/// `server-data/redis-extension/<id>`.
+/// `server-data/developer-tools/redis/<id>`.
 pub fn redis_data_dir(config_dir: &Path, id: &str) -> PathBuf {
-    config_dir
-        .join("server-data")
-        .join("redis-extension")
+    tools_data_dir(config_dir).join("redis").join(file_name(id))
+}
+
+/// Where a local MailHog keeps its mail (maildir storage), so the inbox
+/// survives a server restart: `server-data/developer-tools/mailhog/<id>`.
+pub fn mailhog_mail_dir(config_dir: &Path, id: &str) -> PathBuf {
+    tools_data_dir(config_dir)
+        .join("mailhog")
         .join(file_name(id))
+}
+
+/// Environment that makes MailHog store mail as files in `dir` instead of
+/// memory. Flags typed in the command still win over these.
+pub fn mailhog_storage_env(dir: &Path) -> Vec<(String, std::ffi::OsString)> {
+    vec![
+        ("MH_STORAGE".into(), "maildir".into()),
+        ("MH_MAILDIR_PATH".into(), dir.as_os_str().to_owned()),
+    ]
 }
 
 /// Log file and data folder of a Redis instance. Before 1.0.1 both were
@@ -89,7 +109,11 @@ pub fn redis_data_dir(config_dir: &Path, id: &str) -> PathBuf {
 pub fn prepare_redis(config_dir: &Path, id: &str, name: &str) -> (PathBuf, PathBuf) {
     let log = redis_log_path(config_dir, id);
     let data = redis_data_dir(config_dir, id);
-    if !name.trim().is_empty() {
+    // A tool named like the new kind folders keeps its old folder.
+    let reserved = ["redis", "mailhog"]
+        .iter()
+        .any(|kind| file_name(name).eq_ignore_ascii_case(kind));
+    if !name.trim().is_empty() && !reserved {
         let old_data = data_dir(config_dir, name);
         if fs::symlink_metadata(&old_data).is_ok_and(|m| m.is_dir())
             && fs::symlink_metadata(&data).is_err()
@@ -299,6 +323,16 @@ impl ServerProcess {
     /// Start `command` (split like a shell line, no shell involved) in
     /// `work_dir`, with its output in `log_path`.
     pub fn start(command: &str, log_path: &Path, work_dir: &Path) -> Result<Self, String> {
+        Self::start_with_env(command, log_path, work_dir, &[])
+    }
+
+    /// Same, with extra environment variables for the server.
+    pub fn start_with_env(
+        command: &str,
+        log_path: &Path,
+        work_dir: &Path,
+        env: &[(String, std::ffi::OsString)],
+    ) -> Result<Self, String> {
         let args = crate::console::split_args(command)?;
         let args: Vec<String> = args
             .into_iter()
@@ -316,6 +350,7 @@ impl ServerProcess {
         let log = Arc::new(Mutex::new(log));
         let mut cmd = Command::new(&exe);
         cmd.args(&args[1..])
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -690,7 +725,7 @@ mod tests {
         fs::create_dir_all(log_dir(cfg)).unwrap();
         fs::write(log_path(cfg, "local-redis"), b"log").unwrap();
         let (log, data) = prepare_redis(cfg, "t1", "local-redis");
-        assert_eq!(data, cfg.join("server-data/redis-extension/t1"));
+        assert_eq!(data, cfg.join("server-data/developer-tools/redis/t1"));
         assert_eq!(log, log_dir(cfg).join("redis/t1/redis.log"));
         assert!(data.join("dump.rdb").is_file());
         assert!(log.is_file());

@@ -119,7 +119,7 @@ fn data_dir_of(tool: &ToolInstance) -> PathBuf {
     let config = store::config_dir();
     match tool.kind {
         ToolKind::Redis => server::prepare_redis(&config, &tool.id, &tool.name).1,
-        ToolKind::MailHog => server::mailhog_data_dir(&config, &tool.id),
+        ToolKind::MailHog => server::mailhog_mail_dir(&config, &tool.id),
     }
 }
 
@@ -190,7 +190,13 @@ impl Workbench {
                 if server::wait_port(&host, port, Duration::ZERO, || None).is_ok() {
                     return Ok(Started::AlreadyRunning);
                 }
-                let mut process = ServerProcess::start(&command, &log_path, &work_dir)?;
+                let env = if tool.kind == ToolKind::MailHog {
+                    server::mailhog_storage_env(&work_dir)
+                } else {
+                    Vec::new()
+                };
+                let mut process =
+                    ServerProcess::start_with_env(&command, &log_path, &work_dir, &env)?;
                 server::record_pid(&store::config_dir(), process.pid(), &command);
                 let ready =
                     server::wait_port(&host, port, Duration::from_secs(15), || process.exited());
