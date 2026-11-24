@@ -29,6 +29,10 @@ pub struct ConnectionAccess {
     pub sysdba: bool,
     /// Do not record this connection's statements in the query history.
     pub skip_history: bool,
+    /// SQL Server: accept the server's certificate without checking it
+    /// (a self-signed one). Off by default: the connection is encrypted
+    /// and the certificate must be valid.
+    pub trust_server_certificate: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -309,6 +313,11 @@ pub struct QueryResult {
     /// result reached [`crate::FetchLimits::max_result_bytes`] rather than
     /// the row cap.
     pub byte_limited: bool,
+    /// The key columns a table fetch was ordered by, when the database needs
+    /// an explicit order to page (SQL Server). Empty for every other fetch.
+    /// The data tab builds its SQL preview from this, so the preview shows
+    /// the same `ORDER BY` as the grid's fetch.
+    pub order_by: Vec<String>,
 }
 
 impl QueryResult {

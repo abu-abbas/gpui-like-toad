@@ -4,7 +4,7 @@
 //! module only holds the UI state and renders the bar.
 
 use gpui_kit::component::checkbox::Checkbox;
-use ora_core::filter::select_sql;
+use ora_core::filter::{select_sql_in, TableTarget};
 use ora_core::{
     FilterCondition, FilterJoin, FilterOp, TableFilter, TablePage, MAX_PAGE_LIMIT, ROWID_COLUMN,
 };
@@ -68,6 +68,13 @@ impl DataView {
 
 /// What a data tab shows: one table or view, and the filter on it.
 pub(super) struct DataTab {
+    /// The database of the server this tab was opened in (SQL Server). It
+    /// never changes, whatever the explorer shows later: page, count,
+    /// structure, indexes, DDL, export and the SQL preview all name it.
+    pub(super) database: Option<String>,
+    /// The key columns the last fetch was ordered by (SQL Server pages need
+    /// an order). The SQL preview uses them, so it shows the grid's order.
+    pub(super) order_by: Vec<String>,
     pub(super) owner: String,
     pub(super) name: String,
     pub(super) kind: ObjectKind,
@@ -89,6 +96,8 @@ pub(super) struct DataTab {
     pub(super) show_filters: bool,
     /// The row Details panel on the right of the grid.
     pub(super) show_details: bool,
+    /// The Page / Offset / Go boxes are open (click the row range to open).
+    pub(super) jump_open: bool,
     /// Details fields (by column name) shown pretty-printed.
     pub(super) pretty_fields: HashSet<String>,
     /// Redraws the workbench when the grid's selected row changes.
@@ -121,6 +130,7 @@ impl DataTab {
     }
 
     pub(super) fn new(
+        database: Option<String>,
         owner: &str,
         name: &str,
         kind: ObjectKind,
@@ -183,6 +193,8 @@ impl DataTab {
             },
         ));
         DataTab {
+            database,
+            order_by: Vec::new(),
             owner: owner.to_string(),
             name: name.to_string(),
             kind,
@@ -198,6 +210,7 @@ impl DataTab {
             show_sql: false,
             show_filters: false,
             show_details: false,
+            jump_open: false,
             pretty_fields: HashSet::new(),
             _grid_observe: None,
             next_row_id: 0,
@@ -604,7 +617,8 @@ impl Workbench {
         let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
             return;
         };
-        let (owner, name, kind, view, show_storage) = (
+        let (database, owner, name, kind, view, show_storage) = (
+            data.database.clone(),
             data.owner.clone(),
             data.name.clone(),
             data.kind.clone(),
@@ -615,16 +629,33 @@ impl Workbench {
             DataView::Data => self.reload_data(cx),
             DataView::Structure => {
                 self.conn.status = format!("Loading structure for {owner}.{name}…");
-                self.spawn_db(Job::Describe { owner, name }, PendingOp::DataStructure, cx);
+                self.spawn_db(
+                    Job::Describe {
+                        database,
+                        owner,
+                        name,
+                    },
+                    PendingOp::DataStructure,
+                    cx,
+                );
             }
             DataView::Index => {
                 self.conn.status = format!("Loading indexes for {owner}.{name}…");
-                self.spawn_db(Job::Indexes { owner, name }, PendingOp::DataIndexes, cx);
+                self.spawn_db(
+                    Job::Indexes {
+                        database,
+                        owner,
+                        name,
+                    },
+                    PendingOp::DataIndexes,
+                    cx,
+                );
             }
             DataView::Ddl => {
                 self.conn.status = format!("Loading DDL for {owner}.{name}…");
                 self.spawn_db(
                     Job::Ddl {
+                        database,
                         owner,
                         name,
                         kind,
@@ -649,10 +680,16 @@ impl Workbench {
             return;
         }
         data.show_storage = show;
-        let (owner, name, kind) = (data.owner.clone(), data.name.clone(), data.kind.clone());
+        let (database, owner, name, kind) = (
+            data.database.clone(),
+            data.owner.clone(),
+            data.name.clone(),
+            data.kind.clone(),
+        );
         self.conn.status = format!("Loading DDL for {owner}.{name}…");
         self.spawn_db(
             Job::Ddl {
+                database,
                 owner,
                 name,
                 kind,
@@ -683,23 +720,21 @@ impl Workbench {
         let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
             return;
         };
-        let (owner, name, filter, page) = (
+        let (database, owner, name, filter, page) = (
+            data.database.clone(),
             data.owner.clone(),
             data.name.clone(),
             data.applied.clone(),
             data.page,
         );
-        let query = select_sql(self.active_dialect(), &owner, &name, &filter, page);
-        let mut log = query.sql.clone();
-        if !query.binds.is_empty() {
-            let binds: Vec<String> = query
-                .binds
-                .iter()
-                .enumerate()
-                .map(|(ix, v)| format!(":{} = '{v}'", ix + 1))
-                .collect();
-            log.push_str(&format!("   [{}]", binds.join(", ")));
-        }
+        let log = self.data_load_log(
+            database.as_deref(),
+            &owner,
+            &name,
+            &filter,
+            page,
+            &data.order_by,
+        );
         self.push_message(log);
         self.conn.status = format!("Loading {owner}.{name}…");
         // Not recorded in query history: the statement has bind
@@ -707,6 +742,7 @@ impl Workbench {
         self.conn.pending_sql = None;
         self.spawn_db(
             Job::QueryTable {
+                database,
                 owner,
                 name,
                 filter,
@@ -1126,12 +1162,14 @@ impl Workbench {
                 ),
         );
         if data.show_sql {
-            let query = select_sql(
+            // The same target and order as the grid's fetch.
+            let query = select_sql_in(
                 self.active_dialect(),
-                &data.owner,
-                &data.name,
+                &TableTarget::new(data.database.as_deref(), &data.owner, &data.name),
                 &data.draft(cx),
                 data.page,
+                self.active_dialect().row_id_expr(),
+                &data.order_by,
             );
             let preview = query.preview();
             let runnable = query.inlined();
@@ -1356,13 +1394,17 @@ impl Workbench {
             .data
             .as_ref()
             .map_or(RowCount::Unknown, |d| d.count.value);
-        let mut text = match &tab.last_result {
+        let range = match &tab.last_result {
             Some(result) => {
                 let rows = result.row_count();
                 let mut text = if rows == 0 {
                     "0 rows".to_string()
                 } else {
-                    format!("Rows {}–{}", page.offset + 1, page.offset + rows)
+                    format!(
+                        "{}–{}",
+                        group_digits((page.offset + 1) as u64),
+                        group_digits((page.offset + rows) as u64)
+                    )
                 };
                 match total {
                     RowCount::Known(n) => {
@@ -1375,9 +1417,10 @@ impl Workbench {
             }
             None => String::new(),
         };
-        if let Some(ms) = tab.elapsed_ms {
-            text.push_str(&format!(" · {ms} ms"));
-        }
+        let took = tab
+            .elapsed_ms
+            .map(|ms| format!("{ms} ms"))
+            .unwrap_or_default();
         let shown = tab.last_result.as_ref().map_or(0, |r| r.row_count());
         let more = tab.last_result.as_ref().is_some_and(|r| r.truncated)
             && !matches!(total, RowCount::Known(n) if (page.offset + shown) as u64 >= n);
@@ -1428,7 +1471,8 @@ impl Workbench {
         if on_data {
             if let Some(data) = tab.data.as_ref() {
                 let step = page.limit;
-                let pager = div()
+                let jump_open = data.jump_open;
+                let mut pager = div()
                     .flex()
                     .flex_row()
                     .flex_wrap()
@@ -1445,34 +1489,68 @@ impl Workbench {
                                 this.go_page(Some(page.prev().offset), window, cx)
                             })),
                     )
+                    // The rows shown, as one phrase. Click it to type a page
+                    // number or an offset.
+                    .child(
+                        Button::new("page-range")
+                            .small()
+                            .ghost()
+                            .label(if range.is_empty() {
+                                "—".to_string()
+                            } else {
+                                range
+                            })
+                            .selected(jump_open)
+                            .tooltip("Rows shown. Click to jump to a page or an offset")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(data) = this.data_mut() {
+                                    data.jump_open = !data.jump_open;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("page-next")
+                            .small()
+                            .icon(IconName::ChevronRight)
+                            .tooltip("Next page")
+                            .disabled(busy || !more)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.go_page(Some(page.next().offset), window, cx)
+                            })),
+                    )
                     .child(caption_text("Limit".to_string(), theme))
                     .child(
                         div()
                             .flex_none()
                             .w(px(64.))
                             .child(Input::new(&data.limit_input).small().w_full()),
-                    )
-                    .child(caption_text("Page".to_string(), theme))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(56.))
-                            .child(Input::new(&data.page_input).small().w_full()),
-                    )
-                    .children(match total {
-                        RowCount::Known(n) => Some(caption_text(
-                            format!("of {}", group_digits(page_count(n, page.limit))),
-                            theme,
-                        )),
-                        _ => None,
-                    })
-                    .child(caption_text("Offset".to_string(), theme))
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(80.))
-                            .child(Input::new(&data.offset_input).small().w_full()),
-                    )
+                    );
+                if jump_open {
+                    pager = pager
+                        .child(caption_text("Page".to_string(), theme))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(56.))
+                                .child(Input::new(&data.page_input).small().w_full()),
+                        )
+                        .children(match total {
+                            RowCount::Known(n) => Some(caption_text(
+                                format!("of {}", group_digits(page_count(n, page.limit))),
+                                theme,
+                            )),
+                            _ => None,
+                        })
+                        .child(caption_text("Offset".to_string(), theme))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(80.))
+                                .child(Input::new(&data.offset_input).small().w_full()),
+                        );
+                }
+                pager = pager
                     .child(
                         Button::new("page-go")
                             .small()
@@ -1484,16 +1562,6 @@ impl Workbench {
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.go_page(None, window, cx)),
                             ),
-                    )
-                    .child(
-                        Button::new("page-next")
-                            .small()
-                            .icon(IconName::ChevronRight)
-                            .tooltip("Next page")
-                            .disabled(busy || !more)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.go_page(Some(page.next().offset), window, cx)
-                            })),
                     )
                     .child(
                         Button::new("details-toggle")
@@ -1514,9 +1582,22 @@ impl Workbench {
                     .child(
                         div()
                             .flex_none()
-                            .min_w(px(130.))
                             .whitespace_nowrap()
-                            .child(caption_text(text, theme)),
+                            .child(caption_text(took, theme)),
+                    )
+                    // SQL Server pages need an order; without a key there is
+                    // none to promise.
+                    .when(
+                        self.active_kind().capabilities().databases
+                            && tab.last_result.is_some()
+                            && data.order_by.is_empty(),
+                        |this| {
+                            this.child(caption_text(
+                                "No unique key: rows with equal sort values may move between pages."
+                                    .to_string(),
+                                theme,
+                            ))
+                        },
                     )
                     .child(
                         Button::new("count-auto")
@@ -1541,7 +1622,7 @@ impl Workbench {
                                 .label(if total == RowCount::Counting {
                                     "Counting…"
                                 } else {
-                                    "Count"
+                                    "Count rows"
                                 })
                                 .tooltip(
                                     "Count all rows under the filter (can be slow on a big table)",
@@ -1553,6 +1634,38 @@ impl Workbench {
             }
         }
         footer
+    }
+
+    /// The statement a page load is logged as. `order_by` is the key order
+    /// the load really used, so the Info panel shows what was executed.
+    pub(super) fn data_load_log(
+        &self,
+        database: Option<&str>,
+        owner: &str,
+        name: &str,
+        filter: &TableFilter,
+        page: TablePage,
+        order_by: &[String],
+    ) -> String {
+        let query = select_sql_in(
+            self.active_dialect(),
+            &TableTarget::new(database, owner, name),
+            filter,
+            page,
+            self.active_dialect().row_id_expr(),
+            order_by,
+        );
+        let mut log = query.sql.clone();
+        if !query.binds.is_empty() {
+            let binds: Vec<String> = query
+                .binds
+                .iter()
+                .enumerate()
+                .map(|(ix, v)| format!(":{} = '{v}'", ix + 1))
+                .collect();
+            log.push_str(&format!("   [{}]", binds.join(", ")));
+        }
+        log
     }
 
     /// The Columns dropdown: tick which columns the grid shows. The last

@@ -329,6 +329,7 @@ impl Workbench {
             "RECYCLEBIN"
         };
         let object = ObjectRef {
+            database: None,
             owner,
             name: name.to_string(),
             kind: ObjectKind::RecycleBin,

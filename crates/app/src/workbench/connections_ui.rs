@@ -392,6 +392,27 @@ impl Workbench {
                             })),
                     )
                 })
+                .when(caps.databases, |section| {
+                    section
+                        .child(
+                            Checkbox::new("trust-server-certificate")
+                                .small()
+                                .label("Trust server certificate")
+                                .checked(access.trust_server_certificate)
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.connection_form.access.trust_server_certificate = *checked;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(caption_text(
+                            if access.trust_server_certificate {
+                                "The connection is encrypted, but the server's certificate is not checked. Use it only for a server you know, such as a development server with a self-signed certificate.".into()
+                            } else {
+                                "The connection is encrypted and the server's certificate must be valid.".into()
+                            },
+                            theme,
+                        ))
+                })
                 .when(access.read_only, |section| {
                     section.child(caption_text(
                         if caps.password {

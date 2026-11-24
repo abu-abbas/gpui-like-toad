@@ -319,6 +319,17 @@ impl ConnState {
             .map_or_else(ConnectionAccess::default, |last| last.profile.access)
     }
 
+    /// The database the explorer shows, for an engine that has several
+    /// per session (SQL Server). New data tabs are bound to it; tabs
+    /// already open keep their own.
+    fn database(&self) -> Option<String> {
+        let kind = self.last_connection.as_ref()?.profile.kind;
+        kind.capabilities()
+            .databases
+            .then(|| self.current_schema.clone())
+            .flatten()
+    }
+
     fn label(&self) -> String {
         match (&self.last_connection, &self.session) {
             (Some(last), _) => last.profile.name.clone(),
@@ -331,6 +342,8 @@ impl ConnState {
 /// The explorer object a context-menu action applies to.
 #[derive(Clone)]
 struct ObjectRef {
+    /// The database it was listed in (SQL Server).
+    database: Option<String>,
     owner: String,
     name: String,
     kind: ObjectKind,
@@ -476,6 +489,10 @@ pub struct Workbench {
     explain_analyze_hinted: bool,
     category: ObjectCategory,
     object_scroll: UniformListScrollHandle,
+    /// Schema groups of the explorer the user folded (SQL Server lists a
+    /// whole database grouped by schema); keyed by connection, database
+    /// and schema.
+    collapsed_schemas: HashSet<(u64, String, String)>,
     /// The Quick Open palette, while it is showing.
     quick_open: Option<QuickOpen>,
     /// The cell edit dialog, while it is showing.
@@ -600,6 +617,7 @@ impl Workbench {
             explain_analyze_hinted: false,
             category: ObjectCategory::Tables,
             object_scroll: UniformListScrollHandle::new(),
+            collapsed_schemas: HashSet::new(),
             quick_open: None,
             cell_editor: None,
             inline_edit: None,
@@ -626,6 +644,22 @@ impl Workbench {
     pub(crate) fn clear_messages(&mut self, cx: &mut Context<Self>) {
         self.messages.clear();
         cx.notify();
+    }
+
+    /// Swap the newest logged message equal to `old` for `new`, keeping its
+    /// place. Does nothing if it has scrolled out of the log.
+    pub(crate) fn replace_message(&mut self, old: &str, new: String) {
+        let tail = format!("] {old}");
+        if let Some(slot) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.as_str() == old || m.ends_with(&tail))
+        {
+            // Keep the "[connection] " label a multi-connection log adds.
+            let label_len = slot.len() - old.len();
+            *slot = format!("{}{new}", &slot[..label_len]);
+        }
     }
 
     pub(crate) fn push_message(&mut self, message: String) {

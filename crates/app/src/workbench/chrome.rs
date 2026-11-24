@@ -291,6 +291,7 @@ impl Workbench {
             let data = tab.data.as_ref().expect("data tab has table state");
             let data_view = data.view == DataView::Data;
             let object = ObjectRef {
+                database: data.database.clone(),
                 owner: data.owner.clone(),
                 name: data.name.clone(),
                 kind: data.kind.clone(),
@@ -430,7 +431,11 @@ impl Workbench {
                         theme.muted_foreground,
                         "Import CSV into table",
                     )
-                    .disabled(unavailable || import_object.kind != ObjectKind::Table)
+                    .disabled(
+                        unavailable
+                            || import_object.kind != ObjectKind::Table
+                            || self.active_kind().capabilities().databases,
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.import_table(import_object.clone(), cx)
                     })),
@@ -442,7 +447,11 @@ impl Workbench {
                         theme.muted_foreground,
                         "Data Transfer…",
                     )
-                    .disabled(unavailable || transfer_object.kind != ObjectKind::Table)
+                    .disabled(
+                        unavailable
+                            || transfer_object.kind != ObjectKind::Table
+                            || self.active_kind().capabilities().databases,
+                    )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_data_transfer(Some(transfer_object.clone()), window, cx)
                     })),
@@ -571,10 +580,22 @@ impl Workbench {
 
     pub(super) fn render_status_bar(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
         let (dot_color, conn_label, conn_detail) = self.conn_status(theme);
-        let conn_text = if conn_detail.is_empty() {
-            conn_label.to_string()
-        } else {
-            format!("{conn_label} · {conn_detail}")
+        // Connected: say which connection this is; the login, default
+        // database and extension go in the tooltip, because the explorer
+        // dropdown and the tab title already say which database is shown.
+        let (conn_text, conn_tip) = match &self.conn.session {
+            Some(session) if !self.conn.busy => {
+                let mut tip = format!(
+                    "Login: {}\nDefault database: {}",
+                    session.user, session.database
+                );
+                if let Some(label) = &self.conn.extension_label {
+                    tip.push_str(&format!("\n{label}"));
+                }
+                (format!("{conn_label} · {}", self.conn.label()), Some(tip))
+            }
+            _ if conn_detail.is_empty() => (conn_label.to_string(), None),
+            _ => (format!("{conn_label} · {conn_detail}"), None),
         };
         let mut bar = div()
             .flex()
@@ -596,12 +617,19 @@ impl Workbench {
                 .child(status_dot(dot_color))
                 .child(
                     div()
+                        .id("status-connection")
                         .min_w(px(0.))
                         .truncate()
                         .text_size(crate::theme::ui_size(theme, FONT_CAPTION))
                         .line_height(crate::theme::ui_size(theme, LEADING_CAPTION))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.foreground)
+                        .when_some(conn_tip, |this, tip| {
+                            this.tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                    .build(window, cx)
+                            })
+                        })
                         .child(conn_text),
                 ),
         );

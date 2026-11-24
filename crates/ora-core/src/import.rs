@@ -417,6 +417,7 @@ mod tests {
             byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
+            order_by: Vec::new(),
         };
         let csv = parse_csv(&crate::export::to_csv(&result)).unwrap();
         assert_eq!(csv.rows, [["x,\"y\""]]);

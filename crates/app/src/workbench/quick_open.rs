@@ -93,7 +93,8 @@ impl Workbench {
         let (owner, name) = (object.owner.clone(), object.name.clone());
         self.close_quick_open(cx);
         self.conn.selected_object = Some(name.clone());
-        self.open_table_data(&owner, &name, window, cx);
+        let database = self.conn.database();
+        self.open_table_data(database.as_deref(), &owner, &name, window, cx);
     }
 
     pub(super) fn render_quick_open(

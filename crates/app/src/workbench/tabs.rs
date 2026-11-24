@@ -219,14 +219,38 @@ impl Workbench {
                             theme.muted_foreground
                         },
                     ))
-                    .child(
-                        div()
+                    .child({
+                        let label = div()
+                            .flex()
+                            .flex_row()
                             .text_size(crate::theme::ui_size(theme, FONT_LABEL))
                             .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(label_color)
-                            .child(tab.title.clone()),
-                    )
+                            .text_color(label_color);
+                        // Two tables with the same name in different
+                        // databases differ in the first part, so show it in
+                        // the accent colour and bold.
+                        let split = tab
+                            .data
+                            .as_ref()
+                            .and_then(|d| d.database.as_deref())
+                            .and_then(|db| tab.title.strip_prefix(db))
+                            .filter(|rest| rest.starts_with('.'));
+                        match split {
+                            Some(rest) => {
+                                let db = &tab.title[..tab.title.len() - rest.len()];
+                                label
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme.primary)
+                                            .child(db.to_string()),
+                                    )
+                                    .child(rest.to_string())
+                            }
+                            None => label.child(tab.title.clone()),
+                        }
+                    })
                     .children(
                         tab.conn
                             .and_then(|id| self.conn_by_id(id))
@@ -449,15 +473,24 @@ mod tests {
         window
             .update(cx, |this, window, cx| {
                 this.add_tab(window, cx);
-                let data = DataTab::new("MAIN", "TASK_LOGS", ObjectKind::Table, window, cx);
+                let data = DataTab::new(None, "MAIN", "TASK_LOGS", ObjectKind::Table, window, cx);
                 let tab = this.active_tab_mut();
                 tab.conn = Some(7);
                 tab.data = Some(data);
-                assert_eq!(this.find_data_tab(7, "MAIN", "TASK_LOGS"), Some(0));
+                assert_eq!(this.find_data_tab(7, None, "MAIN", "TASK_LOGS"), Some(0));
                 // Another connection, schema or table must not match.
-                assert_eq!(this.find_data_tab(8, "MAIN", "TASK_LOGS"), None);
-                assert_eq!(this.find_data_tab(7, "OTHER", "TASK_LOGS"), None);
-                assert_eq!(this.find_data_tab(7, "MAIN", "TASK_LOG_COMMITS"), None);
+                assert_eq!(this.find_data_tab(8, None, "MAIN", "TASK_LOGS"), None);
+                assert_eq!(this.find_data_tab(7, None, "OTHER", "TASK_LOGS"), None);
+                assert_eq!(
+                    this.find_data_tab(7, None, "MAIN", "TASK_LOG_COMMITS"),
+                    None
+                );
+                // Nor a database: a tab without one is not the same table
+                // as one in a named database.
+                assert_eq!(
+                    this.find_data_tab(7, Some("dev"), "MAIN", "TASK_LOGS"),
+                    None
+                );
             })
             .unwrap();
     }

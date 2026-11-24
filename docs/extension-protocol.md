@@ -52,15 +52,37 @@ always an object. A method an extension cannot do answers with an error.
 | `connect` | `profile`, `password` | `{user, database, version}` |
 | `disconnect` | none | `{}` |
 | `query` | `sql`, `binds` (text list), `limits` | rows in chunks, then the result head |
-| `query_table` | `owner`, `table`, `filter`, `page` | like `query` |
+| `query_table` | optional `database`, `owner`, `table`, `filter`, `page` | like `query` |
+| `count_table` | `database`, `owner`, `table`, `filter` | `{count}` |
 | `execute` | `sql`, `binds` | `{affected}` |
 | `commit`, `rollback` | none | `{}` |
 | `list_schemas` | none | list of names |
 | `list_objects` | `owner` | list of `{owner,name,kind,parent,detail}` |
-| `object_ddl` | `owner`, `name`, `kind`, `show_storage` | text |
-| `describe_table` | `owner`, `name` | list of `{name,type,nullable,default}` |
-| `list_indexes`, `list_constraints`, `trigger_scripts` | `owner`, `table` | lists |
+| `object_ddl` | optional `database`, `owner`, `name`, `kind`, `show_storage` | text |
+| `describe_table` | optional `database`, `owner`, `name` | list of `{name,type,nullable,default}` |
+| `list_indexes` | optional `database`, `owner`, `table` | list |
+| `list_constraints`, `trigger_scripts` | `owner`, `table` | lists |
 | `explain_plan`, `explain_plan_nodes` | `sql` | text lines / plan nodes |
+
+### Databases of one server (SQL Server)
+A server that lets one session read several databases (`Capabilities.databases`)
+names the database in each request that touches a table: `database` next to
+`owner` (the schema) and the table. Kilat sends it only for such an
+extension and only when it has one, so older extensions never see the field
+and an absent or empty `database` means the session's own database. For
+these extensions `list_schemas` answers with the databases the login can
+open, and `list_objects` takes a database as its `owner` and answers with the
+objects of every schema in it (each object's own `owner` is its schema).
+`count_table` exists for them; Kilat counts other engines with `query`.
+
+A paged table fetch reports the key columns it ordered by in the closing
+`result` as `order_by` (a list of names, omitted when empty). Kilat builds
+its SQL preview from it, so the preview and "Open in SQL editor" show the same
+target and `ORDER BY` as the grid.
+
+The profile sent by `connect` also carries `access.trust_server_certificate`
+(a flag, false when absent): accept the server's TLS certificate without
+checking it.
 
 Row results: every `chunk` is `{"rows": [row, ...]}` (a row is a list of
 cells, see below), at most about 512 KB each. The closing `result` has the

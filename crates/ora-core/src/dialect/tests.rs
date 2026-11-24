@@ -258,3 +258,103 @@ fn mysql_gives_keyed_text_columns_a_length() {
     assert_eq!(MysqlDialect.key_type("VARCHAR(20)"), None);
     assert_eq!(PostgresDialect.key_type("TEXT"), None);
 }
+
+#[test]
+fn mssql_names_the_database_and_pages_with_an_order() {
+    let target = filter::TableTarget::new(Some("staging"), "dbo", "users");
+    let key = vec!["id".to_string(), "tenant]x".to_string()];
+    let q = filter::select_sql_in(
+        &MssqlDialect,
+        &target,
+        &TableFilter::default(),
+        TablePage::new(50, 50),
+        "NULL",
+        &key,
+    );
+    assert_eq!(
+        q.sql,
+        "SELECT * FROM [staging].[dbo].[users] ORDER BY [id], [tenant]]x] \
+         OFFSET 50 ROWS FETCH NEXT 50 ROWS ONLY"
+    );
+    // No key: still valid T-SQL, with no promised order.
+    let q = filter::select_sql_in(
+        &MssqlDialect,
+        &target,
+        &TableFilter::default(),
+        TablePage::new(0, 10),
+        "NULL",
+        &[],
+    );
+    assert!(q
+        .sql
+        .ends_with("ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY"));
+    // The count names the same database.
+    let c = filter::count_sql_in(&MssqlDialect, &target, &TableFilter::default());
+    assert_eq!(c.sql, "SELECT COUNT(*) FROM [staging].[dbo].[users]");
+    // Another database is another target.
+    assert_eq!(
+        MssqlDialect.table_ref_in(Some("dev"), "dbo", "users"),
+        "[dev].[dbo].[users]"
+    );
+    assert_eq!(
+        MssqlDialect.table_ref_in(None, "dbo", "users"),
+        "[dbo].[users]"
+    );
+}
+
+#[test]
+fn the_other_engines_ignore_a_database_and_keep_their_paging() {
+    for dialect in [
+        &OracleDialect as &dyn Dialect,
+        &SqliteDialect,
+        &PostgresDialect,
+        &MysqlDialect,
+    ] {
+        assert_eq!(
+            dialect.table_ref_in(Some("x"), "s", "t"),
+            dialect.table_ref("s", "t")
+        );
+        let (mut a, mut b) = (String::new(), String::new());
+        dialect.push_page(&mut a, TablePage::new(10, 5));
+        dialect.push_page_ordered(&mut b, TablePage::new(10, 5), &["id".to_string()]);
+        assert_eq!(a, b);
+        assert!(!dialect.capabilities().databases);
+    }
+}
+
+#[test]
+fn mssql_binds_become_at_p_and_brackets_are_left_alone() {
+    let r = rewrite_binds(
+        "SELECT [a:1], \"b\" FROM [t] WHERE x = :1 AND y LIKE :2 ESCAPE '\\'",
+        &["1".to_string(), "%z%".to_string()],
+        BindStyle::AtP,
+    )
+    .unwrap();
+    assert_eq!(
+        r.sql,
+        "SELECT [a:1], \"b\" FROM [t] WHERE x = @P1 AND y LIKE @P2 ESCAPE '\\'"
+    );
+    assert_eq!(r.binds, ["1", "%z%"]);
+}
+
+#[test]
+fn mssql_types_round_trip_through_the_neutral_ones() {
+    let d = MssqlDialect;
+    assert_eq!(d.canonical_type("bit"), CanonType::Boolean);
+    assert_eq!(
+        d.canonical_type("nvarchar(50)"),
+        CanonType::Text { len: Some(50) }
+    );
+    assert_eq!(d.canonical_type("nvarchar(MAX)"), CanonType::Clob);
+    assert_eq!(
+        d.canonical_type("decimal(12,2)"),
+        CanonType::Decimal {
+            precision: Some(12),
+            scale: Some(2)
+        }
+    );
+    assert_eq!(d.native_type(&CanonType::Boolean), "BIT");
+    assert_eq!(d.native_type(&CanonType::Timestamp), "DATETIME2");
+    assert_eq!(d.text_literal("nvarchar(10)", "o'k").unwrap(), "N'o''k'");
+    assert_eq!(d.bytes_literal(&[1, 255]).unwrap(), "0x01FF");
+}

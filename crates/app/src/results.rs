@@ -1723,6 +1723,7 @@ mod tests {
             byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
+            order_by: Vec::new(),
         }
     }
 
@@ -1787,6 +1788,7 @@ mod tests {
             byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
+            order_by: Vec::new(),
         };
         // A by type, B by values, C mixed, D all NULL.
         assert_eq!(numeric_columns(&result), vec![true, true, false, false]);
@@ -1861,6 +1863,7 @@ mod tests {
             byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
+            order_by: Vec::new(),
         };
         let mut delegate = ResultsDelegate::empty().with_row_numbers();
         delegate.set_result(two_columns());

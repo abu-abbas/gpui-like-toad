@@ -190,6 +190,7 @@ pub fn describe_to_result(defs: &[ColumnDef]) -> QueryResult {
         byte_limited: false,
         elapsed: Default::default(),
         fetch_time: None,
+        order_by: Vec::new(),
     }
 }
 
@@ -223,6 +224,7 @@ pub fn indexes_to_result(indexes: &[IndexDef]) -> QueryResult {
         byte_limited: false,
         elapsed: Default::default(),
         fetch_time: None,
+        order_by: Vec::new(),
     }
 }
 

@@ -453,7 +453,52 @@ pub fn select_sql_keyed(
     page: TablePage,
     row_id_expr: &str,
 ) -> BoundQuery {
-    let target = dialect.table_ref(owner, table);
+    select_sql_in(
+        dialect,
+        &TableTarget::new(None, owner, table),
+        filter,
+        page,
+        row_id_expr,
+        &[],
+    )
+}
+
+/// The table of a data tab: which database of the server (when the engine
+/// has several, see [`Dialect::table_ref_in`]), which schema, which object.
+/// The grid's fetch, the row count and the SQL preview all build their SQL
+/// from the same target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableTarget<'a> {
+    pub database: Option<&'a str>,
+    pub owner: &'a str,
+    pub table: &'a str,
+}
+
+impl<'a> TableTarget<'a> {
+    pub fn new(database: Option<&'a str>, owner: &'a str, table: &'a str) -> Self {
+        TableTarget {
+            database,
+            owner,
+            table,
+        }
+    }
+
+    fn sql(&self, dialect: &dyn Dialect) -> String {
+        dialect.table_ref_in(self.database, self.owner, self.table)
+    }
+}
+
+/// [`select_sql_keyed`] for a table of `target`'s database, ordered by
+/// `order_by` (key columns) on engines that need an order to page.
+pub fn select_sql_in(
+    dialect: &dyn Dialect,
+    target: &TableTarget,
+    filter: &TableFilter,
+    page: TablePage,
+    row_id_expr: &str,
+    order_by: &[String],
+) -> BoundQuery {
+    let target = target.sql(dialect);
     let mut sql = if page.rowid {
         format!("SELECT {row_id_expr} AS \"{ROWID_COLUMN}\", t.* FROM {target} t")
     } else {
@@ -465,7 +510,7 @@ pub fn select_sql_keyed(
         sql.push_str(&clause);
         binds = b;
     }
-    dialect.push_page(&mut sql, page);
+    dialect.push_page_ordered(&mut sql, page, order_by);
     BoundQuery { sql, binds }
 }
 
@@ -477,7 +522,16 @@ pub fn count_sql(
     table: &str,
     filter: &TableFilter,
 ) -> BoundQuery {
-    let mut sql = format!("SELECT COUNT(*) FROM {}", dialect.table_ref(owner, table));
+    count_sql_in(dialect, &TableTarget::new(None, owner, table), filter)
+}
+
+/// [`count_sql`] for a table of `target`'s database.
+pub fn count_sql_in(
+    dialect: &dyn Dialect,
+    target: &TableTarget,
+    filter: &TableFilter,
+) -> BoundQuery {
+    let mut sql = format!("SELECT COUNT(*) FROM {}", target.sql(dialect));
     let mut binds = Vec::new();
     if let Some((clause, b)) = filter.where_clause() {
         sql.push_str(" WHERE ");

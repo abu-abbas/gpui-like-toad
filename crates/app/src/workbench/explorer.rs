@@ -35,7 +35,12 @@ impl Workbench {
         } else {
             None
         };
-        let label = current.clone().unwrap_or_else(|| "(schema)".to_string());
+        let placeholder = if self.active_kind().capabilities().databases {
+            "(database)"
+        } else {
+            "(schema)"
+        };
+        let label = current.clone().unwrap_or_else(|| placeholder.to_string());
         let button = if id == "schema-select" {
             control(id, theme).w_full().child(
                 div()
@@ -129,9 +134,11 @@ impl Workbench {
                 menu
             });
 
+        let database = self.conn.database();
         let visible: Vec<ObjectRef> = schema::objects_in(&self.conn.objects, current_category, "")
             .into_iter()
             .map(|o| ObjectRef {
+                database: database.clone(),
                 owner: o.owner.clone(),
                 name: o.name.clone(),
                 kind: o.kind.clone(),
@@ -139,7 +146,43 @@ impl Workbench {
                 detail: o.detail.clone(),
             })
             .collect();
-        let list = if visible.is_empty() {
+        // A server with several databases lists the chosen one grouped by
+        // schema (one open group when there is only `dbo`); every row names
+        // its schema through its group.
+        let grouped = caps.databases;
+        let mut visible = visible;
+        if grouped {
+            visible.sort_by(|a, b| a.owner.cmp(&b.owner).then_with(|| a.name.cmp(&b.name)));
+        }
+        let rows: Vec<ExplorerRow> = if grouped {
+            let conn_id = self.conn.id;
+            let mut rows = Vec::new();
+            let mut open = true;
+            let mut last: Option<String> = None;
+            for object in visible {
+                if last.as_deref() != Some(object.owner.as_str()) {
+                    let count = rows_in_schema(&object.owner, &self.conn.objects, current_category);
+                    open = !self.collapsed_schemas.contains(&(
+                        conn_id,
+                        database.clone().unwrap_or_default(),
+                        object.owner.clone(),
+                    ));
+                    rows.push(ExplorerRow::Header {
+                        schema: object.owner.clone(),
+                        count,
+                        open,
+                    });
+                    last = Some(object.owner.clone());
+                }
+                if open {
+                    rows.push(ExplorerRow::Object(object));
+                }
+            }
+            rows
+        } else {
+            visible.into_iter().map(ExplorerRow::Object).collect()
+        };
+        let list = if rows.is_empty() {
             let loading = self.conn.busy
                 && matches!(
                     self.conn.pending_op,
@@ -159,7 +202,7 @@ impl Workbench {
                 })
                 .into_any_element()
         } else {
-            let count = visible.len();
+            let count = rows.len();
             let selected = self.conn.selected_object.clone();
             let reloading =
                 self.conn.busy && matches!(self.conn.pending_op, Some(PendingOp::ListObjects));
@@ -175,11 +218,19 @@ impl Workbench {
                         count,
                         cx.processor(move |_this, range: std::ops::Range<usize>, _window, cx| {
                             range
-                                .map(|ix| {
-                                    let object = visible[ix].clone();
-                                    let is_selected =
-                                        selected.as_deref() == Some(object.name.as_str());
-                                    render_object_row(ix, object, is_selected, caps, &theme, cx)
+                                .map(|ix| match rows[ix].clone() {
+                                    ExplorerRow::Object(object) => {
+                                        let is_selected =
+                                            selected.as_deref() == Some(object.name.as_str());
+                                        render_object_row(ix, object, is_selected, caps, &theme, cx)
+                                            .into_any_element()
+                                    }
+                                    ExplorerRow::Header {
+                                        schema,
+                                        count,
+                                        open,
+                                    } => render_schema_header(ix, schema, count, open, &theme, cx)
+                                        .into_any_element(),
                                 })
                                 .collect::<Vec<_>>()
                         }),
@@ -229,7 +280,9 @@ impl Workbench {
                             .child(category_button),
                     )
                     .when(
-                        current_category == ObjectCategory::Tables && self.conn.session.is_some(),
+                        current_category == ObjectCategory::Tables
+                            && self.conn.session.is_some()
+                            && !caps.databases,
                         |row| {
                             row.child(
                                 control("explorer-new-table", theme)
@@ -386,6 +439,82 @@ fn render_object_row(
         .context_menu(move |menu, _, _| object_menu(menu, &view, &object, caps))
 }
 
+/// One line of the explorer's list.
+#[derive(Clone)]
+enum ExplorerRow {
+    Object(ObjectRef),
+    /// A schema group of a database's objects.
+    Header {
+        schema: String,
+        count: usize,
+        open: bool,
+    },
+}
+
+/// Objects of `schema` in `category`, for the group header.
+fn rows_in_schema(
+    schema: &str,
+    objects: &[SchemaObject],
+    category: schema::ObjectCategory,
+) -> usize {
+    objects
+        .iter()
+        .filter(|o| o.owner == schema && category.contains(&o.kind))
+        .count()
+}
+
+/// The header of a schema group: its name and object count; clicking it
+/// folds or opens the group.
+fn render_schema_header(
+    ix: usize,
+    schema: String,
+    count: usize,
+    open: bool,
+    theme: &gpui_kit::component::Theme,
+    cx: &mut Context<Workbench>,
+) -> impl IntoElement {
+    let toggled = schema.clone();
+    div()
+        .id(("explorer-schema", ix))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(SPACE_2))
+        .h(px(TREE_ROW_HEIGHT))
+        .px(px(SPACE_2))
+        .rounded(px(RADIUS_SM))
+        .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+        .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
+        .text_color(theme.muted_foreground)
+        .hover(|this| this.bg(theme.secondary))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let key = (
+                this.conn.id,
+                this.conn.database().unwrap_or_default(),
+                toggled.clone(),
+            );
+            if !this.collapsed_schemas.remove(&key) {
+                this.collapsed_schemas.insert(key);
+            }
+            cx.notify();
+        }))
+        .child(icon(
+            if open {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            },
+            14.,
+            theme.muted_foreground,
+        ))
+        .child(div().truncate().child(schema))
+        .child(
+            div()
+                .text_size(crate::theme::ui_size(theme, FONT_CAPTION))
+                .child(count.to_string()),
+        )
+}
+
 /// Purge entries that act on the whole recycle bin, shared by the row menu
 /// and the category toolbar.
 fn purge_all_items(menu: PopupMenu, view: &Entity<Workbench>) -> PopupMenu {
@@ -477,19 +606,84 @@ fn object_menu(
                     view.update(cx, |this, cx| f(this, object, window, cx));
                 })
         };
+    // A server with several databases: what works on the table in its own
+    // database. Changes (drop, rename, import, transfer) are not offered
+    // yet, so none can land in the wrong database.
+    if caps.databases {
+        return menu
+            .min_w(px(220.))
+            .item(item(
+                "Open Data",
+                IconName::Table,
+                has_data,
+                |this, o, window, cx| {
+                    this.open_table_data(o.database.as_deref(), &o.owner, &o.name, window, cx)
+                },
+            ))
+            .item(item(
+                "Describe",
+                IconName::Columns3,
+                has_data,
+                |this, o, window, cx| {
+                    this.open_table_data_in(
+                        o.database.as_deref(),
+                        &o.owner,
+                        &o.name,
+                        DataView::Structure,
+                        window,
+                        cx,
+                    )
+                },
+            ))
+            .item(item(
+                "View Script",
+                IconName::FileCode,
+                true,
+                |this, o, _, cx| this.view_script(o, cx),
+            ))
+            .separator()
+            .item(item(
+                "Export Data (CSV)",
+                IconName::Download,
+                has_data,
+                |this, o, _, cx| this.export_table(o, ExportFormat::Csv, cx),
+            ))
+            .item(item(
+                "Export Data (XLSX)",
+                IconName::FileSpreadsheet,
+                has_data,
+                |this, o, _, cx| this.export_table(o, ExportFormat::Xlsx, cx),
+            ))
+            .separator()
+            .item(item(
+                "Refresh",
+                IconName::RefreshCw,
+                true,
+                |this, _, _, cx| this.load_objects(cx),
+            ));
+    }
     menu.min_w(px(220.))
         .item(item(
             "Open Data",
             IconName::Table,
             has_data,
-            |this, o, window, cx| this.open_table_data(&o.owner, &o.name, window, cx),
+            |this, o, window, cx| {
+                this.open_table_data(o.database.as_deref(), &o.owner, &o.name, window, cx)
+            },
         ))
         .item(item(
             "Describe",
             IconName::Columns3,
             has_data,
             |this, o, window, cx| {
-                this.open_table_data_in(&o.owner, &o.name, DataView::Structure, window, cx)
+                this.open_table_data_in(
+                    o.database.as_deref(),
+                    &o.owner,
+                    &o.name,
+                    DataView::Structure,
+                    window,
+                    cx,
+                )
             },
         ))
         .item(item(
@@ -771,7 +965,13 @@ impl Workbench {
         let double_click = matches!(event, ClickEvent::Mouse(m) if m.down.click_count >= 2);
         if double_click && object.kind != ObjectKind::RecycleBin {
             if schema::has_data(&object.kind) {
-                self.open_table_data(&object.owner, &object.name, window, cx);
+                self.open_table_data(
+                    object.database.as_deref(),
+                    &object.owner,
+                    &object.name,
+                    window,
+                    cx,
+                );
             } else {
                 self.view_script(object, cx);
             }
@@ -783,22 +983,31 @@ impl Workbench {
     /// capped `SELECT *` there.
     pub(super) fn open_table_data(
         &mut self,
+        database: Option<&str>,
         owner: &str,
         name: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_table_data_in(owner, name, DataView::Data, window, cx);
+        self.open_table_data_in(database, owner, name, DataView::Data, window, cx);
     }
 
-    /// Index of the data tab already showing `owner.name` on connection
-    /// `conn_id`; tabs of other connections are never matched.
-    pub(super) fn find_data_tab(&self, conn_id: u64, owner: &str, name: &str) -> Option<usize> {
+    /// Index of the data tab already showing `database.owner.name` on
+    /// connection `conn_id`; tabs of other connections, other databases and
+    /// other schemas are never matched. A tab opened without a database
+    /// (every engine but SQL Server) matches only a request without one.
+    pub(super) fn find_data_tab(
+        &self,
+        conn_id: u64,
+        database: Option<&str>,
+        owner: &str,
+        name: &str,
+    ) -> Option<usize> {
         self.tabs.iter().position(|t| {
             t.conn == Some(conn_id)
-                && t.data
-                    .as_ref()
-                    .is_some_and(|d| d.owner == owner && d.name == name)
+                && t.data.as_ref().is_some_and(|d| {
+                    d.database.as_deref() == database && d.owner == owner && d.name == name
+                })
         })
     }
 
@@ -806,6 +1015,7 @@ impl Workbench {
     /// the Structure view; the rows load when Data is first shown).
     fn open_table_data_in(
         &mut self,
+        database: Option<&str>,
         owner: &str,
         name: &str,
         start_view: DataView,
@@ -817,7 +1027,7 @@ impl Workbench {
         }
         // Same connection + schema + table already open: just show it.
         if start_view == DataView::Data {
-            if let Some(ix) = self.find_data_tab(self.conn.id, owner, name) {
+            if let Some(ix) = self.find_data_tab(self.conn.id, database, owner, name) {
                 self.activate_tab(ix, cx);
                 return;
             }
@@ -836,8 +1046,8 @@ impl Workbench {
         self.add_tab(window, cx);
         let view = cx.entity().downgrade();
         let editable = kind == ObjectKind::Table && self.active_kind().capabilities().row_edit;
-        let table_name = self.active_dialect().table_ref(owner, name);
-        let data = DataTab::new(owner, name, kind, window, cx);
+        let table_name = self.active_dialect().table_ref_in(database, owner, name);
+        let data = DataTab::new(database.map(str::to_string), owner, name, kind, window, cx);
         let table_state = self.active_tab().table_state.clone();
         let observe = cx.observe(&table_state, |_, _, cx| cx.notify());
         let mut data = data;
@@ -848,7 +1058,10 @@ impl Workbench {
         }
         data._grid_observe = Some(observe);
         let tab = self.active_tab_mut();
-        tab.title = format!("{owner}.{name}");
+        tab.title = match database {
+            Some(database) => format!("{database}.{owner}.{name}"),
+            None => format!("{owner}.{name}"),
+        };
         tab.kind = TabKind::Data;
         tab.data = Some(data);
         let edit_view = view.clone();
@@ -926,6 +1139,7 @@ impl Workbench {
         self.conn.status = format!("Loading DDL for {}.{}…", object.owner, object.name);
         self.spawn_db(
             Job::Ddl {
+                database: object.database.clone(),
                 owner: object.owner.clone(),
                 name: object.name.clone(),
                 kind: object.kind,
@@ -980,6 +1194,7 @@ impl Workbench {
                 this.spawn_db_for(
                     conn_id,
                     Job::ExportTable {
+                        database: object.database.clone(),
                         owner: object.owner.clone(),
                         name: object.name.clone(),
                         path,

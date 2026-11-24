@@ -219,6 +219,7 @@ impl RowCollector {
             byte_limited: self.byte_limited,
             elapsed: self.started.elapsed(),
             fetch_time: self.fetching.map(|f| f.elapsed()),
+            order_by: Vec::new(),
         }
     }
 

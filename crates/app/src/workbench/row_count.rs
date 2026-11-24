@@ -161,8 +161,10 @@ impl Workbench {
         let tab_id = tab.id;
         let conn_id = self.conn.id;
         let generation = data.count.gen;
-        let (owner, name) = (data.owner.clone(), data.name.clone());
+        let (database, owner, name) =
+            (data.database.clone(), data.owner.clone(), data.name.clone());
         let rx = db.request(Job::CountTable {
+            database,
             owner,
             name,
             filter: data.applied.clone(),

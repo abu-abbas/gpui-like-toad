@@ -57,6 +57,7 @@ impl TransferIo for WorkerIo {
 
     fn describe(&mut self, schema: &str, table: &str) -> Result<Vec<ColumnDef>, DbError> {
         match self.call(Job::Describe {
+            database: None,
             owner: schema.to_string(),
             name: table.to_string(),
         })? {
@@ -67,6 +68,7 @@ impl TransferIo for WorkerIo {
 
     fn indexes(&mut self, schema: &str, table: &str) -> Result<Vec<IndexDef>, DbError> {
         match self.call(Job::Indexes {
+            database: None,
             owner: schema.to_string(),
             name: table.to_string(),
         })? {
