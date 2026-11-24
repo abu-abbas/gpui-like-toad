@@ -467,14 +467,29 @@ impl Workbench {
                             cx.listener(|this, _, window, cx| this.format_editor(window, cx)),
                         ),
                 )
+                .when(self.dryrun_available(), |bar| {
+                    bar.child(
+                        Button::new("dryrun")
+                            .small()
+                            .ghost()
+                            .icon(IconName::Undo2)
+                            .loading(busy)
+                            .tooltip("Dry-run: run the statement without committing")
+                            .on_click(cx.listener(|this, _, _, cx| this.open_dryrun(cx))),
+                    )
+                })
                 .child(
                     Button::new("run")
                         .small()
                         .primary()
                         .icon(IconName::Play)
                         .loading(busy)
-                        .tooltip_with_action("Run", &RunQuery, Some("Workbench"))
-                        .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
+                        .tooltip_with_action(
+                            "Run selection or current statement",
+                            &RunCurrent,
+                            Some("Workbench"),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.run_current(cx))),
                 );
         }
 
@@ -498,14 +513,32 @@ impl Workbench {
                         .tooltip("Explain plan")
                         .on_click(cx.listener(|this, _, _, cx| this.explain(cx))),
                 )
+                .children(
+                    self.active_dialect()
+                        .capabilities()
+                        .explain_analyze
+                        .then(|| {
+                            Button::new("explain-analyze")
+                                .small()
+                                .ghost()
+                                .icon(IconName::Activity)
+                                .disabled(busy)
+                                .tooltip("Explain analyze (runs the statement, then rolls it back)")
+                                .on_click(cx.listener(|this, _, _, cx| this.explain_analyze(cx)))
+                        }),
+                )
                 .child(
                     Button::new("run-current")
                         .small()
                         .ghost()
                         .icon(IconName::ListEnd)
                         .disabled(busy)
-                        .tooltip("Run selection or current statement")
-                        .on_click(cx.listener(|this, _, _, cx| this.run_current(cx))),
+                        .tooltip_with_action(
+                            "Run as script (all statements, or the selection)",
+                            &RunQuery,
+                            Some("Workbench"),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.run(cx))),
                 );
         }
         bar.child(

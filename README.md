@@ -55,7 +55,7 @@ The explorer works like Toad (pick a schema, then browse objects by type), the c
 
 - Syntax highlighting, line numbers, folding and multiple tabs. **Beautify SQL**, Save SQL.
 - **Autocomplete** as you type (or Ctrl+Space): tables after `FROM`/`JOIN`, columns after `alias.`, objects after `schema.`, keywords and functions.
-- **Run** (Ctrl/Cmd+Enter or F5) and **Run Current** (the selection or the statement under the cursor). Results come back in a grid of up to 1,000 rows; export them as CSV or XLSX.
+- Toad-style run keys: **Ctrl/Cmd+Enter** or **F9** runs the selection or the statement under the cursor (statements end at `;`, a blank line or a `/` line; PL/SQL blocks stay whole), **F5** runs the whole editor (or the selection) as a script, statement by statement. Results come back in a grid of up to 1,000 rows; export them as CSV or XLSX.
 - **Explain Plan** as a tree plus the `DBMS_XPLAN` text (SQLite: `EXPLAIN QUERY PLAN`).
 - Explicit **Commit** and **Rollback**; there is no auto-commit. Query **History** with favourites.
 

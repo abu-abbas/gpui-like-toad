@@ -23,6 +23,7 @@ impl Dialect for SqliteDialect {
             transactional_ddl: true,
             row_edit: true,
             explain_text: false,
+            explain_analyze: false,
             truncate: false,
             special_tables: false,
             programs: false,

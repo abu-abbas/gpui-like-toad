@@ -356,3 +356,62 @@ fn tls_is_used_when_the_server_offers_it() {
     eprintln!("cipher: {cipher:?}");
     assert!(r.rows.len() == 1);
 }
+
+#[test]
+fn explain_analyze_runs_and_always_rolls_back() {
+    let Some(mut db) = connect() else {
+        return;
+    };
+    for sql in [
+        "DROP TABLE IF EXISTS kt_ea",
+        "CREATE TABLE kt_ea (id int PRIMARY KEY, v varchar(10)) ENGINE=InnoDB",
+        "INSERT INTO kt_ea VALUES (1, 'a'), (2, 'b')",
+    ] {
+        db.execute(sql).unwrap();
+    }
+    db.commit().unwrap();
+    let count = |db: &mut MysqlClient| {
+        db.query("SELECT count(*) FROM kt_ea", FetchLimits::rows(5))
+            .unwrap()
+            .rows[0][0]
+            .display()
+    };
+
+    // A read shows measured times (MariaDB uses ANALYZE, a table).
+    let plan = db.explain_analyze("SELECT * FROM kt_ea;").unwrap();
+    assert!(
+        plan.iter()
+            .any(|l| l.contains("actual time") || l.contains("r_rows")),
+        "{plan:?}"
+    );
+
+    // A multi-table DELETE executes and is undone.
+    let _ = db.explain_analyze("DELETE a FROM kt_ea a JOIN kt_ea b ON a.id = b.id");
+    assert_eq!(count(&mut db), "2");
+
+    // Inside the caller's transaction: its own changes survive.
+    db.execute("INSERT INTO kt_ea VALUES (3, 'c')").unwrap();
+    let _ = db.explain_analyze("DELETE a FROM kt_ea a JOIN kt_ea b ON a.id = b.id");
+    assert_eq!(count(&mut db), "3");
+    db.rollback().unwrap();
+    assert_eq!(count(&mut db), "2");
+
+    for sql in [
+        "SELECT 1; DELETE FROM kt_ea",
+        "DROP TABLE kt_ea",
+        "TRUNCATE kt_ea",
+        "",
+    ] {
+        assert!(db.explain_analyze(sql).is_err(), "{sql}");
+    }
+    assert_eq!(count(&mut db), "2");
+
+    assert!(db.explain_analyze("SELECT * FROM missing_table").is_err());
+    db.execute("INSERT INTO kt_ea VALUES (4, 'd')").unwrap();
+    assert!(db.explain_analyze("SELECT * FROM missing_table").is_err());
+    assert_eq!(count(&mut db), "3");
+    db.rollback().unwrap();
+
+    db.execute("DROP TABLE kt_ea").unwrap();
+    db.commit().unwrap();
+}

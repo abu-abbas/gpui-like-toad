@@ -117,12 +117,37 @@ impl Workbench {
             self.load_data_view(cx);
             return;
         }
-        let sql = self.editor_text(cx);
-        self.run_sql(sql, cx);
+        // F5: the selection if there is one, else the whole editor, run as
+        // a script (one statement after the other).
+        let sql = {
+            let state = self.active_tab().editor.read(cx);
+            let range = state.selected_range();
+            let text = state.value().to_string();
+            if range.start < range.end && range.end <= text.len() {
+                text[range].to_string()
+            } else {
+                text
+            }
+        };
+        let statements = ora_core::sql::script_statements(&sql);
+        if statements.len() < 2 {
+            return self.run_sql(sql, cx);
+        }
+        self.conn.status = "Running script…".to_string();
+        self.conn.pending_sql = Some(sql);
+        self.active_tab_mut().statement_results.clear();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.conn.cancel_script = Some(cancelled.clone());
+        let job = Job::Script {
+            statements,
+            cancelled,
+        };
+        self.spawn_db(job, PendingOp::Run, cx);
     }
 
-    /// "Run Current": the selection if there is one, else the statement
-    /// the cursor sits in (statements end at `;`).
+    /// "Run Current" (Ctrl/Cmd+Enter, F9): the selection if there is one,
+    /// else the statement the cursor sits in (`;`, blank line or `/` line;
+    /// PL/SQL blocks stay whole).
     pub(super) fn run_current(&mut self, cx: &mut Context<Self>) {
         if self.conn.busy || self.show_empty_workspace || self.conn.session.is_none() {
             return self.run(cx);
@@ -130,21 +155,23 @@ impl Workbench {
         if self.active_tab().data.is_some() {
             return self.run(cx);
         }
-        let editor = self.active_tab().editor.clone();
-        let sql = {
-            let state = editor.read(cx);
-            let range = state.selected_range();
-            let text = state.value().to_string();
-            if range.start < range.end && range.end <= text.len() {
-                text[range].to_string()
-            } else {
-                statement_at(&text, state.cursor())
-            }
-        };
+        let sql = self.current_statement(cx);
         self.run_sql(sql, cx);
     }
 
-    fn run_sql(&mut self, sql: String, cx: &mut Context<Self>) {
+    /// The selection if there is one, else the statement the cursor sits in.
+    pub(super) fn current_statement(&self, cx: &App) -> String {
+        let state = self.active_tab().editor.read(cx);
+        let range = state.selected_range();
+        let text = state.value().to_string();
+        if range.start < range.end && range.end <= text.len() {
+            text[range].to_string()
+        } else {
+            statement_at(&text, state.cursor())
+        }
+    }
+
+    pub(super) fn run_sql(&mut self, sql: String, cx: &mut Context<Self>) {
         if clean_statement(&sql).is_empty() {
             self.push_message("The editor is empty.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;
@@ -186,6 +213,99 @@ impl Workbench {
         }
         self.conn.status = "Generating explain plan…".to_string();
         self.spawn_db(Job::Explain { sql }, PendingOp::Explain, cx);
+    }
+
+    /// EXPLAIN ANALYZE runs the statement. A plain SELECT gets a one-time
+    /// hint; anything else is refused on a Read Only connection and needs an
+    /// explicit confirmation (plus the production prompt on PROD).
+    pub(super) fn explain_analyze(&mut self, cx: &mut Context<Self>) {
+        if self.conn.busy || self.show_empty_workspace {
+            return;
+        }
+        if self.conn.session.is_none() {
+            self.push_message("Connect to a database first.".to_string());
+            self.active_tab_mut().results_tab = ResultsTab::Messages;
+            cx.notify();
+            return;
+        }
+        if !self.active_dialect().capabilities().explain_analyze {
+            self.push_message("EXPLAIN ANALYZE is not available for this database.".to_string());
+            self.active_tab_mut().results_tab = ResultsTab::Messages;
+            cx.notify();
+            return;
+        }
+        let sql = self.editor_text(cx);
+        if clean_statement(&sql).is_empty() {
+            self.push_message("The editor is empty.".to_string());
+            self.active_tab_mut().results_tab = ResultsTab::Messages;
+            cx.notify();
+            return;
+        }
+        let read = ora_core::sql::is_read_query(&sql);
+        if !read && self.conn.access().read_only {
+            self.push_message(
+                "EXPLAIN ANALYZE runs the statement, so it is blocked on a Read Only connection \
+                 unless the statement is a plain SELECT."
+                    .to_string(),
+            );
+            self.active_tab_mut().results_tab = ResultsTab::Messages;
+            cx.notify();
+            return;
+        }
+        let (title, text) = if !read {
+            (
+                "Run EXPLAIN ANALYZE?",
+                "EXPLAIN ANALYZE really EXECUTES this statement to measure it. \
+                 Kilat runs it inside a transaction that is always rolled back, so its changes are \
+                 undone, but the statement does the work and takes locks while it runs, and \
+                 sequences, non-transactional tables and functions with outside effects are not \
+                 undone. Do not use it on data you cannot afford to touch.",
+            )
+        } else if !self.explain_analyze_hinted {
+            (
+                "Run EXPLAIN ANALYZE?",
+                "EXPLAIN ANALYZE executes the query to measure it, so it takes as long as the \
+                 query itself. A plain SELECT changes nothing, but a function called inside it \
+                 can still have side effects, and Kilat cannot rule that out. You will not be \
+                 asked again for plain SELECTs this session.",
+            )
+        } else {
+            return self.start_explain_analyze(sql, cx);
+        };
+        let handle = self.window_handle;
+        let warning = text.to_string();
+        cx.spawn(async move |view, cx| {
+            let prompt = cx.update_window(handle, |_, window, cx| {
+                window.prompt(
+                    gpui_kit::PromptLevel::Warning,
+                    title,
+                    Some(&warning),
+                    &["Cancel", "Run and roll back"],
+                    cx,
+                )
+            });
+            let confirmed = match prompt {
+                Ok(prompt) => prompt.await == Ok(1),
+                Err(_) => false,
+            };
+            if confirmed {
+                let _ = view.update(cx, |this, cx| {
+                    if read {
+                        this.explain_analyze_hinted = true;
+                    }
+                    this.start_explain_analyze(sql, cx)
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn start_explain_analyze(&mut self, sql: String, cx: &mut Context<Self>) {
+        if self.conn.busy || self.conn.session.is_none() {
+            return;
+        }
+        self.conn.status = "Running EXPLAIN ANALYZE…".to_string();
+        self.spawn_db(Job::ExplainAnalyze { sql }, PendingOp::Explain, cx);
     }
 
     pub(super) fn format_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {

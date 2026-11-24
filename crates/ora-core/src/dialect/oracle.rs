@@ -34,6 +34,7 @@ impl Dialect for OracleDialect {
             transactional_ddl: false,
             row_edit: true,
             explain_text: true,
+            explain_analyze: false,
             truncate: true,
             special_tables: true,
             programs: true,

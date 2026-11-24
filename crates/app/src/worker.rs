@@ -106,6 +106,13 @@ pub enum Job {
         statements: Vec<String>,
         cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     },
+    /// F5: the editor (or selection) as a script, statement by statement,
+    /// SELECTs through `query()` and the rest through `execute()`. Stops at
+    /// the first error; what ran before it is kept.
+    Script {
+        statements: Vec<String>,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    },
     QueryTable {
         owner: String,
         name: String,
@@ -221,6 +228,10 @@ pub enum Job {
     Explain {
         sql: String,
     },
+    /// EXPLAIN ANALYZE: runs the statement, always rolled back.
+    ExplainAnalyze {
+        sql: String,
+    },
     /// Objects and columns of one schema, for the editor's autocomplete.
     Catalog {
         owner: String,
@@ -234,6 +245,9 @@ impl Job {
         use ora_core::sql::is_read_query;
         match self {
             Self::Run { sql } if !is_read_query(sql) => Some("Execute SQL"),
+            Self::Script { statements, .. } if !statements.iter().all(|sql| is_read_query(sql)) => {
+                Some("Run script")
+            }
             Self::SelectScript { statements, .. }
                 if !statements.iter().all(|sql| is_read_query(sql)) =>
             {
@@ -243,6 +257,8 @@ impl Job {
             Self::ImportCsv { .. } => Some("Import CSV rows"),
             Self::TransferExec { .. } => Some("Data Transfer"),
             Self::Explain { .. } => Some("Write to the Oracle plan table"),
+            // It runs the statement; only a plain SELECT is harmless enough.
+            Self::ExplainAnalyze { sql } if !is_read_query(sql) => Some("EXPLAIN ANALYZE"),
             Self::RefreshMaterializedView { .. } => Some("Refresh materialized view"),
             // Calling a function can write too, so it counts as a change.
             Self::ObjectOp(op) => Some(match op {
@@ -267,8 +283,21 @@ pub struct StatementResult {
     pub outcome: Result<std::sync::Arc<QueryResult>, String>,
 }
 
+/// What one statement of a script (F5) did.
+pub enum StepOk {
+    Rows(std::sync::Arc<QueryResult>),
+    Affected(u64),
+}
+
+pub struct ScriptStep {
+    pub sql: String,
+    pub started: String,
+    pub outcome: Result<StepOk, String>,
+}
+
 pub enum Response {
     ScriptDone(Vec<StatementResult>),
+    ScriptRan(Vec<ScriptStep>),
     Connected(DbInfo),
     Tested(Result<DbInfo, String>),
     QueryDone(QueryResult),
@@ -431,6 +460,7 @@ fn handle_live_job(
                 error: Some(error), ..
             } => Some(error),
             Response::ScriptDone(results) => results.last().and_then(|r| r.outcome.as_ref().err()),
+            Response::ScriptRan(steps) => steps.last().and_then(|s| s.outcome.as_ref().err()),
             _ => None,
         };
         if let (Some(active), Some(error)) = (client.as_ref(), operation_error) {
@@ -616,6 +646,48 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                 }
             }
             Response::ScriptDone(results)
+        }
+        Job::Script {
+            statements,
+            cancelled,
+        } => {
+            let Some(client) = client.as_mut() else {
+                return Response::Failed("not connected".into());
+            };
+            let mut steps = Vec::new();
+            let mut budget = SCRIPT_MAX_RESULT_BYTES;
+            for sql in statements {
+                if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let started = chrono::Local::now()
+                    .format("%Y-%m-%d %H:%M:%S %:z")
+                    .to_string();
+                let outcome = match statement_kind(&sql) {
+                    ora_core::sql::StatementKind::Select => client
+                        .query(&sql, script_limits(budget))
+                        .map(|result| {
+                            budget = budget.saturating_sub(result.heap_bytes());
+                            StepOk::Rows(std::sync::Arc::new(result))
+                        })
+                        .map_err(|e| e.to_string()),
+                    ora_core::sql::StatementKind::Empty => continue,
+                    _ => client
+                        .execute(&sql)
+                        .map(StepOk::Affected)
+                        .map_err(|e| e.to_string()),
+                };
+                let failed = outcome.is_err();
+                steps.push(ScriptStep {
+                    sql,
+                    started,
+                    outcome,
+                });
+                if failed {
+                    break;
+                }
+            }
+            Response::ScriptRan(steps)
         }
         Job::Run { sql } => {
             let Some(client) = client.as_mut() else {
@@ -902,6 +974,21 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             },
             None => Response::Failed("not connected".to_string()),
         },
+        Job::ExplainAnalyze { sql } => match client.as_mut() {
+            Some(client) => match client.explain_analyze(&sql) {
+                Ok(mut lines) => {
+                    lines.insert(
+                        0,
+                        "EXPLAIN ANALYZE: the statement was executed, then rolled back."
+                            .to_string(),
+                    );
+                    lines.insert(1, String::new());
+                    Response::Plan(lines)
+                }
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
         Job::Explain { sql } => match client.as_mut() {
             Some(client) => {
                 // Prefer structured plan nodes (tree view) with the
@@ -1019,6 +1106,31 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn explain_analyze_is_guarded_unless_the_statement_is_a_plain_select() {
+        let plain = Job::ExplainAnalyze {
+            sql: "SELECT * FROM t".into(),
+        };
+        assert_eq!(plain.protected_operation(), None);
+        for sql in [
+            "DELETE FROM t",
+            "WITH x AS (SELECT 1) DELETE FROM t",
+            "SELECT f(1); DROP TABLE t",
+        ] {
+            let job = Job::ExplainAnalyze { sql: sql.into() };
+            assert_eq!(job.protected_operation(), Some("EXPLAIN ANALYZE"), "{sql}");
+            let mut client: Option<Box<dyn DbClient>> = None;
+            let mut access = ConnectionAccess {
+                read_only: true,
+                ..ConnectionAccess::default()
+            };
+            assert!(matches!(
+                handle_guarded_job(job, true, &mut client, &mut access),
+                Response::Failed(message) if message.contains("Read Only")
+            ));
+        }
+    }
+
     use super::*;
 
     fn demo() -> DemoClient {
@@ -1114,6 +1226,25 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].outcome.as_ref().unwrap().row_count(), 1);
         assert!(results[1].outcome.is_err());
+    }
+
+    #[test]
+    fn mixed_script_runs_in_order_and_stops_at_the_first_error() {
+        let mut client: Option<Box<dyn DbClient>> = Some(Box::new(demo()));
+        let job = |text: &str| Job::Script {
+            statements: ora_core::sql::script_statements(text),
+            cancelled: Default::default(),
+        };
+        let Response::ScriptRan(steps) = handle_job(
+            job("DELETE FROM departments;\nselect 1 from dual;\nselect * from missing;\nselect 1 from dual;"),
+            &mut client,
+        ) else {
+            panic!("expected script steps")
+        };
+        assert_eq!(steps.len(), 3);
+        assert!(matches!(steps[0].outcome, Ok(StepOk::Affected(1))));
+        assert!(matches!(steps[1].outcome, Ok(StepOk::Rows(_))));
+        assert!(steps[2].outcome.is_err());
     }
 
     #[test]

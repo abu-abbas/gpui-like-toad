@@ -23,7 +23,7 @@ def main(meta_path, version, release_dir, old_path, out_path):
     ext_id = meta["id"]
     assert re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", ext_id), f"bad id {ext_id!r}"
     assert re.fullmatch(r"\d+\.\d+\.\d+", version), f"bad version {version!r}"
-    assert meta["kind"] in ("database", "tool"), "kind must be database or tool"
+    assert meta["kind"] in ("database", "tool", "action"), "kind must be database, tool or action"
 
     prefix = f"kilat-ext-{ext_id}-{version}-"
     files = {}

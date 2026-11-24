@@ -436,6 +436,9 @@ impl Workbench {
             (Some(PendingOp::Run), Response::ScriptDone(results)) => {
                 self.on_script_done(cid, results, cx)
             }
+            (Some(PendingOp::Run), Response::ScriptRan(steps)) => {
+                self.on_script_ran(cid, steps, cx)
+            }
             (
                 Some(PendingOp::LoadCell),
                 Response::CellLoaded {
