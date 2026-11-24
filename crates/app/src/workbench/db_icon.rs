@@ -1,4 +1,4 @@
-//! Per-engine connection icons (Oracle pill, SQLite feather).
+//! Per-engine connection icons.
 //!
 //! To add an engine: drop `assets/db/<engine>.svg` (monochrome, `currentColor`)
 //! and add one arm to each `match` below.
@@ -44,11 +44,3 @@ pub(super) fn icon(kind: DbKind, connected: bool, theme: &Theme) -> Icon {
             theme.muted_foreground
         })
 }
-
-// Artwork for engines that are not supported yet. When `DbKind` gets
-// `Mysql` / `Postgres`, move these into the `match`es above (suggested tints:
-// MySQL teal ~190deg, PostgreSQL indigo ~225deg).
-#[allow(dead_code)]
-const MYSQL_SVG: &[u8] = include_bytes!("../../assets/db/mysql.svg");
-#[allow(dead_code)]
-const POSTGRES_SVG: &[u8] = include_bytes!("../../assets/db/postgres.svg");

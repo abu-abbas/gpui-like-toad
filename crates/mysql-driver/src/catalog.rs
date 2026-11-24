@@ -8,7 +8,7 @@ use ora_core::{
 };
 
 use crate::conv::{lit, quote};
-use crate::rowkey::KeyColumn;
+use crate::rowkey::{KeyColumn, RowKey};
 use crate::MysqlClient;
 
 type Row = Vec<Option<String>>;
@@ -365,12 +365,13 @@ fn index_script(db: &mut MysqlClient, schema: &str, name: &str) -> Result<Option
     }))
 }
 
-/// Primary key columns of a table, in key order (empty without one).
+/// The key of a table: its primary key, or else every column that can be
+/// compared exactly (not LOBs, floating point or bit fields).
 pub(crate) fn primary_key(
     db: &mut MysqlClient,
     schema: &str,
     table: &str,
-) -> Result<Vec<KeyColumn>, DbError> {
+) -> Result<RowKey, DbError> {
     let rows = db.text_rows(&format!(
         "SELECT c.column_name, c.data_type \
          FROM information_schema.key_column_usage k \
@@ -382,8 +383,32 @@ pub(crate) fn primary_key(
         lit(schema),
         lit(table)
     ))?;
-    Ok(rows
-        .iter()
-        .map(|r| KeyColumn::new(&col(r, 0), &col(r, 1)))
-        .collect())
+    if !rows.is_empty() {
+        return Ok(RowKey {
+            columns: rows
+                .iter()
+                .map(|r| KeyColumn::new(&col(r, 0), &col(r, 1)))
+                .collect(),
+            all_columns: false,
+        });
+    }
+    let rows = db.text_rows(&format!(
+        "SELECT column_name, data_type FROM information_schema.columns \
+         WHERE table_schema = {} AND table_name = {} \
+           AND data_type NOT IN ('tinyblob','blob','mediumblob','longblob','tinytext','text', \
+               'mediumtext','longtext','json','geometry','point','linestring','polygon', \
+               'multipoint','multilinestring','multipolygon','geometrycollection', \
+               'float','double','bit') \
+           AND (extra NOT LIKE '%GENERATED%' OR extra LIKE '%DEFAULT_GENERATED%') \
+         ORDER BY ordinal_position",
+        lit(schema),
+        lit(table)
+    ))?;
+    Ok(RowKey {
+        columns: rows
+            .iter()
+            .map(|r| KeyColumn::new(&col(r, 0), &col(r, 1)))
+            .collect(),
+        all_columns: true,
+    })
 }
