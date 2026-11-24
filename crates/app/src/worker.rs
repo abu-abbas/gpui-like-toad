@@ -112,6 +112,12 @@ pub enum Job {
         filter: TableFilter,
         page: TablePage,
     },
+    /// Total rows of a table under a filter (data tab "Rows x–y of N").
+    CountTable {
+        owner: String,
+        name: String,
+        filter: TableFilter,
+    },
     /// Data tab cell edits: one `UPDATE` per cell, in order, stopping at
     /// the first failure. Not committed.
     UpdateCells {
@@ -285,6 +291,8 @@ pub enum Response {
     },
     /// The CLOB starts asked for by [`Job::ClobPreviews`].
     ClobPreviews(Vec<ora_core::ClobPreview>),
+    /// The total asked for by [`Job::CountTable`].
+    RowCount(u64),
     /// The full value of one cell ("Load full value").
     CellLoaded {
         rowid: String,
@@ -635,8 +643,35 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             filter,
             page,
         } => match client.as_mut() {
-            Some(client) => match client.query_table(&owner, &name, &filter, page) {
-                Ok(result) => Response::QueryDone(result),
+            Some(client) => {
+                // One row more than the page: seeing it is how the page
+                // knows a next one exists (the drivers cap their fetch at
+                // the page size, so they could never say so themselves).
+                let wanted = page.limit;
+                let probe = TablePage {
+                    limit: wanted.saturating_add(1),
+                    ..page
+                };
+                match client.query_table(&owner, &name, &filter, probe) {
+                    Ok(mut result) => {
+                        if result.rows.len() > wanted {
+                            result.rows.truncate(wanted);
+                            result.truncated = true;
+                        }
+                        Response::QueryDone(result)
+                    }
+                    Err(err) => Response::Failed(err.to_string()),
+                }
+            }
+            None => Response::Failed("not connected".to_string()),
+        },
+        Job::CountTable {
+            owner,
+            name,
+            filter,
+        } => match client.as_mut() {
+            Some(client) => match client.count_table(&owner, &name, &filter) {
+                Ok(count) => Response::RowCount(count),
                 Err(err) => Response::Failed(err.to_string()),
             },
             None => Response::Failed("not connected".to_string()),
