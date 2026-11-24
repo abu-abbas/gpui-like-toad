@@ -313,8 +313,9 @@ impl Workbench {
             .is_some_and(|tab| tab.conn == Some(cid))
         {
             self.cell_editor = None;
+            self.inline_edit = None;
         }
-        self.clear_edit_marks_for(cid, cx);
+        self.clear_edit_marks_for(cid, false, cx);
         self.invalidate_connection_results_for(cid, cx);
         self.set_status_for(cid, "Connection lost. Reconnect to continue.".to_string());
         self.push_message_for(cid, format!("Connection lost ({connection}): {error}"));

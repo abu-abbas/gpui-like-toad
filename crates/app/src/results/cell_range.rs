@@ -303,4 +303,20 @@ mod tests {
         g.set_result(QueryResult::default());
         assert!(!g.has_cell_selection());
     }
+
+    #[test]
+    fn tab_and_enter_walk_the_editable_cells() {
+        let g = grid(2);
+        let at = |from: (usize, usize), key| g.neighbor_request(from, key).map(|r| r.pos);
+        // Columns shown: A (0), B (2), C (3); the ROWID column is hidden.
+        assert_eq!(at((0, 0), crate::results::CellKey::Next), Some((0, 2)));
+        assert_eq!(at((0, 3), crate::results::CellKey::Next), Some((1, 0)));
+        assert_eq!(at((1, 3), crate::results::CellKey::Next), None);
+        assert_eq!(at((1, 0), crate::results::CellKey::Prev), Some((0, 3)));
+        assert_eq!(at((0, 0), crate::results::CellKey::Prev), None);
+        assert_eq!(at((0, 2), crate::results::CellKey::Done), Some((1, 2)));
+        assert_eq!(at((1, 2), crate::results::CellKey::Done), None);
+        assert_eq!(at((1, 2), crate::results::CellKey::Up), Some((0, 2)));
+        assert_eq!(at((0, 2), crate::results::CellKey::Up), None);
+    }
 }
