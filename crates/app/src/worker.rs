@@ -114,6 +114,9 @@ pub enum Job {
         cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     },
     QueryTable {
+        /// The database of the server the table is in (SQL Server); `None`
+        /// for engines without that level.
+        database: Option<String>,
         owner: String,
         name: String,
         filter: TableFilter,
@@ -121,6 +124,9 @@ pub enum Job {
     },
     /// Total rows of a table under a filter (data tab "Rows x–y of N").
     CountTable {
+        /// The database of the server the table is in (SQL Server); `None`
+        /// for engines without that level.
+        database: Option<String>,
         owner: String,
         name: String,
         filter: TableFilter,
@@ -166,6 +172,7 @@ pub enum Job {
     },
     /// DDL script for the explorer's "View Script".
     Ddl {
+        database: Option<String>,
         owner: String,
         name: String,
         kind: ObjectKind,
@@ -175,6 +182,7 @@ pub enum Job {
     /// Explorer "Export Data": fetch the whole table (capped at
     /// [`ora_core::EXPORT_MAX_ROWS`]) and write it to `path`.
     ExportTable {
+        database: Option<String>,
         owner: String,
         name: String,
         path: PathBuf,
@@ -188,6 +196,9 @@ pub enum Job {
         path: PathBuf,
     },
     Describe {
+        /// The database of the server the table is in (SQL Server); `None`
+        /// for engines without that level.
+        database: Option<String>,
         owner: String,
         name: String,
     },
@@ -212,6 +223,9 @@ pub enum Job {
     },
     /// Indexes of one table, for the data tab's Index view.
     Indexes {
+        /// The database of the server the table is in (SQL Server); `None`
+        /// for engines without that level.
+        database: Option<String>,
         owner: String,
         name: String,
     },
@@ -516,7 +530,7 @@ fn new_client(kind: DbKind, demo: bool) -> Result<Box<dyn DbClient>, String> {
     }
     match kind {
         DbKind::Oracle => Ok(Box::new(ThinClient::new())),
-        DbKind::Postgres | DbKind::Mysql => match downloaded_extension(kind) {
+        DbKind::Postgres | DbKind::Mysql | DbKind::Mssql => match downloaded_extension(kind) {
             Some(client) => Ok(Box::new(client)),
             None => Err(format!(
                 "{} is an extension. Install it in Settings > Extensions, \
@@ -704,6 +718,7 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             }
         }
         Job::QueryTable {
+            database,
             owner,
             name,
             filter,
@@ -718,7 +733,7 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                     limit: wanted.saturating_add(1),
                     ..page
                 };
-                match client.query_table(&owner, &name, &filter, probe) {
+                match client.query_table_in(database.as_deref(), &owner, &name, &filter, probe) {
                     Ok(mut result) => {
                         if result.rows.len() > wanted {
                             result.rows.truncate(wanted);
@@ -732,14 +747,17 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             None => Response::Failed("not connected".to_string()),
         },
         Job::CountTable {
+            database,
             owner,
             name,
             filter,
         } => match client.as_mut() {
-            Some(client) => match client.count_table(&owner, &name, &filter) {
-                Ok(count) => Response::RowCount(count),
-                Err(err) => Response::Failed(err.to_string()),
-            },
+            Some(client) => {
+                match client.count_table_in(database.as_deref(), &owner, &name, &filter) {
+                    Ok(count) => Response::RowCount(count),
+                    Err(err) => Response::Failed(err.to_string()),
+                }
+            }
             None => Response::Failed("not connected".to_string()),
         },
         Job::UpdateCells {
@@ -812,24 +830,36 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             None => Response::Failed("not connected".to_string()),
         },
         Job::Ddl {
+            database,
             owner,
             name,
             kind,
             show_storage,
         } => match client.as_mut() {
-            Some(client) => match client.object_ddl_with(&owner, &name, &kind, show_storage) {
-                Ok(ddl) => Response::Ddl(ddl),
-                Err(err) => Response::Failed(err.to_string()),
-            },
+            Some(client) => {
+                match client.object_ddl_in(database.as_deref(), &owner, &name, &kind, show_storage)
+                {
+                    Ok(ddl) => Response::Ddl(ddl),
+                    Err(err) => Response::Failed(err.to_string()),
+                }
+            }
             None => Response::Failed("not connected".to_string()),
         },
         Job::ExportTable {
+            database,
             owner,
             name,
             path,
             format,
         } => match client.as_mut() {
-            Some(client) => match export_table(client.as_mut(), &owner, &name, &path, format) {
+            Some(client) => match export_table(
+                client.as_mut(),
+                database.as_deref(),
+                &owner,
+                &name,
+                &path,
+                format,
+            ) {
                 Ok((rows, truncated, clipped)) => Response::Exported {
                     path,
                     rows,
@@ -911,8 +941,12 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             },
             None => Response::Failed("not connected".to_string()),
         },
-        Job::Describe { owner, name } => match client.as_mut() {
-            Some(client) => match client.describe_table(&owner, &name) {
+        Job::Describe {
+            database,
+            owner,
+            name,
+        } => match client.as_mut() {
+            Some(client) => match client.describe_table_in(database.as_deref(), &owner, &name) {
                 Ok(defs) => Response::Described(defs),
                 Err(err) => Response::Failed(err.to_string()),
             },
@@ -947,8 +981,12 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             },
             None => Response::Failed("not connected".to_string()),
         },
-        Job::Indexes { owner, name } => match client.as_mut() {
-            Some(client) => match client.list_indexes(&owner, &name) {
+        Job::Indexes {
+            database,
+            owner,
+            name,
+        } => match client.as_mut() {
+            Some(client) => match client.list_indexes_in(database.as_deref(), &owner, &name) {
                 Ok(indexes) => Response::Indexes(indexes),
                 Err(err) => Response::Failed(err.to_string()),
             },
@@ -992,12 +1030,16 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
 
 fn export_table(
     client: &mut dyn DbClient,
+    database: Option<&str>,
     owner: &str,
     name: &str,
     path: &std::path::Path,
     format: ExportFormat,
 ) -> Result<(usize, bool, usize), DbError> {
-    let sql = format!("SELECT * FROM {}", client.dialect().table_ref(owner, name));
+    let sql = format!(
+        "SELECT * FROM {}",
+        client.dialect().table_ref_in(database, owner, name)
+    );
     let result = client.query(&sql, FetchLimits::export())?;
     let written = match format {
         ExportFormat::Csv => ora_core::export::write_csv_file(
@@ -1067,6 +1109,182 @@ fn import_csv(
 
 #[cfg(test)]
 mod tests {
+    /// A client that notes which database each table request named.
+    struct Spy {
+        inner: DemoClient,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Spy {
+        fn note(&self, what: &str, database: Option<&str>) {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("{what}:{}", database.unwrap_or("-")));
+        }
+    }
+
+    impl DbClient for Spy {
+        fn kind(&self) -> DbKind {
+            self.inner.kind()
+        }
+        fn connect(&mut self, p: &ConnectionProfile, pw: &str) -> Result<DbInfo, DbError> {
+            self.inner.connect(p, pw)
+        }
+        fn disconnect(&mut self) {
+            self.inner.disconnect()
+        }
+        fn is_connected(&self) -> bool {
+            self.inner.is_connected()
+        }
+        fn query(&mut self, sql: &str, limits: FetchLimits) -> Result<QueryResult, DbError> {
+            self.inner.query(sql, limits)
+        }
+        fn execute(&mut self, sql: &str) -> Result<u64, DbError> {
+            self.inner.execute(sql)
+        }
+        fn commit(&mut self) -> Result<(), DbError> {
+            self.inner.commit()
+        }
+        fn rollback(&mut self) -> Result<(), DbError> {
+            self.inner.rollback()
+        }
+        fn list_objects(&mut self, owner: &str) -> Result<Vec<SchemaObject>, DbError> {
+            self.inner.list_objects(owner)
+        }
+        fn list_schemas(&mut self) -> Result<Vec<String>, DbError> {
+            self.inner.list_schemas()
+        }
+        fn object_ddl(
+            &mut self,
+            owner: &str,
+            name: &str,
+            kind: &ObjectKind,
+        ) -> Result<String, DbError> {
+            self.inner.object_ddl(owner, name, kind)
+        }
+        fn describe_table(&mut self, owner: &str, name: &str) -> Result<Vec<ColumnDef>, DbError> {
+            self.inner.describe_table(owner, name)
+        }
+        fn explain_plan(&mut self, sql: &str) -> Result<Vec<String>, DbError> {
+            self.inner.explain_plan(sql)
+        }
+        fn query_table_in(
+            &mut self,
+            database: Option<&str>,
+            owner: &str,
+            table: &str,
+            filter: &TableFilter,
+            page: TablePage,
+        ) -> Result<QueryResult, DbError> {
+            self.note("page", database);
+            self.inner.query_table(owner, table, filter, page)
+        }
+        fn count_table_in(
+            &mut self,
+            database: Option<&str>,
+            owner: &str,
+            table: &str,
+            filter: &TableFilter,
+        ) -> Result<u64, DbError> {
+            self.note("count", database);
+            self.inner.count_table(owner, table, filter)
+        }
+        fn describe_table_in(
+            &mut self,
+            database: Option<&str>,
+            owner: &str,
+            name: &str,
+        ) -> Result<Vec<ColumnDef>, DbError> {
+            self.note("describe", database);
+            self.inner.describe_table(owner, name)
+        }
+        fn list_indexes_in(
+            &mut self,
+            database: Option<&str>,
+            owner: &str,
+            table: &str,
+        ) -> Result<Vec<ora_core::IndexDef>, DbError> {
+            self.note("indexes", database);
+            self.inner.list_indexes(owner, table)
+        }
+        fn object_ddl_in(
+            &mut self,
+            database: Option<&str>,
+            owner: &str,
+            name: &str,
+            kind: &ObjectKind,
+            show_storage: bool,
+        ) -> Result<String, DbError> {
+            self.note("ddl", database);
+            self.inner.object_ddl_with(owner, name, kind, show_storage)
+        }
+    }
+
+    /// Every request a data tab makes for its table (page, count, structure,
+    /// indexes, script) carries the database the tab was opened in.
+    #[test]
+    fn table_jobs_carry_their_database_to_the_client() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut client: Option<Box<dyn DbClient>> = Some(Box::new(Spy {
+            inner: demo(),
+            seen: seen.clone(),
+        }));
+        let db = || Some("staging".to_string());
+        let jobs = vec![
+            Job::QueryTable {
+                database: db(),
+                owner: "HR".into(),
+                name: "DEPARTMENTS".into(),
+                filter: TableFilter::default(),
+                page: TablePage::new(50, 50),
+            },
+            Job::CountTable {
+                database: db(),
+                owner: "HR".into(),
+                name: "DEPARTMENTS".into(),
+                filter: TableFilter::default(),
+            },
+            Job::Describe {
+                database: db(),
+                owner: "HR".into(),
+                name: "DEPARTMENTS".into(),
+            },
+            Job::Indexes {
+                database: db(),
+                owner: "HR".into(),
+                name: "DEPARTMENTS".into(),
+            },
+            Job::Ddl {
+                database: db(),
+                owner: "HR".into(),
+                name: "DEPARTMENTS".into(),
+                kind: ObjectKind::Table,
+                show_storage: false,
+            },
+            // A tab of an engine without databases names none.
+            Job::Describe {
+                database: None,
+                owner: "HR".into(),
+                name: "DEPARTMENTS".into(),
+            },
+        ];
+        for job in jobs {
+            let _ = handle_job(job, &mut client);
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                "page:staging",
+                "count:staging",
+                "describe:staging",
+                "indexes:staging",
+                "ddl:staging",
+                "describe:-"
+            ]
+        );
+    }
+
     #[test]
     fn refreshing_a_materialized_view_is_a_guarded_write() {
         let job = Job::RefreshMaterializedView {
@@ -1210,8 +1428,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("departments.csv");
         let mut client = demo();
-        let (rows, truncated, _clipped) =
-            export_table(&mut client, "HR", "DEPARTMENTS", &path, ExportFormat::Csv).unwrap();
+        let (rows, truncated, _clipped) = export_table(
+            &mut client,
+            None,
+            "HR",
+            "DEPARTMENTS",
+            &path,
+            ExportFormat::Csv,
+        )
+        .unwrap();
         assert_eq!(rows, 4);
         assert!(!truncated);
         let inserted = import_csv(&mut client, "HR", "DEPARTMENTS", &path).unwrap();
@@ -1265,6 +1490,7 @@ mod tests {
         let mut client = demo();
         export_table(
             &mut client,
+            None,
             "HR",
             "DEPARTMENTS",
             &path,

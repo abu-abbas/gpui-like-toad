@@ -60,6 +60,7 @@ Confirm the current version in the signed index and choose an unused
 | `mailhog` | [MailHog](../extensions/mailhog/RELEASE_NOTES.md) |
 | `postgres` | [PostgreSQL](../extensions/postgres/RELEASE_NOTES.md) |
 | `mysql` | [MySQL](../extensions/mysql/RELEASE_NOTES.md) |
+| `mssql` | [SQL Server](../extensions/mssql/RELEASE_NOTES.md) |
 
 ## Publishing
 

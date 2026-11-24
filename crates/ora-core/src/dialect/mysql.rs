@@ -14,6 +14,7 @@ impl Dialect for MysqlDialect {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             schemas: true,
+            databases: false,
             materialized_views: false,
             password: true,
             network: true,

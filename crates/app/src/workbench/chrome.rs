@@ -291,6 +291,7 @@ impl Workbench {
             let data = tab.data.as_ref().expect("data tab has table state");
             let data_view = data.view == DataView::Data;
             let object = ObjectRef {
+                database: data.database.clone(),
                 owner: data.owner.clone(),
                 name: data.name.clone(),
                 kind: data.kind.clone(),
@@ -430,7 +431,11 @@ impl Workbench {
                         theme.muted_foreground,
                         "Import CSV into table",
                     )
-                    .disabled(unavailable || import_object.kind != ObjectKind::Table)
+                    .disabled(
+                        unavailable
+                            || import_object.kind != ObjectKind::Table
+                            || self.active_kind().capabilities().databases,
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.import_table(import_object.clone(), cx)
                     })),
@@ -442,7 +447,11 @@ impl Workbench {
                         theme.muted_foreground,
                         "Data Transfer…",
                     )
-                    .disabled(unavailable || transfer_object.kind != ObjectKind::Table)
+                    .disabled(
+                        unavailable
+                            || transfer_object.kind != ObjectKind::Table
+                            || self.active_kind().capabilities().databases,
+                    )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_data_transfer(Some(transfer_object.clone()), window, cx)
                     })),

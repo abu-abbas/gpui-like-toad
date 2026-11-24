@@ -102,6 +102,9 @@ impl Workbench {
         if !caps.sysdba {
             form.access.sysdba = false;
         }
+        if !caps.databases {
+            form.access.trust_server_certificate = false;
+        }
         form.form_notice = None;
         cx.notify();
     }

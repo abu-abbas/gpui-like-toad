@@ -18,6 +18,7 @@
 
 mod bind;
 pub(crate) mod literal;
+mod mssql;
 mod mysql;
 mod oracle;
 mod postgres;
@@ -27,6 +28,7 @@ mod tests;
 mod types;
 
 pub use bind::{rewrite as rewrite_binds, BindStyle, Rewritten};
+pub use mssql::MssqlDialect;
 pub use mysql::MysqlDialect;
 pub use oracle::OracleDialect;
 pub use postgres::PostgresDialect;
@@ -44,10 +46,17 @@ pub enum DbKind {
     Sqlite,
     Postgres,
     Mysql,
+    Mssql,
 }
 
 impl DbKind {
-    pub const ALL: [Self; 4] = [Self::Oracle, Self::Sqlite, Self::Postgres, Self::Mysql];
+    pub const ALL: [Self; 5] = [
+        Self::Oracle,
+        Self::Sqlite,
+        Self::Postgres,
+        Self::Mysql,
+        Self::Mssql,
+    ];
 
     /// Name shown in the UI.
     pub fn label(self) -> &'static str {
@@ -56,6 +65,7 @@ impl DbKind {
             Self::Sqlite => "SQLite",
             Self::Postgres => "PostgreSQL",
             Self::Mysql => "MySQL",
+            Self::Mssql => "SQL Server",
         }
     }
 
@@ -66,6 +76,7 @@ impl DbKind {
             Self::Sqlite => "sqlite",
             Self::Postgres => "postgres",
             Self::Mysql => "mysql",
+            Self::Mssql => "mssql",
         }
     }
 
@@ -84,6 +95,7 @@ impl DbKind {
             Self::Sqlite => &SqliteDialect,
             Self::Postgres => &PostgresDialect,
             Self::Mysql => &MysqlDialect,
+            Self::Mssql => &MssqlDialect,
         }
     }
 
@@ -100,6 +112,12 @@ pub struct Capabilities {
     /// More than one browsable schema (Oracle users). SQLite has `main`
     /// plus attached databases, so it hides the schema dropdown.
     pub schemas: bool,
+    /// The server holds several databases that one session can read by
+    /// naming them (`[db].[schema].[table]`). The explorer's dropdown then
+    /// picks a database, objects are grouped by schema, and every data tab
+    /// is bound to the database it was opened in. SQL Server only; MySQL
+    /// calls its databases schemas.
+    pub databases: bool,
     /// Materialized views, and "Refresh Materialized View".
     pub materialized_views: bool,
     /// Connecting with a username and password (and saving it in the
@@ -153,6 +171,14 @@ pub trait Dialect: Sync {
         format!("{}.{}", self.quote_ident(owner), self.quote_ident(table))
     }
 
+    /// Like [`Dialect::table_ref`], qualified with `database` when the
+    /// engine can reach other databases of the server from one session
+    /// (`[db].[schema].[table]`). Engines without that ignore it.
+    fn table_ref_in(&self, database: Option<&str>, owner: &str, table: &str) -> String {
+        let _ = database;
+        self.table_ref(owner, table)
+    }
+
     /// Expression selecting the row id of table alias `t`, e.g. `t.ROWID`.
     fn row_id_expr(&self) -> &'static str;
 
@@ -178,6 +204,14 @@ pub trait Dialect: Sync {
         if page.offset > 0 {
             sql.push_str(&format!(" OFFSET {}", page.offset));
         }
+    }
+
+    /// Like [`Dialect::push_page`], for an engine that cannot page without
+    /// an `ORDER BY` (SQL Server). `order_by` holds the key columns to sort
+    /// by, unquoted; the default ignores them.
+    fn push_page_ordered(&self, sql: &mut String, page: TablePage, order_by: &[String]) {
+        let _ = order_by;
+        self.push_page(sql, page);
     }
 
     /// How a driver of this engine writes bind variables.

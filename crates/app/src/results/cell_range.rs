@@ -189,6 +189,7 @@ mod tests {
             byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
+            order_by: Vec::new(),
         };
         let mut delegate = ResultsDelegate::empty()
             .with_row_numbers()

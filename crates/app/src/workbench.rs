@@ -318,6 +318,17 @@ impl ConnState {
             .map_or_else(ConnectionAccess::default, |last| last.profile.access)
     }
 
+    /// The database the explorer shows, for an engine that has several
+    /// per session (SQL Server). New data tabs are bound to it; tabs
+    /// already open keep their own.
+    fn database(&self) -> Option<String> {
+        let kind = self.last_connection.as_ref()?.profile.kind;
+        kind.capabilities()
+            .databases
+            .then(|| self.current_schema.clone())
+            .flatten()
+    }
+
     fn label(&self) -> String {
         match (&self.last_connection, &self.session) {
             (Some(last), _) => last.profile.name.clone(),
@@ -330,6 +341,8 @@ impl ConnState {
 /// The explorer object a context-menu action applies to.
 #[derive(Clone)]
 struct ObjectRef {
+    /// The database it was listed in (SQL Server).
+    database: Option<String>,
     owner: String,
     name: String,
     kind: ObjectKind,
@@ -473,6 +486,10 @@ pub struct Workbench {
     window_handle: AnyWindowHandle,
     category: ObjectCategory,
     object_scroll: UniformListScrollHandle,
+    /// Schema groups of the explorer the user folded (SQL Server lists a
+    /// whole database grouped by schema); keyed by connection, database
+    /// and schema.
+    collapsed_schemas: HashSet<(u64, String, String)>,
     /// The Quick Open palette, while it is showing.
     quick_open: Option<QuickOpen>,
     /// The cell edit dialog, while it is showing.
@@ -588,6 +605,7 @@ impl Workbench {
             window_handle: window.window_handle(),
             category: ObjectCategory::Tables,
             object_scroll: UniformListScrollHandle::new(),
+            collapsed_schemas: HashSet::new(),
             quick_open: None,
             cell_editor: None,
             object_dialog: None,

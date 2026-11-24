@@ -26,6 +26,7 @@ impl Dialect for PostgresDialect {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             schemas: true,
+            databases: false,
             materialized_views: true,
             password: true,
             network: true,

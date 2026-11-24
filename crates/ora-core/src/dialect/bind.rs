@@ -13,6 +13,8 @@ pub enum BindStyle {
     Dollar,
     /// `?`, bound in order of appearance (MySQL).
     Question,
+    /// `@P1` (SQL Server, as the Tiberius driver names its parameters).
+    AtP,
 }
 
 /// A statement rewritten for [`BindStyle`], with the bind values in the
@@ -42,6 +44,12 @@ pub fn rewrite(sql: &str, binds: &[String], style: BindStyle) -> Result<Rewritte
     while i < chars.len() {
         let c = chars[i];
         match c {
+            '[' if style == BindStyle::AtP => {
+                // A bracket-quoted identifier; `]]` stands for one `]`.
+                let end = skip_bracketed(&chars, i);
+                out.extend(&chars[i..end]);
+                i = end;
+            }
             '\'' | '"' | '`' => {
                 let end = skip_quoted(&chars, i);
                 out.extend(&chars[i..end]);
@@ -85,6 +93,7 @@ pub fn rewrite(sql: &str, binds: &[String], style: BindStyle) -> Result<Rewritte
                     .ok_or_else(|| format!("bind :{n} has no value"))?;
                 match style {
                     BindStyle::Dollar => out.push_str(&format!("${n}")),
+                    BindStyle::AtP => out.push_str(&format!("@P{n}")),
                     BindStyle::Question => {
                         out.push('?');
                         ordered.push(value.clone());
@@ -107,6 +116,22 @@ pub fn rewrite(sql: &str, binds: &[String], style: BindStyle) -> Result<Rewritte
             binds.to_vec()
         },
     })
+}
+
+/// Index just past the `[...]` run that starts at `start`.
+fn skip_bracketed(chars: &[char], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < chars.len() {
+        if chars[i] == ']' {
+            if chars.get(i + 1) == Some(&']') {
+                i += 2;
+                continue;
+            }
+            return i + 1;
+        }
+        i += 1;
+    }
+    chars.len()
 }
 
 /// Index just past the quoted run that starts at `start` (quotes doubled

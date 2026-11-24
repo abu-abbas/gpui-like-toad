@@ -120,6 +120,9 @@ pub fn result_to_json(r: &QueryResult) -> Json {
         ("byte_limited".into(), Json::Bool(r.byte_limited)),
         ("elapsed_ms".into(), Json::Num(r.elapsed.as_millis() as f64)),
     ];
+    if !r.order_by.is_empty() {
+        pairs.push(("order_by".into(), strings_to_json(&r.order_by)));
+    }
     if let Some(t) = r.fetch_time {
         pairs.push(("fetch_ms".into(), Json::Num(t.as_millis() as f64)));
     }
@@ -170,6 +173,10 @@ pub fn result_from_json(j: &Json) -> Result<QueryResult, String> {
             .unwrap_or(false),
         elapsed: ms("elapsed_ms").unwrap_or_default(),
         fetch_time: ms("fetch_ms"),
+        order_by: match j.get("order_by") {
+            Some(list) => strings_from_json(list)?,
+            None => Vec::new(),
+        },
     })
 }
 
@@ -331,6 +338,10 @@ pub fn profile_to_json(p: &ConnectionProfile) -> Json {
                 ),
                 ("sysdba", Json::Bool(p.access.sysdba)),
                 ("skip_history", Json::Bool(p.access.skip_history)),
+                (
+                    "trust_server_certificate",
+                    Json::Bool(p.access.trust_server_certificate),
+                ),
             ]),
         ),
     ])
@@ -349,6 +360,7 @@ pub fn profile_from_json(j: &Json) -> Result<ConnectionProfile, String> {
             protect_production: get_flag(access, "protect_production"),
             sysdba: get_flag(access, "sysdba"),
             skip_history: get_flag(access, "skip_history"),
+            trust_server_certificate: get_flag(access, "trust_server_certificate"),
         },
     })
 }
@@ -734,13 +746,24 @@ mod tests {
             byte_limited: true,
             elapsed: Duration::from_millis(12),
             fetch_time: Some(Duration::from_millis(3)),
+            order_by: vec!["ID".into(), "N".into()],
         };
         let back = result_from_json(&parse_json(&to_json(&result_to_json(&r))).unwrap()).unwrap();
+        assert_eq!(back.order_by, ["ID", "N"]);
         assert_eq!(back.columns, r.columns);
         assert_eq!(back.rows, r.rows);
         assert!(back.truncated && back.byte_limited);
         assert_eq!(back.elapsed, r.elapsed);
         assert_eq!(back.fetch_time, r.fetch_time);
+    }
+
+    /// A result from an extension that predates `order_by` has none.
+    #[test]
+    fn an_old_result_has_no_order() {
+        let j = parse_json(r#"{"columns":[],"rows":[],"truncated":false}"#).unwrap();
+        assert!(result_from_json(&j).unwrap().order_by.is_empty());
+        let clean = QueryResult::default();
+        assert!(result_to_json(&clean).get("order_by").is_none());
     }
 
     #[test]
@@ -788,6 +811,7 @@ mod tests {
                 protect_production: true,
                 sysdba: false,
                 skip_history: true,
+                trust_server_certificate: true,
             },
         };
         let back = profile_from_json(&through_text(&profile_to_json(&profile))).unwrap();

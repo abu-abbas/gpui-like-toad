@@ -40,8 +40,8 @@ pub use client::{DbClient, DbError, DbInfo};
 pub use dialect::{Capabilities, DbKind, Dialect};
 pub use fetch::{FetchLimits, RowCollector};
 pub use filter::{
-    BoundQuery, FilterCondition, FilterJoin, FilterOp, TableFilter, TablePage, MAX_PAGE_LIMIT,
-    ROWID_COLUMN,
+    BoundQuery, FilterCondition, FilterJoin, FilterOp, TableFilter, TablePage, TableTarget,
+    MAX_PAGE_LIMIT, ROWID_COLUMN,
 };
 pub use model::{
     compose_easy_connect, default_profile_name, parse_easy_connect, ClippedValue, ClobPreview,

@@ -4,7 +4,7 @@
 //! module only holds the UI state and renders the bar.
 
 use gpui_kit::component::checkbox::Checkbox;
-use ora_core::filter::select_sql;
+use ora_core::filter::{select_sql_in, TableTarget};
 use ora_core::{
     FilterCondition, FilterJoin, FilterOp, TableFilter, TablePage, MAX_PAGE_LIMIT, ROWID_COLUMN,
 };
@@ -68,6 +68,13 @@ impl DataView {
 
 /// What a data tab shows: one table or view, and the filter on it.
 pub(super) struct DataTab {
+    /// The database of the server this tab was opened in (SQL Server). It
+    /// never changes, whatever the explorer shows later: page, count,
+    /// structure, indexes, DDL, export and the SQL preview all name it.
+    pub(super) database: Option<String>,
+    /// The key columns the last fetch was ordered by (SQL Server pages need
+    /// an order). The SQL preview uses them, so it shows the grid's order.
+    pub(super) order_by: Vec<String>,
     pub(super) owner: String,
     pub(super) name: String,
     pub(super) kind: ObjectKind,
@@ -119,6 +126,7 @@ impl DataTab {
     }
 
     pub(super) fn new(
+        database: Option<String>,
         owner: &str,
         name: &str,
         kind: ObjectKind,
@@ -166,6 +174,8 @@ impl DataTab {
             })
             .collect();
         DataTab {
+            database,
+            order_by: Vec::new(),
             owner: owner.to_string(),
             name: name.to_string(),
             kind,
@@ -545,7 +555,8 @@ impl Workbench {
         let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
             return;
         };
-        let (owner, name, kind, view, show_storage) = (
+        let (database, owner, name, kind, view, show_storage) = (
+            data.database.clone(),
             data.owner.clone(),
             data.name.clone(),
             data.kind.clone(),
@@ -556,16 +567,33 @@ impl Workbench {
             DataView::Data => self.reload_data(cx),
             DataView::Structure => {
                 self.conn.status = format!("Loading structure for {owner}.{name}…");
-                self.spawn_db(Job::Describe { owner, name }, PendingOp::DataStructure, cx);
+                self.spawn_db(
+                    Job::Describe {
+                        database,
+                        owner,
+                        name,
+                    },
+                    PendingOp::DataStructure,
+                    cx,
+                );
             }
             DataView::Index => {
                 self.conn.status = format!("Loading indexes for {owner}.{name}…");
-                self.spawn_db(Job::Indexes { owner, name }, PendingOp::DataIndexes, cx);
+                self.spawn_db(
+                    Job::Indexes {
+                        database,
+                        owner,
+                        name,
+                    },
+                    PendingOp::DataIndexes,
+                    cx,
+                );
             }
             DataView::Ddl => {
                 self.conn.status = format!("Loading DDL for {owner}.{name}…");
                 self.spawn_db(
                     Job::Ddl {
+                        database,
                         owner,
                         name,
                         kind,
@@ -590,10 +618,16 @@ impl Workbench {
             return;
         }
         data.show_storage = show;
-        let (owner, name, kind) = (data.owner.clone(), data.name.clone(), data.kind.clone());
+        let (database, owner, name, kind) = (
+            data.database.clone(),
+            data.owner.clone(),
+            data.name.clone(),
+            data.kind.clone(),
+        );
         self.conn.status = format!("Loading DDL for {owner}.{name}…");
         self.spawn_db(
             Job::Ddl {
+                database,
                 owner,
                 name,
                 kind,
@@ -624,13 +658,21 @@ impl Workbench {
         let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
             return;
         };
-        let (owner, name, filter, page) = (
+        let (database, owner, name, filter, page) = (
+            data.database.clone(),
             data.owner.clone(),
             data.name.clone(),
             data.applied.clone(),
             data.page,
         );
-        let query = select_sql(self.active_dialect(), &owner, &name, &filter, page);
+        let query = select_sql_in(
+            self.active_dialect(),
+            &TableTarget::new(database.as_deref(), &owner, &name),
+            &filter,
+            page,
+            self.active_dialect().row_id_expr(),
+            &data.order_by,
+        );
         let mut log = query.sql.clone();
         if !query.binds.is_empty() {
             let binds: Vec<String> = query
@@ -648,6 +690,7 @@ impl Workbench {
         self.conn.pending_sql = None;
         self.spawn_db(
             Job::QueryTable {
+                database,
                 owner,
                 name,
                 filter,
@@ -1067,12 +1110,14 @@ impl Workbench {
                 ),
         );
         if data.show_sql {
-            let query = select_sql(
+            // The same target and order as the grid's fetch.
+            let query = select_sql_in(
                 self.active_dialect(),
-                &data.owner,
-                &data.name,
+                &TableTarget::new(data.database.as_deref(), &data.owner, &data.name),
                 &data.draft(cx),
                 data.page,
+                self.active_dialect().row_id_expr(),
+                &data.order_by,
             );
             let preview = query.preview();
             let runnable = query.inlined();
@@ -1444,6 +1489,20 @@ impl Workbench {
                             .min_w(px(130.))
                             .whitespace_nowrap()
                             .child(caption_text(text, theme)),
+                    )
+                    // SQL Server pages need an order; without a key there is
+                    // none to promise.
+                    .when(
+                        self.active_kind().capabilities().databases
+                            && tab.last_result.is_some()
+                            && data.order_by.is_empty(),
+                        |this| {
+                            this.child(caption_text(
+                                "No unique key: rows with equal sort values may move between pages."
+                                    .to_string(),
+                                theme,
+                            ))
+                        },
                     )
                     .when(!matches!(total, RowCount::Known(_)), |this| {
                         this.child(

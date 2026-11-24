@@ -7,9 +7,20 @@ impl Workbench {
         let Some(conn) = self.conn_mut(cid) else {
             return;
         };
-        let user = conn.session.as_ref().map(|s| s.user.clone());
         // Keep the current pick on refresh; otherwise start in the
-        // session user's own schema, as Toad does.
+        // session user's own schema, as Toad does. A server with several
+        // databases starts in the database the login opened.
+        let databases = conn
+            .last_connection
+            .as_ref()
+            .is_some_and(|l| l.profile.kind.capabilities().databases);
+        let user = conn.session.as_ref().map(|s| {
+            if databases {
+                s.database.clone()
+            } else {
+                s.user.clone()
+            }
+        });
         let keep = conn.current_schema.clone().filter(|c| schemas.contains(c));
         conn.current_schema = keep
             .or_else(|| user.filter(|u| schemas.contains(u)))
@@ -37,6 +48,13 @@ impl Workbench {
         // schema just listed, and the session user's own schema,
         // which unqualified names resolve against.
         let user = conn.session.as_ref().map(|s| s.user.clone());
+        // Not for a server with several databases: the login is no schema.
+        let user = user.filter(|_| {
+            !conn
+                .last_connection
+                .as_ref()
+                .is_some_and(|l| l.profile.kind.capabilities().databases)
+        });
         if !schema.is_empty() {
             self.load_catalog_for(cid, schema, cx);
         }

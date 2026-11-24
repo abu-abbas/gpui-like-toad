@@ -15,6 +15,7 @@ impl Dialect for SqliteDialect {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             schemas: false,
+            databases: false,
             materialized_views: false,
             password: false,
             network: false,

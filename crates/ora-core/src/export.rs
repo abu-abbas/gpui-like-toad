@@ -313,6 +313,7 @@ mod tests {
             byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
+            order_by: Vec::new(),
         }
     }
 
@@ -343,6 +344,7 @@ mod tests {
             byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
+            order_by: Vec::new(),
         };
         assert_eq!(to_csv(&empty), "A,B\r\n");
         assert_eq!(to_csv(&QueryResult::default()), "\r\n");
@@ -363,6 +365,7 @@ mod tests {
             byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
+            order_by: Vec::new(),
         };
         assert_eq!(to_csv(&result), "T\r\ncafé ☕\r\n\"a\rb\"\r\n");
     }
@@ -419,6 +422,7 @@ mod tests {
             byte_limited: false,
             elapsed: Default::default(),
             fetch_time: None,
+            order_by: Vec::new(),
         };
         let bytes = to_xlsx(&result).unwrap();
         assert_eq!(&bytes[0..4], &[0x50, 0x4B, 0x03, 0x04]);

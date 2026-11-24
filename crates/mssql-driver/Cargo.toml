@@ -1,0 +1,16 @@
+[package]
+name = "mssql-driver"
+version = "0.1.0"
+description = "SQL Server implementation of ora-core's DbClient (used by the kilat-ext-mssql extension)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ora-core = { path = "../ora-core" }
+tiberius = { version = "0.13", default-features = false, features = ["tds73", "rustls", "chrono"] }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }
+tokio-util = { version = "0.7", default-features = false, features = ["compat"] }
+futures-util = { version = "0.3", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

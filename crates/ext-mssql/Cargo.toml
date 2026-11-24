@@ -1,0 +1,15 @@
+[package]
+name = "kilat-ext-mssql"
+version = "1.0.0"
+description = "The SQL Server extension of Kilat: mssql-driver as a separate program that speaks the extension protocol"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "kilat-ext-mssql"
+path = "src/main.rs"
+
+[dependencies]
+ora-core = { path = "../ora-core" }
+mssql-driver = { path = "../mssql-driver" }

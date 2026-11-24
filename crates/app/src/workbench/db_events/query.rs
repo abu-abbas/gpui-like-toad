@@ -126,10 +126,12 @@ impl Workbench {
             self.record_run_for(cid, &sql);
         }
         let column_names: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
+        let order_by = result.order_by.clone();
         let tab = self.target_tab_for_mut(cid);
         tab.elapsed_ms = Some(elapsed);
         if let Some(data) = tab.data.as_mut() {
             data.set_columns(column_names);
+            data.order_by = order_by;
         }
         self.set_grid_result_for(cid, result, cx);
         self.target_tab_for_mut(cid).results_tab = ResultsTab::Results;

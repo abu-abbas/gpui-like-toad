@@ -29,6 +29,21 @@ impl fmt::Display for DbError {
 
 impl std::error::Error for DbError {}
 
+/// The number in the first cell of a `SELECT COUNT(*)` result.
+pub fn count_from_result(result: &QueryResult) -> Result<u64, DbError> {
+    match result.get(0, 0) {
+        Some(Value::Integer(n)) => u64::try_from(*n).ok(),
+        Some(Value::Float(f)) if *f >= 0.0 => Some(*f as u64),
+        Some(other) => other.display().trim().parse().ok(),
+        None => None,
+    }
+    .ok_or_else(|| DbError::new("The database returned no row count."))
+}
+
+fn no_databases() -> DbError {
+    DbError::new("This connection cannot read other databases of the server.")
+}
+
 /// Information about an established session, shown in the status bar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbInfo {
@@ -121,6 +136,24 @@ pub trait DbClient: Send {
         self.query_binds(&query.sql, &query.binds, FetchLimits::rows(page.limit))
     }
 
+    /// Like [`DbClient::query_table`] for a table of `database` (`None` =
+    /// the session's own). Engines with several databases per session
+    /// ([`Capabilities::databases`]) override this; the others refuse a
+    /// database, so a request can never run against the wrong one.
+    fn query_table_in(
+        &mut self,
+        database: Option<&str>,
+        owner: &str,
+        table: &str,
+        filter: &TableFilter,
+        page: TablePage,
+    ) -> Result<QueryResult, DbError> {
+        if database.is_some() {
+            return Err(no_databases());
+        }
+        self.query_table(owner, table, filter, page)
+    }
+
     /// Number of rows of `table` that pass `filter` (the data tab's total).
     /// A full count can be slow on a big table, so the UI asks only when
     /// the user does.
@@ -130,15 +163,27 @@ pub trait DbClient: Send {
         table: &str,
         filter: &TableFilter,
     ) -> Result<u64, DbError> {
-        let query = filter::count_sql(self.dialect(), owner, table, filter);
-        let result = self.query_binds(&query.sql, &query.binds, FetchLimits::rows(1))?;
-        match result.get(0, 0) {
-            Some(Value::Integer(n)) => u64::try_from(*n).ok(),
-            Some(Value::Float(f)) if *f >= 0.0 => Some(*f as u64),
-            Some(other) => other.display().trim().parse().ok(),
-            None => None,
+        self.count_table_in(None, owner, table, filter)
+    }
+
+    /// Like [`DbClient::count_table`] for a table of `database`.
+    fn count_table_in(
+        &mut self,
+        database: Option<&str>,
+        owner: &str,
+        table: &str,
+        filter: &TableFilter,
+    ) -> Result<u64, DbError> {
+        if database.is_some() && !self.capabilities().databases {
+            return Err(no_databases());
         }
-        .ok_or_else(|| DbError::new("The database returned no row count."))
+        let query = filter::count_sql_in(
+            self.dialect(),
+            &filter::TableTarget::new(database, owner, table),
+            filter,
+        );
+        let result = self.query_binds(&query.sql, &query.binds, FetchLimits::rows(1))?;
+        count_from_result(&result)
     }
 
     /// The start of CLOB cells of the data tab, for the rows with `rowids`
@@ -280,6 +325,21 @@ pub trait DbClient: Send {
         self.object_ddl(owner, name, kind)
     }
 
+    /// Like [`DbClient::object_ddl_with`] for an object of `database`.
+    fn object_ddl_in(
+        &mut self,
+        database: Option<&str>,
+        owner: &str,
+        name: &str,
+        kind: &ObjectKind,
+        show_storage: bool,
+    ) -> Result<String, DbError> {
+        if database.is_some() {
+            return Err(no_databases());
+        }
+        self.object_ddl_with(owner, name, kind, show_storage)
+    }
+
     /// Insert rows into `owner.table`, one statement per row, values given
     /// as text in `columns` order. Does not commit. Returns rows inserted.
     /// Stops at the first failing row and reports its 1-based number; rows
@@ -303,6 +363,19 @@ pub trait DbClient: Send {
 
     /// Columns of one table or view.
     fn describe_table(&mut self, owner: &str, name: &str) -> Result<Vec<ColumnDef>, DbError>;
+
+    /// Like [`DbClient::describe_table`] for a table of `database`.
+    fn describe_table_in(
+        &mut self,
+        database: Option<&str>,
+        owner: &str,
+        name: &str,
+    ) -> Result<Vec<ColumnDef>, DbError> {
+        if database.is_some() {
+            return Err(no_databases());
+        }
+        self.describe_table(owner, name)
+    }
 
     /// Everything the editor's autocomplete needs for one schema: its
     /// objects, with columns for tables and views. The default asks per
@@ -331,6 +404,19 @@ pub trait DbClient: Send {
     /// view. A table without indexes (or a view) is an empty list.
     fn list_indexes(&mut self, _owner: &str, _table: &str) -> Result<Vec<IndexDef>, DbError> {
         Err(DbError::new("indexes are not supported by this backend"))
+    }
+
+    /// Like [`DbClient::list_indexes`] for a table of `database`.
+    fn list_indexes_in(
+        &mut self,
+        database: Option<&str>,
+        owner: &str,
+        table: &str,
+    ) -> Result<Vec<IndexDef>, DbError> {
+        if database.is_some() {
+            return Err(no_databases());
+        }
+        self.list_indexes(owner, table)
     }
 
     /// Primary key, unique, foreign key and check constraints of one table

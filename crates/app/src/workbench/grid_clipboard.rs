@@ -53,10 +53,15 @@ impl Workbench {
         let Some(data) = self.data_mut() else {
             return;
         };
-        let (owner, name) = (data.owner.clone(), data.name.clone());
+        let (database, owner, name) =
+            (data.database.clone(), data.owner.clone(), data.name.clone());
         self.conn.status = format!("Preparing {} row(s) to duplicate…", rows.len());
         self.spawn_db(
-            Job::Describe { owner, name },
+            Job::Describe {
+                database,
+                owner,
+                name,
+            },
             PendingOp::DuplicateRows(rows),
             cx,
         );

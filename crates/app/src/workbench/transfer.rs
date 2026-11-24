@@ -186,6 +186,14 @@ impl Workbench {
         std::iter::once(&self.conn)
             .chain(&self.parked)
             .filter(|c| c.session.is_some() && c.db.is_some())
+            // Data Transfer reads and writes by schema in the session's own
+            // database; a server with several databases per session is not
+            // offered until a transfer can name them.
+            .filter(|c| {
+                c.last_connection
+                    .as_ref()
+                    .is_none_or(|l| !l.profile.kind.capabilities().databases)
+            })
             .map(|c| {
                 let profile = c.last_connection.as_ref().map(|l| &l.profile);
                 let kind = profile.map_or(DbKind::Oracle, |p| p.kind);
@@ -773,6 +781,7 @@ impl Workbench {
         self.transfer_job(
             id,
             Job::Describe {
+                database: None,
                 owner: schema,
                 name: name.clone(),
             },

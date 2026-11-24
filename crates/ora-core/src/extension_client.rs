@@ -8,7 +8,7 @@
 //! against the limits the app asked for, and a result of the wrong shape
 //! kills the program.
 
-use crate::client::{DbClient, DbError, DbInfo};
+use crate::client::{count_from_result, DbClient, DbError, DbInfo};
 use crate::dialect::DbKind;
 use crate::extension_host::{CallError, ExtProcess};
 use crate::extension_wire as wire;
@@ -160,6 +160,16 @@ fn params(pairs: Vec<(&str, Json)>) -> Json {
     Json::Obj(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
 }
 
+/// `params` with an optional `database` added. `None` leaves it out, so a
+/// request for the session's own database looks exactly as it did before
+/// databases were named, and an older extension never sees the field.
+fn scoped(database: Option<&str>, mut pairs: Vec<(&str, Json)>) -> Json {
+    if let Some(db) = database {
+        pairs.insert(0, ("database", s(db)));
+    }
+    params(pairs)
+}
+
 fn s(v: &str) -> Json {
     Json::Str(v.to_string())
 }
@@ -258,13 +268,57 @@ impl DbClient for RemoteClient {
         filter: &TableFilter,
         page: TablePage,
     ) -> Result<QueryResult, DbError> {
-        let request = params(vec![
-            ("owner", s(owner)),
-            ("table", s(table)),
-            ("filter", wire::filter_to_json(filter)),
-            ("page", wire::page_to_json(&page)),
-        ]);
+        self.query_table_in(None, owner, table, filter, page)
+    }
+
+    fn query_table_in(
+        &mut self,
+        database: Option<&str>,
+        owner: &str,
+        table: &str,
+        filter: &TableFilter,
+        page: TablePage,
+    ) -> Result<QueryResult, DbError> {
+        let request = scoped(
+            database,
+            vec![
+                ("owner", s(owner)),
+                ("table", s(table)),
+                ("filter", wire::filter_to_json(filter)),
+                ("page", wire::page_to_json(&page)),
+            ],
+        );
         self.call_rows("query_table", request, FetchLimits::rows(page.limit))
+    }
+
+    /// Without a database the count goes through `query`, as before. For a
+    /// named database the extension counts, so the database travels with
+    /// the request.
+    fn count_table_in(
+        &mut self,
+        database: Option<&str>,
+        owner: &str,
+        table: &str,
+        filter: &TableFilter,
+    ) -> Result<u64, DbError> {
+        let Some(database) = database else {
+            let query = crate::filter::count_sql(self.dialect(), owner, table, filter);
+            let result = self.query_binds(&query.sql, &query.binds, FetchLimits::rows(1))?;
+            return count_from_result(&result);
+        };
+        let request = scoped(
+            Some(database),
+            vec![
+                ("owner", s(owner)),
+                ("table", s(table)),
+                ("filter", wire::filter_to_json(filter)),
+            ],
+        );
+        let reply = self.call("count_table", request)?;
+        match reply.get("count").and_then(Json::as_u64) {
+            Some(n) => Ok(n),
+            None => self.bad("count_table has no count".to_string()),
+        }
     }
 
     fn execute(&mut self, sql: &str) -> Result<u64, DbError> {
@@ -319,14 +373,28 @@ impl DbClient for RemoteClient {
         kind: &ObjectKind,
         show_storage: bool,
     ) -> Result<String, DbError> {
+        self.object_ddl_in(None, owner, name, kind, show_storage)
+    }
+
+    fn object_ddl_in(
+        &mut self,
+        database: Option<&str>,
+        owner: &str,
+        name: &str,
+        kind: &ObjectKind,
+        show_storage: bool,
+    ) -> Result<String, DbError> {
         let reply = self.call(
             "object_ddl",
-            params(vec![
-                ("owner", s(owner)),
-                ("name", s(name)),
-                ("kind", wire::kind_to_json(kind)),
-                ("show_storage", Json::Bool(show_storage)),
-            ]),
+            scoped(
+                database,
+                vec![
+                    ("owner", s(owner)),
+                    ("name", s(name)),
+                    ("kind", wire::kind_to_json(kind)),
+                    ("show_storage", Json::Bool(show_storage)),
+                ],
+            ),
         )?;
         match reply {
             Json::Str(text) => Ok(text),
@@ -335,17 +403,35 @@ impl DbClient for RemoteClient {
     }
 
     fn describe_table(&mut self, owner: &str, name: &str) -> Result<Vec<ColumnDef>, DbError> {
+        self.describe_table_in(None, owner, name)
+    }
+
+    fn describe_table_in(
+        &mut self,
+        database: Option<&str>,
+        owner: &str,
+        name: &str,
+    ) -> Result<Vec<ColumnDef>, DbError> {
         let reply = self.call(
             "describe_table",
-            params(vec![("owner", s(owner)), ("name", s(name))]),
+            scoped(database, vec![("owner", s(owner)), ("name", s(name))]),
         )?;
         self.decode(&reply, wire::columns_from_json)
     }
 
     fn list_indexes(&mut self, owner: &str, table: &str) -> Result<Vec<IndexDef>, DbError> {
+        self.list_indexes_in(None, owner, table)
+    }
+
+    fn list_indexes_in(
+        &mut self,
+        database: Option<&str>,
+        owner: &str,
+        table: &str,
+    ) -> Result<Vec<IndexDef>, DbError> {
         let reply = self.call(
             "list_indexes",
-            params(vec![("owner", s(owner)), ("table", s(table))]),
+            scoped(database, vec![("owner", s(owner)), ("table", s(table))]),
         )?;
         self.decode(&reply, wire::indexes_from_json)
     }
@@ -378,5 +464,25 @@ impl DbClient for RemoteClient {
     fn explain_plan_nodes(&mut self, sql: &str) -> Result<Vec<PlanNode>, DbError> {
         let reply = self.call("explain_plan_nodes", params(vec![("sql", s(sql))]))?;
         self.decode(&reply, wire::plan_nodes_from_json)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A request for the session's own database looks as it did before
+    /// databases were named, so older extensions never see the field.
+    #[test]
+    fn a_request_without_a_database_has_no_database_field() {
+        let plain = scoped(None, vec![("owner", s("dbo"))]);
+        assert!(plain.get("database").is_none());
+        assert_eq!(plain.get("owner").and_then(Json::as_str), Some("dbo"));
+        let named = scoped(Some("staging"), vec![("owner", s("dbo"))]);
+        assert_eq!(
+            named.get("database").and_then(Json::as_str),
+            Some("staging")
+        );
+        assert_eq!(named.get("owner").and_then(Json::as_str), Some("dbo"));
     }
 }

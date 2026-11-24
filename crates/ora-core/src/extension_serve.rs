@@ -153,6 +153,15 @@ fn text(p: &Json, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing {key}"))
 }
 
+/// The optional `database` of a request: absent or null means the session's
+/// own database.
+fn database(p: &Json) -> Option<String> {
+    p.get("database")
+        .and_then(Json::as_str)
+        .filter(|d| !d.is_empty())
+        .map(str::to_string)
+}
+
 fn binds(p: &Json) -> Result<Vec<String>, String> {
     match p.get("binds") {
         None | Some(Json::Null) => Ok(Vec::new()),
@@ -190,9 +199,27 @@ fn handle(client: &mut dyn DbClient, method: &str, p: &Json, emit: Emit) -> Resu
             let filter = wire::filter_from_json(p.get("filter").ok_or("missing filter")?)?;
             let page = wire::page_from_json(p.get("page").ok_or("missing page")?)?;
             let result = client
-                .query_table(&text(p, "owner")?, &text(p, "table")?, &filter, page)
+                .query_table_in(
+                    database(p).as_deref(),
+                    &text(p, "owner")?,
+                    &text(p, "table")?,
+                    &filter,
+                    page,
+                )
                 .map_err(db)?;
             stream_result(result, emit)
+        }
+        "count_table" => {
+            let filter = wire::filter_from_json(p.get("filter").ok_or("missing filter")?)?;
+            let count = client
+                .count_table_in(
+                    database(p).as_deref(),
+                    &text(p, "owner")?,
+                    &text(p, "table")?,
+                    &filter,
+                )
+                .map_err(db)?;
+            Ok(Json::Obj(vec![("count".into(), Json::Num(count as f64))]))
         }
         "execute" => {
             let n = client
@@ -217,16 +244,30 @@ fn handle(client: &mut dyn DbClient, method: &str, p: &Json, emit: Emit) -> Resu
                 .and_then(Json::as_bool)
                 .unwrap_or(false);
             client
-                .object_ddl_with(&text(p, "owner")?, &text(p, "name")?, &kind, show_storage)
+                .object_ddl_in(
+                    database(p).as_deref(),
+                    &text(p, "owner")?,
+                    &text(p, "name")?,
+                    &kind,
+                    show_storage,
+                )
                 .map(Json::Str)
                 .map_err(db)
         }
         "describe_table" => client
-            .describe_table(&text(p, "owner")?, &text(p, "name")?)
+            .describe_table_in(
+                database(p).as_deref(),
+                &text(p, "owner")?,
+                &text(p, "name")?,
+            )
             .map(|v| wire::columns_to_json(&v))
             .map_err(db),
         "list_indexes" => client
-            .list_indexes(&text(p, "owner")?, &text(p, "table")?)
+            .list_indexes_in(
+                database(p).as_deref(),
+                &text(p, "owner")?,
+                &text(p, "table")?,
+            )
             .map(|v| wire::indexes_to_json(&v))
             .map_err(db),
         "list_constraints" => client

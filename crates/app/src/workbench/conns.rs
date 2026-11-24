@@ -845,6 +845,8 @@ impl Workbench {
                             && last.profile.username == profile.username
                             && last.profile.connect_string == profile.connect_string
                             && last.profile.access.sysdba == profile.access.sysdba
+                            && last.profile.access.trust_server_certificate
+                                == profile.access.trust_server_certificate
                     })
             })
             .map(|conn| conn.id);
