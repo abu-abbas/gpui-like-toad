@@ -122,6 +122,7 @@ fn parse_entry(v: &Json) -> Option<IndexEntry> {
     let kind = match text("kind")? {
         "database" => ExtensionKind::Database,
         "tool" => ExtensionKind::Tool,
+        "action" => ExtensionKind::Action,
         _ => return None,
     };
     let files = match v.get("files")? {
@@ -204,5 +205,14 @@ mod tests {
     fn ids_are_safe_folder_names() {
         assert!(valid_id("sqlite") && valid_id("my-ext-2"));
         assert!(!valid_id("") && !valid_id("../x") && !valid_id("-x") && !valid_id("A"));
+    }
+
+    #[test]
+    fn an_action_extension_is_a_valid_kind() {
+        let text = r#"{"schema":1,"revision":1,"extensions":[
+          {"id":"dryrun","kind":"action","version":"1.0.0","min_app":"0.1.63",
+           "tag":"ext-dryrun-1.0.0","files":{"linux-x86_64":"kilat-ext-dryrun-1.0.0-linux-x86_64"}}]}"#;
+        let idx = ExtensionIndex::parse(text).unwrap();
+        assert_eq!(idx.get("dryrun").unwrap().kind, ExtensionKind::Action);
     }
 }
