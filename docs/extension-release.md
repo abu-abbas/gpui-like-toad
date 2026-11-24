@@ -61,6 +61,7 @@ Confirm the current version in the signed index and choose an unused
 | `postgres` | [PostgreSQL](../extensions/postgres/RELEASE_NOTES.md) |
 | `mysql` | [MySQL](../extensions/mysql/RELEASE_NOTES.md) |
 | `mssql` | [SQL Server](../extensions/mssql/RELEASE_NOTES.md) |
+| `dryrun` | [Dry-run](../extensions/dryrun/RELEASE_NOTES.md) |
 
 ## Publishing
 
@@ -77,7 +78,7 @@ If it fails after the release was created but before the index was updated,
 delete the `ext-<id>-<version>` release and its tag, then run it again.
 
 A new extension needs `extensions/<id>/extension.json` (id, name,
-description, kind `database` or `tool`, `crate`, `min_app`, optional
+description, kind `database`, `tool` or `action`, `crate`, `min_app`, optional
 `max_app`), a crate `crates/ext-<id>` whose `main` calls
 `ora_core::extension_serve::serve`, and its id added to the workflow's
 `options`.

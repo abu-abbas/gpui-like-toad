@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ora-core", "crates/ora-driver", "crates/sqlite-driver", "crates/devtools", "crates/ext-sqlite", "crates/postgres-driver", "crates/ext-postgres", "crates/mysql-driver", "crates/ext-mysql", "crates/mssql-driver", "crates/ext-mssql", "crates/ext-mailhog", "crates/ext-redis", "crates/app"]
+members = ["crates/ora-core", "crates/ora-driver", "crates/sqlite-driver", "crates/devtools", "crates/ext-sqlite", "crates/postgres-driver", "crates/ext-postgres", "crates/mysql-driver", "crates/ext-mysql", "crates/mssql-driver", "crates/ext-mssql", "crates/ext-mailhog", "crates/ext-redis", "crates/ext-dryrun", "crates/app"]
 # Patched copy of oracle/rust-oracledb (see vendor/oracledb/PATCHES.md).
 exclude = ["vendor/oracledb"]
 

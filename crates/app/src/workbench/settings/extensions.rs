@@ -18,10 +18,17 @@ pub(super) enum ExtFilter {
     Installed,
     Databases,
     Tools,
+    Actions,
 }
 
 impl ExtFilter {
-    const ALL: [Self; 4] = [Self::All, Self::Installed, Self::Databases, Self::Tools];
+    const ALL: [Self; 5] = [
+        Self::All,
+        Self::Installed,
+        Self::Databases,
+        Self::Tools,
+        Self::Actions,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -29,6 +36,7 @@ impl ExtFilter {
             Self::Installed => "Installed",
             Self::Databases => "Databases",
             Self::Tools => "Developer tools",
+            Self::Actions => "SQL tools",
         }
     }
 
@@ -38,6 +46,7 @@ impl ExtFilter {
             Self::Installed => installed,
             Self::Databases => info.kind == store::ExtensionKind::Database,
             Self::Tools => info.kind == store::ExtensionKind::Tool,
+            Self::Actions => info.kind == store::ExtensionKind::Action,
         }
     }
 }
@@ -45,6 +54,7 @@ impl ExtFilter {
 /// Does this build know how to run the downloaded extension?
 fn has_online_version(id: &str) -> bool {
     store::ToolKind::from_key(id).is_some()
+        || id == super::super::dryrun::ID
         || ora_core::DbKind::ALL
             .iter()
             .any(|k| *k != ora_core::DbKind::Oracle && k.key() == id)

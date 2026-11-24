@@ -4246,6 +4246,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kilat-ext-dryrun"
+version = "1.0.0"
+dependencies = [
+ "ora-core",
+ "ora-driver",
+ "serde_json",
+]
+
+[[package]]
 name = "kilat-ext-mailhog"
 version = "1.0.0"
 dependencies = [

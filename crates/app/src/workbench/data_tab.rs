@@ -16,7 +16,7 @@ use crate::theme::{FONT_GRID, LEADING_GRID};
 /// Rows shown at once in the Structure / Index grids (no paging there).
 const INFO_GRID_ROWS: usize = 1000;
 
-use super::row_count::{group_digits, RowCount};
+use super::row_count::{group_digits, page_count, page_offset, RowCount};
 use super::*;
 
 /// One editable condition in the filter bar.
@@ -107,6 +107,8 @@ pub(super) struct DataTab {
     pub(super) count: super::row_count::CountState,
     limit_input: Entity<InputState>,
     offset_input: Entity<InputState>,
+    /// 1-based page number; Enter jumps to that page.
+    page_input: Entity<InputState>,
     /// Columns hidden by the Columns picker; survive refetches.
     pub(super) hidden: HashSet<String>,
     /// Cell edits staged or applied but not yet committed.
@@ -162,8 +164,13 @@ impl DataTab {
                 .placeholder("Offset")
                 .default_value(page.offset.to_string())
         });
-        // Enter in either box jumps to that page.
-        let page_subs = [&limit_input, &offset_input]
+        let page_input = cx.new(|cx| {
+            InputState::new(&mut *window, cx)
+                .placeholder("Page")
+                .default_value("1")
+        });
+        // Enter in the Limit or Offset box jumps to that page.
+        let mut page_subs: Vec<Subscription> = [&limit_input, &offset_input]
             .into_iter()
             .map(|input| {
                 cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| {
@@ -173,6 +180,16 @@ impl DataTab {
                 })
             })
             .collect();
+        // Enter in the Page box jumps to that page number.
+        page_subs.push(cx.subscribe_in(
+            &page_input,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.go_to_page_number(window, cx);
+                }
+            },
+        ));
         DataTab {
             database,
             order_by: Vec::new(),
@@ -198,6 +215,7 @@ impl DataTab {
             count: Default::default(),
             limit_input,
             offset_input,
+            page_input,
             hidden: HashSet::new(),
             edits: Vec::new(),
             deletes: Vec::new(),
@@ -476,6 +494,44 @@ impl Workbench {
         self.show_page(offset, window, cx);
     }
 
+    /// Jump to the page number typed in the Page box: offset is
+    /// `(page - 1) * limit`, and a page past the end (when the total is
+    /// known) lands on the last page. An unreadable number keeps the
+    /// current page.
+    pub(super) fn go_to_page_number(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.conn.busy {
+            self.conn.status = "An operation is already running.".to_string();
+            cx.notify();
+            return;
+        }
+        let Some(data) = self.tabs.get(self.active_tab).and_then(|t| t.data.as_ref()) else {
+            return;
+        };
+        let limit = TablePage::new(
+            0,
+            data.limit_input
+                .read(cx)
+                .value()
+                .trim()
+                .parse()
+                .unwrap_or(data.page.limit),
+        )
+        .limit;
+        let current = (data.page.offset / limit.max(1)) as u64 + 1;
+        let page = data
+            .page_input
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(current);
+        let last = match data.count.value {
+            RowCount::Known(n) => Some(page_count(n, limit)),
+            _ => None,
+        };
+        self.show_page(page_offset(page, limit, last), window, cx);
+    }
+
     /// Set the page (clamped) and reload.
     fn show_page(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.blocked_by_staged_edits(cx) {
@@ -492,13 +548,16 @@ impl Workbench {
             .parse()
             .unwrap_or(data.page.limit);
         data.page = TablePage::new(offset, limit).with_rowid(data.page.rowid);
-        let (limit_input, offset_input, page) = (
+        let (limit_input, offset_input, page_input, page) = (
             data.limit_input.clone(),
             data.offset_input.clone(),
+            data.page_input.clone(),
             data.page,
         );
         Self::set_input(&limit_input, page.limit.to_string(), window, cx);
         Self::set_input(&offset_input, page.offset.to_string(), window, cx);
+        let number = page.offset / page.limit.max(1) + 1;
+        Self::set_input(&page_input, number.to_string(), window, cx);
         self.reload_data(cx);
     }
 
@@ -1438,6 +1497,20 @@ impl Workbench {
                             .w(px(64.))
                             .child(Input::new(&data.limit_input).small().w_full()),
                     )
+                    .child(caption_text("Page".to_string(), theme))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(56.))
+                            .child(Input::new(&data.page_input).small().w_full()),
+                    )
+                    .children(match total {
+                        RowCount::Known(n) => Some(caption_text(
+                            format!("of {}", group_digits(page_count(n, page.limit))),
+                            theme,
+                        )),
+                        _ => None,
+                    })
                     .child(caption_text("Offset".to_string(), theme))
                     .child(
                         div()
@@ -1503,6 +1576,21 @@ impl Workbench {
                                 theme,
                             ))
                         },
+                    )
+                    .child(
+                        Button::new("count-auto")
+                            .small()
+                            .ghost()
+                            .label("Auto")
+                            .selected(self.auto_count)
+                            .tooltip(
+                                "Count all rows by itself after a page loads (off by default: \
+                                 a big table can make it slow)",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let on = !this.auto_count;
+                                this.set_auto_count(on, cx);
+                            })),
                     )
                     .when(!matches!(total, RowCount::Known(_)), |this| {
                         this.child(
