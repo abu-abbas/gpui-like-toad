@@ -60,7 +60,7 @@ fn start_local(target: &MailHogTarget, params: &Value) -> Result<Option<ManagedS
     let config = ora_core::store::config_dir();
     let data = server::mailhog_data_dir(&config, id);
     std::fs::create_dir_all(&data).map_err(|err| err.to_string())?;
-    let logs = config.join("server-logs").join(id).join("mailhog.log");
+    let logs = server::prepare_mailhog_log(&config, id);
     let command = params
         .get("server_command")
         .and_then(Value::as_str)

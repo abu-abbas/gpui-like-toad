@@ -153,10 +153,11 @@ downloads.
    starts the server on `connect` when the instance asks for it, stops it on
    `shutdown` and when stdin closes, and reuses a server that already listens
    on the port. The code stays in `devtools::server` and is linked into both
-   extension programs; logs go to `server-logs/<id>/` (Settings > Logs reads
-   that folder by convention) and `running.pids` cleans up leftovers at the
-   next start. If the extension is killed, its server may outlive it until
-   then; a new `connect` reuses it.
+   extension programs. Settings > Logs reads developer tool logs under
+   `server-logs/developer-tools/`. MailHog uses `mailhog/<instance-id>/mailhog.log`
+   inside that folder. The `running.pids` journal tracks leftovers for the next
+   app start. If the extension is killed, its server may outlive it until then;
+   a new `connect` reuses it.
 2. **Icons**: built-in interface set plus an SVG identity icon in the signed
    index entry (see Components).
 3. **Sidebar**: by kind, `database` under Connections, `tool` under
