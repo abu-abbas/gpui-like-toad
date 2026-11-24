@@ -1,5 +1,7 @@
 //! Native renderer for the bounded extension UI protocol.
 
+mod mailhog;
+
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -18,11 +20,11 @@ struct Field {
 struct Action<'a> {
     id: &'a Text,
     item: Option<&'a Text>,
-    label: &'a Text,
     variant: Option<ButtonVariant>,
     disabled: bool,
     writes: bool,
     confirm: Option<&'a Text>,
+    button: Button,
 }
 
 pub(super) struct ExtensionPanel {
@@ -32,6 +34,7 @@ pub(super) struct ExtensionPanel {
     read_only: bool,
     production: bool,
     fields: HashMap<Text, Field>,
+    mailhog: bool,
 }
 
 impl gpui_kit::EventEmitter<Event> for ExtensionPanel {}
@@ -45,7 +48,13 @@ impl ExtensionPanel {
             read_only,
             production,
             fields: HashMap::new(),
+            mailhog: false,
         }
+    }
+
+    pub fn mailhog(mut self) -> Self {
+        self.mailhog = true;
+        self
     }
 
     pub fn update(&mut self, revision: u32, tree: Option<Option<Node>>, cx: &mut Context<Self>) {
@@ -152,18 +161,15 @@ impl ExtensionPanel {
         let Action {
             id,
             item,
-            label,
             variant,
             disabled,
             writes,
             confirm,
+            button,
         } = action;
         let key = id.clone();
         let item = item.cloned();
         let confirm = confirm.map(|text| text.as_str().to_owned());
-        let button = Button::new(item.as_ref().unwrap_or(&key).as_str().to_owned())
-            .small()
-            .label(label.as_str().to_owned());
         let button = match variant {
             Some(ButtonVariant::Primary) => button.primary(),
             Some(ButtonVariant::Danger) => button.danger(),
@@ -324,11 +330,13 @@ impl ExtensionPanel {
                     Action {
                         id,
                         item: None,
-                        label,
                         variant: *variant,
                         disabled: *disabled,
                         writes: *writes,
                         confirm: confirm.as_ref(),
+                        button: Button::new(id.as_str().to_owned())
+                            .small()
+                            .label(label.as_str().to_owned()),
                     },
                     cx,
                 )
@@ -347,12 +355,15 @@ impl ExtensionPanel {
                 let id = id.clone();
                 let options = options.clone();
                 let value = value.clone();
-                Button::new(id.as_str().to_owned())
-                    .small()
-                    .ghost()
-                    .child(title)
-                    .child(icon(IconName::ChevronDown, 12., theme.muted_foreground))
-                    .dropdown_menu(move |mut menu, _, _| {
+                let trigger = if self.slot == Slot::Explorer {
+                    explorer::control(id.as_str().to_owned(), theme).w_full()
+                } else {
+                    Button::new(id.as_str().to_owned()).small().ghost()
+                };
+                trigger
+                    .child(select_trigger(title, theme))
+                    .dropdown_menu(move |menu, _, _| {
+                        let mut menu = menu.scrollable(true).max_h(px(360.)).min_w(px(220.));
                         for (key, label) in &options {
                             let entity = entity.clone();
                             let id = id.clone();
@@ -403,46 +414,30 @@ impl ExtensionPanel {
                         Action {
                             id,
                             item: Some(&item.id),
-                            label: &item.label,
                             variant: Some(ButtonVariant::Ghost),
                             disabled: item.disabled,
                             writes: item.writes,
                             confirm: item.confirm.as_ref(),
+                            button: Button::new(item.id.as_str().to_owned())
+                                .small()
+                                .label(item.label.as_str().to_owned()),
                         },
                         cx,
                     )
                 }))
                 .into_any_element(),
-            Node::Tabs { id, active, items } => {
-                let buttons = div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(SPACE_1))
-                    .children(items.iter().map(|item| {
-                        let node = id.clone();
-                        let key = item.id.clone();
-                        Button::new(item.id.as_str().to_owned())
-                            .small()
-                            .ghost()
-                            .label(item.label.as_str().to_owned())
-                            .selected(&item.id == active)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.send(node.clone(), EventKind::Tab { item: key.clone() }, cx)
-                            }))
-                    }));
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(SPACE_2))
-                    .child(buttons)
-                    .children(
-                        items
-                            .iter()
-                            .find(|item| &item.id == active)
-                            .map(|item| self.render_node(&item.child, theme, cx)),
-                    )
-                    .into_any_element()
-            }
+            Node::Tabs { id, active, items } => div()
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_2))
+                .child(self.tab_strip(id, active, items, theme, cx))
+                .children(
+                    items
+                        .iter()
+                        .find(|item| &item.id == active)
+                        .map(|item| self.render_node(&item.child, theme, cx)),
+                )
+                .into_any_element(),
             Node::List { id, rows, more } => {
                 let node = id.clone();
                 let rows: Vec<_> = rows
@@ -457,6 +452,7 @@ impl ExtensionPanel {
                     })
                     .collect();
                 let count = rows.len();
+                let theme = theme.clone();
                 let list = uniform_list(
                     "extension-items",
                     count,
@@ -466,20 +462,40 @@ impl ExtensionPanel {
                                 let (key, title, subtitle, selected) = &rows[index];
                                 let node = node.clone();
                                 let item = key.clone();
-                                let label = subtitle
-                                    .as_ref()
-                                    .map_or_else(|| title.clone(), |s| format!("{title} · {s}"));
                                 let label = if title.is_empty() {
-                                    "(No subject)".to_owned()
+                                    "(no subject)"
                                 } else {
-                                    label
+                                    title
                                 };
-                                Button::new(index)
+                                let row = div()
+                                    .id(item.as_str().to_owned())
+                                    .flex()
+                                    .flex_col()
                                     .w_full()
-                                    .small()
-                                    .ghost()
-                                    .selected(*selected)
-                                    .label(label)
+                                    .justify_center()
+                                    .h(px(48.))
+                                    .px(px(SPACE_2))
+                                    .rounded(px(RADIUS_SM))
+                                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
+                                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(subtitle.as_deref().unwrap_or(label).to_owned()),
+                                    )
+                                    .children(
+                                        subtitle
+                                            .as_ref()
+                                            .map(|_| div().truncate().child(label.to_owned())),
+                                    );
+                                let row = if *selected {
+                                    row.bg(theme.accent).text_color(theme.accent_foreground)
+                                } else {
+                                    row.text_color(theme.foreground)
+                                        .hover(|style| style.bg(theme.secondary))
+                                };
+                                row.cursor_pointer()
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.send(
                                             node.clone(),
@@ -533,6 +549,33 @@ impl ExtensionPanel {
                 .into_any_element(),
         }
     }
+    fn tab_strip(
+        &self,
+        id: &Text,
+        active: &Text,
+        items: &[ora_core::extension_ui::TabItem],
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(SPACE_3))
+            .children(items.iter().map(|item| {
+                let node = id.clone();
+                let key = item.id.clone();
+                let selected = &item.id == active;
+                super::tools_mail::mail_tab_button(
+                    item.id.as_str().to_owned(),
+                    item.label.as_str().to_owned().into(),
+                    selected,
+                    theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.send(node.clone(), EventKind::Tab { item: key.clone() }, cx)
+                }))
+            }))
+    }
 }
 
 fn text_row<'a>(cells: impl IntoIterator<Item = &'a Text>) -> gpui_kit::Div {
@@ -577,6 +620,15 @@ impl Render for ExtensionPanel {
                 )
                 .into_any_element();
         }
+        if self.mailhog {
+            if let Some(view) = self
+                .tree
+                .as_ref()
+                .and_then(|tree| self.mailhog_layout(tree, &theme, cx))
+            {
+                return view;
+            }
+        }
         div()
             .id("extension-panel")
             .flex()
@@ -585,6 +637,7 @@ impl Render for ExtensionPanel {
             .min_h(px(0.))
             .min_w(px(0.))
             .p(px(SPACE_3))
+            .when(self.slot == Slot::Explorer, |panel| panel.bg(theme.sidebar))
             .overflow_y_scroll()
             .children(
                 self.tree
