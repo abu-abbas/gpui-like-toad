@@ -7,7 +7,7 @@
 //! Every network call runs on the background executor; the UI thread only
 //! applies results.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use devtools::mailhog::{MailHogClient, MailHogTarget};
@@ -100,6 +100,8 @@ pub(super) struct ToolsState {
     pub redis: HashMap<String, RedisView>,
     pub mail: HashMap<String, MailView>,
     pub pilot: Option<super::mailhog_pilot::MailhogPilot>,
+    /// Stops still in flight, including after the user switches to another tool.
+    pub mailhog_stopping: HashSet<String>,
     pub folded: bool,
     /// Passwords typed without "Save password": kept for this run only.
     pub session_passwords: HashMap<String, String>,
@@ -202,6 +204,11 @@ impl Workbench {
         let Some(tool) = self.tools.get(id).cloned() else {
             return;
         };
+        if self.tools.mailhog_stopping.contains(id)
+            && self.tools.pilot.as_ref().is_none_or(|p| p.instance != id)
+        {
+            return;
+        }
         self.tools.active = Some(id.to_string());
         self.rail = RailPanel::Connections;
         if self
@@ -212,13 +219,12 @@ impl Workbench {
         {
             self.close_mailhog_pilot(cx);
         }
-        if tool.kind == ToolKind::MailHog && self.extensions.tool_enabled(tool.kind) {
-            if let Some(install) = store::remote_install(super::mailhog_pilot::ID) {
-                if self.tools.pilot.is_none() {
-                    self.open_mailhog_pilot(tool, install.path, cx);
-                }
-                return;
+        if let Some(install) = self.mailhog_extension(&tool) {
+            if self.tools.pilot.is_none() {
+                self.open_mailhog_pilot(tool, install.path, cx);
             }
+            cx.notify();
+            return;
         }
         match tool.kind {
             ToolKind::Redis => {
@@ -692,8 +698,6 @@ impl Workbench {
         let kind = tool.kind;
         let view = cx.entity();
         let menu_id = tool.id.clone();
-        let managed_by_extension =
-            kind == ToolKind::MailHog && store::remote_install(super::mailhog_pilot::ID).is_some();
         let flags = self.server_flags(tool);
         div()
             .id(("tool-row", ix))
@@ -728,11 +732,7 @@ impl Workbench {
                 } else {
                     menu
                 };
-                let menu = if managed_by_extension {
-                    menu
-                } else {
-                    super::tools_server::server_menu(menu, &i4, flags, &v4)
-                };
+                let menu = super::tools_server::server_menu(menu, &i4, flags, &v4);
                 menu.separator()
                     .item(
                         PopupMenuItem::new("Edit…")

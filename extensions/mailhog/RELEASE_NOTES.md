@@ -7,6 +7,7 @@ Minimum Kilat version `0.1.60`.
 - Local MailHog logs are saved under `server-logs/developer-tools/mailhog/<instance-id>/` and appear in Settings → Logs → Developer Tools.
 - Existing logs and their rotated copies move when the local server next starts. If both locations already have logs, Settings still lists both.
 - Every new line starts with a local timestamp and UTC offset.
+- Restore Start, Restart and Stop in the connection's context menu. Stopping a managed server keeps its view open with a Start server button in the Inbox column.
 
 ## [1.0.0](https://github.com/abu-abbas/kilat/releases/tag/ext-mailhog-1.0.0) · 2026-11-24
 

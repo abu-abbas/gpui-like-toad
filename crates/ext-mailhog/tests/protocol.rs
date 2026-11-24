@@ -171,6 +171,32 @@ fn connect_reports_the_total_and_list_streams_the_messages() {
 }
 
 #[test]
+fn an_existing_server_is_not_owned_by_the_extension() {
+    let fake = Fake::new(vec![]);
+    let mut ext = start();
+    let reply = ext
+        .call(
+            "connect",
+            params(json!({"target": fake.target(), "start_server": true})),
+            WAIT,
+        )
+        .unwrap();
+    assert_eq!(
+        reply.get("managed_server").and_then(Json::as_bool),
+        Some(false)
+    );
+    let error = ext.call("server.stop", Json::Null, WAIT).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("Kilat did not start this server"));
+    ext.call("disconnect", params(json!({})), WAIT).unwrap();
+    assert_eq!(
+        connect(&mut ext, &fake).get("total").and_then(Json::as_u64),
+        Some(0)
+    );
+}
+
+#[test]
 fn search_sends_the_kind_and_the_encoded_query() {
     let fake = Fake::new(vec![api_message("1", "Reset", "x")]);
     let mut ext = start();
