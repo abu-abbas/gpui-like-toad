@@ -2,7 +2,7 @@
 
 ## 1.0.0 · Unreleased
 
-Minimum Kilat version `0.1.62`.
+Minimum Kilat version `0.1.63`.
 
 - First signed Redis package for installation from Settings → Extensions.
 - Browse keys with SCAN by database, type and pattern, and read strings (JSON is indented), hashes, lists, sets, sorted sets and streams.

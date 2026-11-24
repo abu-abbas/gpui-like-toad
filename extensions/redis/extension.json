@@ -4,5 +4,5 @@
   "description": "Browse keys, read values and run commands.",
   "kind": "tool",
   "crate": "kilat-ext-redis",
-  "min_app": "0.1.62"
+  "min_app": "0.1.63"
 }
