@@ -53,7 +53,7 @@ impl ExtFilter {
 
 /// Does this build know how to run the downloaded extension?
 fn has_online_version(id: &str) -> bool {
-    id == super::super::mailhog_pilot::ID
+    store::ToolKind::from_key(id).is_some()
         || id == super::super::dryrun::ID
         || ora_core::DbKind::ALL
             .iter()
@@ -212,10 +212,11 @@ impl Workbench {
         if self.settings.ext_online.working() {
             return;
         }
-        if id == super::super::mailhog_pilot::ID && !self.stop_mailhog_before_uninstall() {
+        if store::ToolKind::from_key(id).is_some() && !self.stop_pilot_before_uninstall(id) {
+            let name = store::extension_info(id).map_or(id, |i| i.name);
             self.settings.ext_online.note = Some((
                 true,
-                "Wait for the MailHog request to finish, then retry.".into(),
+                format!("Wait for the {name} request to finish, then retry."),
             ));
             cx.notify();
             return;

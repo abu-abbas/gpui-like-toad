@@ -160,6 +160,9 @@ pub enum Node {
         id: Text,
         value: Text,
         placeholder: Option<Text>,
+        /// Kilat empties the box after a submit (a console line).
+        #[serde(default)]
+        clear_on_submit: bool,
     },
     Select {
         id: Text,
