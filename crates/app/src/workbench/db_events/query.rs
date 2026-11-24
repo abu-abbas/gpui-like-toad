@@ -61,6 +61,7 @@ impl Workbench {
         if is_data {
             let tab_id = self.target_tab_for_mut(cid).id;
             self.clob_result_changed(tab_id, cx);
+            self.data_page_loaded(cid, cx);
         }
         self.set_status_for(
             cid,
