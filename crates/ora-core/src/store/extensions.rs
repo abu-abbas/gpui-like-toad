@@ -13,6 +13,9 @@ use std::collections::BTreeSet;
 pub enum ExtensionKind {
     Database,
     Tool,
+    /// Something done to the SQL editor's statement (Dry-run): no sidebar
+    /// entry, a button in the editor toolbar.
+    Action,
 }
 
 /// Static description of one extension.
@@ -68,6 +71,14 @@ pub const REGISTRY: &[ExtensionInfo] = &[
         name: "Redis",
         description: "Browse keys, read values and run commands.",
         kind: ExtensionKind::Tool,
+        built_in: false,
+        version: env!("CARGO_PKG_VERSION"),
+    },
+    ExtensionInfo {
+        id: "dryrun",
+        name: "Dry-run",
+        description: "Run an UPDATE or DELETE without committing: see old and new values and get an undo script.",
+        kind: ExtensionKind::Action,
         built_in: false,
         version: env!("CARGO_PKG_VERSION"),
     },
@@ -362,6 +373,14 @@ mod tests {
         assert!(!ext.is_installed("sqlite"));
         assert!(!ext.any_tool());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_action_extension_does_not_open_the_developer_tools_section() {
+        let mut ext = Extensions::default();
+        ext.install("dryrun");
+        assert!(ext.is_installed("dryrun"));
+        assert!(!ext.any_tool());
     }
 
     #[test]

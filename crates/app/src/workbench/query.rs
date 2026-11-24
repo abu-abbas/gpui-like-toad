@@ -130,21 +130,23 @@ impl Workbench {
         if self.active_tab().data.is_some() {
             return self.run(cx);
         }
-        let editor = self.active_tab().editor.clone();
-        let sql = {
-            let state = editor.read(cx);
-            let range = state.selected_range();
-            let text = state.value().to_string();
-            if range.start < range.end && range.end <= text.len() {
-                text[range].to_string()
-            } else {
-                statement_at(&text, state.cursor())
-            }
-        };
+        let sql = self.current_statement(cx);
         self.run_sql(sql, cx);
     }
 
-    fn run_sql(&mut self, sql: String, cx: &mut Context<Self>) {
+    /// The selection if there is one, else the statement the cursor sits in.
+    pub(super) fn current_statement(&self, cx: &App) -> String {
+        let state = self.active_tab().editor.read(cx);
+        let range = state.selected_range();
+        let text = state.value().to_string();
+        if range.start < range.end && range.end <= text.len() {
+            text[range].to_string()
+        } else {
+            statement_at(&text, state.cursor())
+        }
+    }
+
+    pub(super) fn run_sql(&mut self, sql: String, cx: &mut Context<Self>) {
         if clean_statement(&sql).is_empty() {
             self.push_message("The editor is empty.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;

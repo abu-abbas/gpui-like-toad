@@ -16,7 +16,7 @@ on:
         description: 'Extension (folder di extensions/)'
         required: true
         type: choice
-        options: [sqlite, mailhog, postgres, mysql]
+        options: [sqlite, mailhog, postgres, mysql, dryrun]
       version:
         description: 'Versi extension, mis. 1.0.0'
         required: true
