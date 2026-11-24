@@ -20,6 +20,10 @@ on:
       version:
         description: 'Versi extension, mis. 1.0.0'
         required: true
+      release_notes:
+        description: 'Release notes from the extension RELEASE_NOTES.md (optional)'
+        type: string
+        required: false
 
 concurrency:
   group: release-extension
@@ -185,10 +189,18 @@ jobs:
       - name: Verifikasi rilis seperti app
         run: .github/scripts/verify-release.sh out "$VERSION" release-key.pub "kilat-ext-$EXT-"
       - name: Terbitkan rilis extension (bukan latest)
+        env:
+          RELEASE_NOTES: ${{ inputs.release_notes }}
         run: |
-          gh release create "ext-$EXT-$VERSION" out/* --target "${{ github.sha }}" \
-            --title "$EXT extension $VERSION" --latest=false \
-            --notes "Extension $EXT $VERSION untuk Kilat. Dibangun dari ${{ github.sha }}. Dipasang dari Settings > Extensions, bukan diunduh manual."
+          notes="$RUNNER_TEMP/extension-release-notes.md"
+          if [[ -n "$RELEASE_NOTES" ]]; then
+            printf '%s\n\n' "$RELEASE_NOTES" > "$notes"
+          else
+            : > "$notes"
+          fi
+          printf 'Built from %s. Install from **Settings → Extensions**.\n' "$GITHUB_SHA" >> "$notes"
+          gh release create "ext-$EXT-$VERSION" out/* --target "$GITHUB_SHA" \
+            --title "$EXT extension $VERSION" --latest=false --notes-file "$notes"
       - name: Perbarui index extensions.json
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
