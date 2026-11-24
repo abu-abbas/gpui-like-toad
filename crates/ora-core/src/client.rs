@@ -121,6 +121,26 @@ pub trait DbClient: Send {
         self.query_binds(&query.sql, &query.binds, FetchLimits::rows(page.limit))
     }
 
+    /// Number of rows of `table` that pass `filter` (the data tab's total).
+    /// A full count can be slow on a big table, so the UI asks only when
+    /// the user does.
+    fn count_table(
+        &mut self,
+        owner: &str,
+        table: &str,
+        filter: &TableFilter,
+    ) -> Result<u64, DbError> {
+        let query = filter::count_sql(self.dialect(), owner, table, filter);
+        let result = self.query_binds(&query.sql, &query.binds, FetchLimits::rows(1))?;
+        match result.get(0, 0) {
+            Some(Value::Integer(n)) => u64::try_from(*n).ok(),
+            Some(Value::Float(f)) if *f >= 0.0 => Some(*f as u64),
+            Some(other) => other.display().trim().parse().ok(),
+            None => None,
+        }
+        .ok_or_else(|| DbError::new("The database returned no row count."))
+    }
+
     /// The start of CLOB cells of the data tab, for the rows with `rowids`
     /// and the CLOB `columns`: one query for all of them. Cells that are
     /// NULL or empty are left out. Backends that read CLOB starts together

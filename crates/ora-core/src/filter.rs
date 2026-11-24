@@ -469,8 +469,34 @@ pub fn select_sql_keyed(
     BoundQuery { sql, binds }
 }
 
+/// `SELECT COUNT(*)` over the rows of `table` that pass `filter`: the
+/// total the data tab shows next to the page range.
+pub fn count_sql(
+    dialect: &dyn Dialect,
+    owner: &str,
+    table: &str,
+    filter: &TableFilter,
+) -> BoundQuery {
+    let mut sql = format!("SELECT COUNT(*) FROM {}", dialect.table_ref(owner, table));
+    let mut binds = Vec::new();
+    if let Some((clause, b)) = filter.where_clause() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&clause);
+        binds = b;
+    }
+    BoundQuery { sql, binds }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn count_sql_applies_the_filter() {
+        use crate::dialect::OracleDialect;
+        let all = count_sql(&OracleDialect, "HR", "T", &TableFilter::default());
+        assert_eq!(all.sql, "SELECT COUNT(*) FROM \"HR\".\"T\"");
+        assert!(all.binds.is_empty());
+    }
 
     #[test]
     fn inlined_replaces_binds_outside_quotes() {
