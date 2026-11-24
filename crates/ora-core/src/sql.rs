@@ -853,13 +853,139 @@ fn statement_spans(sql: &str) -> Vec<(usize, usize)> {
     spans
 }
 
-/// The statement the cursor (byte offset) sits in. Statements end at a
-/// `;` outside quotes and comments; a cursor right after a `;` still
-/// belongs to the statement that `;` closes. Empty segments are skipped
-/// so a cursor on trailing whitespace picks the nearest statement before.
-/// Returns the whole text when it holds a single statement.
+/// Statement boundaries the way Toad draws them, for the editor's Run
+/// buttons: a statement ends at a `;` outside quotes and comments, at a
+/// blank line, or at a line holding only `/`. PL/SQL (`BEGIN`/`DECLARE`
+/// blocks, `CREATE [OR REPLACE] FUNCTION|PROCEDURE|PACKAGE|TRIGGER|TYPE`,
+/// `WITH FUNCTION`) is the exception: its `;` and blank lines belong to the
+/// block, which ends only at the `/` line (or the end of the text).
+/// Comment-only chunks never form a statement of their own; they stay with
+/// the statement after them.
+pub fn script_spans(sql: &str) -> Vec<(usize, usize)> {
+    let bytes = sql.as_bytes();
+    let mut spans = Vec::new();
+    let (mut start, mut i) = (0usize, 0usize);
+    let (mut content, mut plsql) = (false, false);
+    while i < bytes.len() {
+        if i == 0 || bytes[i - 1] == b'\n' {
+            let end = sql[i..].find('\n').map_or(sql.len(), |n| i + n);
+            if sql[i..end].trim() == "/" {
+                if content {
+                    spans.push((start, i));
+                }
+                start = (end + 1).min(sql.len());
+                i = start;
+                content = false;
+                plsql = false;
+                continue;
+            }
+        }
+        let b = bytes[i];
+        let next = bytes.get(i + 1).copied();
+        let comment = (b == b'-' && next == Some(b'-')) || (b == b'/' && next == Some(b'*'));
+        if !content && !b.is_ascii_whitespace() && !comment {
+            content = true;
+            plsql = sql.get(i..).is_some_and(starts_plsql);
+        }
+        match b {
+            b'q' | b'Q' if next == Some(b'\'') && i + 2 < bytes.len() => {
+                let end = match bytes[i + 2] {
+                    b'[' => b']',
+                    b'(' => b')',
+                    b'{' => b'}',
+                    b'<' => b'>',
+                    c => c,
+                };
+                i += 3;
+                while i < bytes.len() && !(bytes[i] == end && bytes.get(i + 1) == Some(&b'\'')) {
+                    i += 1;
+                }
+                i += 1;
+            }
+            quote @ (b'\'' | b'"') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+            }
+            b'-' if next == Some(b'-') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b'/' if next == Some(b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b';' if !plsql => {
+                spans.push((start, i + 1));
+                start = i + 1;
+                content = false;
+            }
+            b'\n' if content && !plsql => {
+                // A blank line (only whitespace up to the next newline) ends it.
+                let rest = &sql[i + 1..];
+                if rest.find('\n').is_some_and(|n| rest[..n].trim().is_empty()) {
+                    spans.push((start, i));
+                    start = i + 1;
+                    content = false;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if content {
+        spans.push((start, bytes.len()));
+    }
+    spans
+}
+
+/// True when `rest` (starting at a statement's first real token) opens a
+/// PL/SQL unit that runs on until a `/` line.
+fn starts_plsql(rest: &str) -> bool {
+    let mut words = rest.split_whitespace().map(|w| {
+        w.chars()
+            .take_while(char::is_ascii_alphabetic)
+            .collect::<String>()
+            .to_ascii_uppercase()
+    });
+    match words.next().as_deref() {
+        Some("BEGIN" | "DECLARE") => true,
+        Some("WITH") => matches!(words.next().as_deref(), Some("FUNCTION" | "PROCEDURE")),
+        Some("CREATE") => {
+            for word in words {
+                match word.as_str() {
+                    "OR" | "REPLACE" | "EDITIONABLE" | "NONEDITIONABLE" => {}
+                    "FUNCTION" | "PROCEDURE" | "PACKAGE" | "TRIGGER" | "TYPE" => return true,
+                    _ => return false,
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// The statements of editor text (or a selection), in order, each trimmed.
+pub fn script_statements(sql: &str) -> Vec<String> {
+    script_spans(sql)
+        .into_iter()
+        .map(|(a, b)| sql[a..b].trim().to_string())
+        .collect()
+}
+
+/// The statement the cursor (byte offset) sits in, split as by
+/// [`script_spans`]. A cursor right after a statement's end still belongs
+/// to it. Empty segments are skipped so a cursor on trailing whitespace
+/// picks the nearest statement before. Returns the whole text when it
+/// holds a single statement.
 pub fn statement_at(sql: &str, cursor: usize) -> String {
-    let spans = statement_spans(sql);
+    let spans = script_spans(sql);
     let cursor = cursor.min(sql.len());
     let pick = spans
         .iter()
@@ -911,6 +1037,48 @@ mod tests {
         assert_eq!(statement_at(sql, sql.len()), "-- c; x\nSELECT 3 FROM dual");
         assert_eq!(statement_at("SELECT 1", 0), "SELECT 1");
         assert_eq!(statement_at("  ", 1), "");
+    }
+
+    #[test]
+    fn blank_lines_and_slash_lines_end_statements() {
+        let sql = "SELECT 1\nFROM dual\n\nSELECT 2 FROM dual\n/\nSELECT 3 FROM dual";
+        assert_eq!(
+            script_statements(sql),
+            [
+                "SELECT 1\nFROM dual",
+                "SELECT 2 FROM dual",
+                "SELECT 3 FROM dual"
+            ]
+        );
+        assert_eq!(statement_at(sql, 10), "SELECT 1\nFROM dual");
+        assert_eq!(statement_at(sql, 24), "SELECT 2 FROM dual");
+        // Blank lines inside a block comment or string do not split.
+        assert_eq!(
+            script_statements("SELECT /* a\n\nb */ 1, 'x\n\ny' FROM dual").len(),
+            1
+        );
+        assert!(script_statements("-- only\n\n  \n").is_empty());
+    }
+
+    #[test]
+    fn plsql_blocks_are_not_split_on_semicolons_or_blank_lines() {
+        let sql =
+            "UPDATE t SET a = 1;\nBEGIN\n  x := 1;\n\n  y := 2;\nEND;\n/\nSELECT 1 FROM dual;";
+        let parts = script_statements(sql);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[1], "BEGIN\n  x := 1;\n\n  y := 2;\nEND;");
+        assert_eq!(statement_at(sql, 40), parts[1]);
+        let create =
+            "CREATE OR REPLACE PROCEDURE p IS\nBEGIN\n  NULL;\nEND;\n/\nSELECT 1 FROM dual";
+        assert_eq!(script_statements(create).len(), 2);
+        let with_fn =
+            "WITH FUNCTION f RETURN NUMBER IS BEGIN RETURN 1; END;\nSELECT f FROM dual;\n/";
+        assert_eq!(script_statements(with_fn).len(), 1);
+        // Plain DDL is still split on `;`.
+        assert_eq!(
+            script_statements("CREATE TABLE a (x NUMBER); CREATE TABLE b (y NUMBER);").len(),
+            2
+        );
     }
 
     #[test]

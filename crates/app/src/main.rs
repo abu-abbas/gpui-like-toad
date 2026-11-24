@@ -114,19 +114,21 @@ fn main() {
         #[cfg(target_os = "macos")]
         macos_dock::apply_icon(theme::appearance(cx).app_icon);
         theme::set_theme_names(ora_core::store::load_theme_names(), cx);
-        // Cmd+Enter (macOS) / Ctrl+Enter and F5 run the active query. Each
-        // shortcut has one binding per platform, with the one tooltips show
-        // (via Button::tooltip_with_action) registered last.
+        // Toad-style run keys: Cmd/Ctrl+Enter and F9 run the current
+        // statement (or selection), F5 runs the whole editor (or selection)
+        // as a script. Each shortcut has one binding per platform, with the
+        // one tooltips show (via Button::tooltip_with_action) registered last.
         cx.bind_keys([
             KeyBinding::new("cmd-c", Copy, Some("OraDataGrid")),
             KeyBinding::new("ctrl-c", Copy, Some("OraDataGrid")),
             KeyBinding::new("cmd-v", Paste, Some("OraDataGrid")),
             KeyBinding::new("ctrl-v", Paste, Some("OraDataGrid")),
             KeyBinding::new("f5", workbench::RunQuery, Some("Workbench")),
+            KeyBinding::new("f9", workbench::RunCurrent, Some("Workbench")),
             #[cfg(target_os = "macos")]
-            KeyBinding::new("cmd-enter", workbench::RunQuery, Some("Workbench")),
+            KeyBinding::new("cmd-enter", workbench::RunCurrent, Some("Workbench")),
             #[cfg(not(target_os = "macos"))]
-            KeyBinding::new("ctrl-enter", workbench::RunQuery, Some("Workbench")),
+            KeyBinding::new("ctrl-enter", workbench::RunCurrent, Some("Workbench")),
             #[cfg(target_os = "macos")]
             KeyBinding::new("cmd-/", workbench::ToggleComment, Some("Workbench")),
             #[cfg(not(target_os = "macos"))]
