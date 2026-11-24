@@ -196,6 +196,18 @@ impl LogWriter {
     }
 
     fn line(&mut self, text: &str) {
+        // A user can remove the log or its folder while the child is running.
+        // Reopen it before appending to a file that is no longer reachable.
+        match fs::metadata(&self.path) {
+            Ok(meta) => self.size = meta.len(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let Ok(writer) = Self::open(&self.path) else {
+                    return;
+                };
+                *self = writer;
+            }
+            Err(_) => return,
+        }
         let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z");
         let line = format!("[{stamp}] {text}\n");
         if self.size + line.len() as u64 > LOG_LIMIT && self.size > 0 {
@@ -626,7 +638,12 @@ mod tests {
         let dir = temp();
         let path = dir.join("t.log");
         let mut w = LogWriter::open(&path).unwrap();
-        w.size = LOG_LIMIT - 3;
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(LOG_LIMIT - 3)
+            .unwrap();
         w.line("hello");
         assert!(rotated(&path).exists());
         let text = fs::read_to_string(&path).unwrap();
@@ -639,6 +656,22 @@ mod tests {
         clear_log(&path).unwrap();
         assert!(!rotated(&path).exists());
         assert_eq!(fs::read_to_string(&path).unwrap(), "");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn logging_recreates_a_removed_log_folder() {
+        let dir = temp();
+        let logs = dir.join("logs");
+        let path = logs.join("mailhog.log");
+        let mut w = LogWriter::open(&path).unwrap();
+        w.line("before removal");
+        fs::remove_dir_all(&logs).unwrap();
+        w.line("after removal");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.ends_with("] after removal\n"), "{text}");
+        assert!(!text.contains("before removal"));
         let _ = fs::remove_dir_all(dir);
     }
 
