@@ -76,6 +76,15 @@ impl Render for Splash {
 /// the splash. Falls back to opening the main window right away when the
 /// splash window cannot be created.
 pub(crate) fn show_then(cx: &mut App, open_main: fn(&mut App)) {
+    // Diagnostic: KILAT_NOSPLASH=1, or an empty `no-splash` file in the
+    // Kilat data folder (works when launched from Finder), skips the
+    // splash window and its sound, to compare idle memory.
+    if std::env::var_os("KILAT_NOSPLASH").is_some()
+        || ora_core::store::config_dir().join("no-splash").exists()
+    {
+        open_main(cx);
+        return;
+    }
     let pref = ora_core::store::load_theme_preference();
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
