@@ -59,6 +59,8 @@ use crate::theme::{
 };
 use crate::worker::{DbHandle, ExportFormat, Job, Password, Response};
 
+pub use transaction::request_quit;
+
 mod cell_edit;
 mod chrome;
 mod clob_preview;
@@ -89,6 +91,7 @@ mod tool_pilot;
 mod tools;
 mod tools_mail;
 mod tools_server;
+mod transaction;
 mod transfer;
 mod transfer_ui;
 mod ui_helpers;
@@ -145,6 +148,8 @@ enum ResultsTab {
     Results,
     Plan,
     Messages,
+    /// The Dry-run extension's view, for the tab it was started from.
+    DryRun,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -259,9 +264,15 @@ struct ConnState {
     current_schema: Option<String>,
     selected_object: Option<String>,
     objects: Vec<SchemaObject>,
-    /// DML ran since the last commit/rollback (best effort: DDL commits
-    /// on its own and is not tracked). Shown in the connection switcher.
+    /// DML ran since the last commit/rollback (best effort, see
+    /// [`transaction::tx_effect`]). Shown in the status bar, toolbar,
+    /// sidebar, tabs and the connection switcher.
     uncommitted: bool,
+    /// How many writes (statements, or rows of Apply) are waiting for
+    /// Commit; the status bar badge shows it.
+    uncommitted_changes: u32,
+    /// Tabs whose work is part of the open transaction (dot on the tab).
+    uncommitted_tabs: HashSet<u64>,
     status: String,
     /// This connection's autocomplete catalog while it is parked; empty
     /// while active (the live one is `Workbench::catalog`).
@@ -299,6 +310,8 @@ impl ConnState {
             selected_object: None,
             objects: Vec::new(),
             uncommitted: false,
+            uncommitted_changes: 0,
+            uncommitted_tabs: HashSet::new(),
             status: "Not connected.".to_string(),
             catalog: Catalog::new(),
             catalog_loading: HashSet::new(),
@@ -328,6 +341,38 @@ impl ConnState {
             .databases
             .then(|| self.current_schema.clone())
             .flatten()
+    }
+
+    /// Database engine of this connection (the demo speaks Oracle).
+    fn kind(&self) -> DbKind {
+        self.last_connection
+            .as_ref()
+            .filter(|last| !last.demo)
+            .map_or(DbKind::Oracle, |last| last.profile.kind)
+    }
+
+    /// `changes` writes (at least one) joined the open transaction, made
+    /// from tab `tab` when known.
+    fn note_write(&mut self, changes: u32, tab: Option<u64>) {
+        self.uncommitted = true;
+        self.uncommitted_changes = self.uncommitted_changes.saturating_add(changes.max(1));
+        self.uncommitted_tabs.extend(tab);
+    }
+
+    /// Commit, rollback, implicit commit or a lost session ended it.
+    fn clear_uncommitted(&mut self) {
+        self.uncommitted = false;
+        self.uncommitted_changes = 0;
+        self.uncommitted_tabs.clear();
+    }
+
+    /// Apply what `sql` does to the open transaction.
+    fn note_statement(&mut self, sql: &str, tab: Option<u64>) {
+        match transaction::tx_effect(self.kind(), sql) {
+            transaction::TxEffect::None => {}
+            transaction::TxEffect::Write => self.note_write(1, tab),
+            transaction::TxEffect::Ends => self.clear_uncommitted(),
+        }
     }
 
     fn label(&self) -> String {
@@ -508,6 +553,11 @@ pub struct Workbench {
     dryrun: Option<dryrun::DryRun>,
     /// "Save scripts before disconnect?" dialog, while it is showing.
     disconnect_prompt: Option<conns::DisconnectPrompt>,
+    /// "Uncommitted changes" dialog before Disconnect / close / Quit.
+    tx_prompt: Option<transaction::TxPrompt>,
+    /// Commit or Rollback sent from that dialog, still running.
+    tx_finish: Option<transaction::TxFinish>,
+
     /// The Info panel under data / script tabs is folded to its header.
     info_collapsed: bool,
     side_conn_folded: bool,
@@ -626,6 +676,8 @@ impl Workbench {
             transfer: None,
             dryrun: None,
             disconnect_prompt: None,
+            tx_prompt: None,
+            tx_finish: None,
             info_collapsed: layout.info_collapsed,
             side_conn_folded: false,
             focus_handle: cx.focus_handle(),
@@ -885,7 +937,7 @@ impl Render for Workbench {
                         }
                     })),
             )
-            .child(self.render_status_bar(&theme))
+            .child(self.render_status_bar(&theme, cx))
             .when(self.connection_form.show_connection_form, |this| {
                 this.child(self.render_connection_dialog(&theme, cx))
             })
@@ -901,11 +953,11 @@ impl Render for Workbench {
             .when(self.transfer.is_some(), |this| {
                 this.child(self.render_transfer(&theme, cx))
             })
-            .when(self.dryrun.is_some(), |this| {
-                this.child(self.render_dryrun(&theme, cx))
-            })
             .when(self.disconnect_prompt.is_some(), |this| {
                 this.child(self.render_disconnect_prompt(&theme, cx))
+            })
+            .when(self.tx_prompt.is_some(), |this| {
+                this.child(self.render_tx_prompt(&theme, cx))
             })
             .when(self.folder_delete.is_some(), |this| {
                 this.child(self.render_folder_delete(&theme, cx))

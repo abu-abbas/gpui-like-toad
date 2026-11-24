@@ -1,6 +1,6 @@
 # Kilat
 
-A fast, lightweight desktop database client for **Oracle** and **SQLite**, written in Rust with [gpui-kit](https://gpui-kit.com). One binary, no Oracle Client or Instant Client needed: Oracle connections use the thin driver, which speaks Oracle Net directly.
+A fast, lightweight desktop database client for **Oracle**, written in Rust with [gpui-kit](https://gpui-kit.com). One binary, no Oracle Client or Instant Client needed: Oracle connections use the thin driver, which speaks Oracle Net directly. **SQLite, PostgreSQL, MySQL/MariaDB and SQL Server**, the **Redis** and **MailHog** developer tools, and **Dry-run** for Oracle are signed extensions you install from Settings > Extensions.
 
 The explorer works like Toad (pick a schema, then browse objects by type), the connection sidebar and dialog follow Navicat, and the data grid borrows from TablePlus.
 
@@ -12,7 +12,13 @@ The explorer works like Toad (pick a schema, then browse objects by type), the c
 
 - **Oracle**, as **Oracle · Basic** (host, port and service name as separate fields) or **Oracle · TNS** (a `tnsnames.ora` alias or a full connect descriptor), optionally as SYSDBA.
 - Works with old accounts that only have a **10G password verifier**, which the upstream thin driver refuses (see [vendor/oracledb/PATCHES.md](vendor/oracledb/PATCHES.md)).
-- **SQLite**: pick a database file with Browse. Changes are kept in a transaction until you Commit or Rollback.
+- **Extensions** (Settings > Extensions, one click Install, Update and Uninstall; each download is checked against its SHA-256 checksum and minisign signature):
+  - **SQLite**: pick a database file with Browse. Changes are kept in a transaction until you Commit or Rollback.
+  - **PostgreSQL** and **MySQL/MariaDB**: browse, edit rows, Data Transfer, and **Explain analyze** (the statement runs in a transaction that is always rolled back).
+  - **SQL Server**: browse every database of a server, each data tab bound to its own database; read-only grid for now.
+  - **Redis** and **MailHog** under Developer Tools, with an optional local server started by the extension.
+  - **Dry-run** for Oracle: runs one `UPDATE` or `DELETE` without committing and shows the rows it would change, with an undo script.
+- A connection whose extension is not installed shows as a grey row; clicking it opens Settings > Extensions.
 - **Several connections open at once**, each with its own worker thread. Tabs belong to their connection; the connection pill in a SQL tab switches it to another open connection.
 - **Folders** in the Connections sidebar: create, rename in place, colour, nest, drag connections between them.
 - **Environment flag** per connection: DEV (green), STAGING (yellow) or PROD (red), shown next to the name.
@@ -41,7 +47,7 @@ The explorer works like Toad (pick a schema, then browse objects by type), the c
 
 - Dense, virtualized grid with **Limit/Offset** paging (1,000 rows by default) and a **Columns** picker.
 - **Filter bar** with AND/OR, values sent as bind variables, a SQL preview with Copy SQL and Open in SQL editor, and **Quick Filter** from a right click on a cell.
-- **Edit in place**: double click a cell, paste a block of cells (TSV), add, **duplicate** or delete rows. Pending changes are coloured until you Apply, and nothing is committed until you press Commit.
+- **Edit in place**: double click a cell or press Enter, move between cells with Tab, Shift+Tab and Enter, paste a block of cells (TSV), add, **duplicate** or delete rows. Pending changes are coloured until you Apply, and nothing is committed until you press Commit.
 - Copy rows as values, field names, INSERT/UPDATE statements or TSV.
 - Bottom tabs **Data / Structure / Index / DDL**, a **Details** panel for the selected row, and an **Info** panel for the query log and errors.
 
@@ -75,27 +81,70 @@ The explorer works like Toad (pick a schema, then browse objects by type), the c
 
 ## Install
 
-Download the latest file for your system from [Releases](https://github.com/abu-abbas/kilat/releases). Each release carries `SHA256SUMS` and a `.minisig` signature per file; see [docs/release-signing.md](docs/release-signing.md) to check them by hand.
+Download the file for your system from the [latest release](https://github.com/abu-abbas/kilat/releases/latest). Each app release has these files (`X.Y.Z` is the version):
 
-### Windows (x86_64)
+| System | Download this | Other files in the release |
+|---|---|---|
+| Windows, x86_64 | `Kilat-X.Y.Z-windows-x86_64.exe` | |
+| macOS, Apple Silicon (M1 and later) | `Kilat-X.Y.Z-macos-arm64.dmg` | `Kilat-X.Y.Z-macos-arm64`: the bare program, used by the in-app updater |
+| Linux, x86_64 | `Kilat-X.Y.Z-linux-x86_64.tar.gz` | `Kilat-X.Y.Z-linux-x86_64`: the bare program, for running it without installing |
 
-Download `Kilat-<version>-windows-x86_64.exe` and run it. It is a single portable executable with no installer; put it wherever you like. The file is not code signed, so Windows SmartScreen may say it protected your PC: click **More info**, then **Run anyway**.
+Every file has a `.minisig` signature next to it, plus `SHA256SUMS` and `SHA256SUMS.minisig` for the whole release. Releases named `ext-...` and `extensions-index` are extensions, not the app: Kilat downloads those itself (see [Extensions](#extensions) below).
 
-### macOS (Apple Silicon)
+### Windows
 
-Download `Kilat-<version>-macos-arm64.dmg`, open it and drag **Kilat** to Applications. Only Apple Silicon (M1 and later) builds are published. The app is ad-hoc signed but not notarized, so the first time macOS blocks it: right click Kilat in Applications and choose **Open**, then **Open** again (on recent macOS, use System Settings > Privacy & Security > **Open Anyway**). macOS may ask for Keychain access the first time a saved password is read.
+1. Download `Kilat-X.Y.Z-windows-x86_64.exe`.
+2. Move it to a folder of your choice, for example `C:\Users\<you>\Apps\Kilat\`. It is a single portable program: there is no installer, and nothing is added to the Start menu. Right click it and choose **Pin to Start** or **Pin to taskbar** if you want a shortcut.
+3. Double click it. The file is not code signed, so Windows SmartScreen may say it protected your PC: click **More info**, then **Run anyway**. This is asked only once per file.
 
-### Linux (x86_64)
+To uninstall, delete the `.exe`. Your connections and settings stay in `%APPDATA%\Kilat` until you delete that folder too.
 
-Download `Kilat-<version>-linux-x86_64.tar.gz`, then:
+### macOS
+
+1. Download `Kilat-X.Y.Z-macos-arm64.dmg`. Only Apple Silicon builds are published; Intel Macs are not supported.
+2. Open the `.dmg` and drag **Kilat** to **Applications**, then eject the disk image.
+3. Open Kilat from Applications. The app is ad-hoc signed but not notarized, so macOS blocks the first start:
+   - macOS 15 and newer: try to open it once, then go to **System Settings > Privacy & Security**, scroll to the message about Kilat and click **Open Anyway**, then **Open**.
+   - Older macOS: right click Kilat in Applications, choose **Open**, then **Open** again.
+4. The first time a saved password is read, macOS asks for Keychain access: choose **Always Allow** so it is not asked on every connection.
+
+To uninstall, drag Kilat from Applications to the Trash. Connections and settings stay in `~/Library/Application Support/Kilat`.
+
+### Linux
+
+1. Download `Kilat-X.Y.Z-linux-x86_64.tar.gz`.
+2. Extract it and run the installer (no sudo needed):
+
+   ```sh
+   mkdir kilat && tar -xzf Kilat-*-linux-x86_64.tar.gz -C kilat
+   sh kilat/install.sh
+   ```
+
+   This copies the program to `~/.local/bin/kilat` and adds a launcher entry and icons under `~/.local/share`, so Kilat appears in the app menu. Make sure `~/.local/bin` is on your `PATH` if you want to start it from a terminal.
+3. Start **Kilat** from the app menu, or run `kilat`.
+
+A working Vulkan driver is required (on Ubuntu: `sudo apt install mesa-vulkan-drivers`, or your GPU vendor's driver). Saved passwords use the Secret Service (GNOME Keyring, KWallet), so one of those must be running.
+
+To uninstall, run `sh kilat/install.sh --uninstall` from the extracted folder. Connections and settings stay in `~/.config/Kilat`.
+
+### Updates
+
+Kilat checks GitHub Releases at most once a day (turn it off in **Settings > About Kilat**). When a newer version exists, a banner appears and a **What's new** tab lists its notes; **Update Now** there downloads it, checks its signature, replaces the app and offers **Restart**. **Check for updates** in Settings > About Kilat checks right away. Installs of version 0.1.47 or older cannot update themselves to newer versions: install the latest release by hand once, after that updates work again.
+
+### Check a download by hand (optional)
+
+The app and its updater always check signatures themselves. To check a downloaded file yourself, put it next to `SHA256SUMS` from the same release, then:
 
 ```sh
-mkdir kilat && tar -xzf Kilat-*-linux-x86_64.tar.gz -C kilat
-sh kilat/install.sh              # installs to ~/.local/bin and ~/.local/share, no sudo
-sh kilat/install.sh --uninstall  # removes it again
+sha256sum --ignore-missing -c SHA256SUMS      # Linux
+shasum -a 256 --ignore-missing -c SHA256SUMS   # macOS
 ```
 
-The installer adds a launcher entry and icons, so Kilat appears in the app menu. A working Vulkan driver is required.
+On Windows (PowerShell): `Get-FileHash .\Kilat-X.Y.Z-windows-x86_64.exe` and compare the hash with its line in `SHA256SUMS`. To also check the [minisign](https://jedisct1.github.io/minisign/) signature against [release-key.pub](release-key.pub), see [docs/release-signing.md](docs/release-signing.md).
+
+### Extensions
+
+A fresh Kilat connects to Oracle only. To use SQLite, PostgreSQL, MySQL/MariaDB, SQL Server, Redis, MailHog or Dry-run, open **Settings > Extensions** and click **Install** next to it. Kilat downloads the program for your system from this repository's Releases, checks its checksum and signature, and installs it; **Update** and **Uninstall** are on the same page. Some extensions need a minimum Kilat version, so update Kilat first if an extension does not install.
 
 ### Where Kilat keeps its files
 
@@ -143,7 +192,12 @@ crates/
                   edits, CSV/XLSX export, CSV import, profiles, update logic,
                   demo backend.
   ora-driver/     DbClient for Oracle on rust-oracledb (thin mode).
-  sqlite-driver/  DbClient for SQLite on rusqlite; shipped as the downloadable SQLite extension (crates/ext-sqlite), not linked into the app.
+  sqlite-driver/, postgres-driver/, mysql-driver/, mssql-driver/
+                  DbClients for the other engines; shipped only inside their
+                  downloadable extensions, not linked into the app.
+  devtools/       Redis and MailHog clients and the local server runner.
+  ext-*/          Extension programs (sqlite, postgres, mysql, mssql, redis,
+                  mailhog, dryrun), see docs/extension-protocol.md.
   app/            gpui-kit GUI: workbench, explorer, grid, editor, settings,
                   updater, one worker thread per connection.
 vendor/oracledb/  rust-oracledb pinned at b1adfff with the 10G verifier patch.
@@ -155,7 +209,7 @@ The Oracle driver is vendored because every `oracledb` release on crates.io is y
 
 ## Releases
 
-Releases are made by hand: either run **Actions > Release > Run workflow** (optional version, default `0.1.<run number>`), or push a tag such as `v0.2.0`. The workflow builds Linux, Windows and macOS binaries, smoke tests `--version`, writes `SHA256SUMS`, signs every file with minisign and publishes a GitHub Release. The last five releases are kept. See [docs/release-signing.md](docs/release-signing.md).
+Releases are made by hand: run **Actions > Release > Run workflow** and type the version (for example `0.1.65`), or push a tag such as `v0.2.0`. The workflow builds Linux, Windows and macOS binaries, smoke tests `--version`, writes `SHA256SUMS`, signs every file with minisign and publishes a GitHub Release. The last five releases are kept. See [docs/release-signing.md](docs/release-signing.md). Extensions have their own workflow, **Release extension**, and their own versions; see [docs/extension-release.md](docs/extension-release.md).
 
 ## License
 

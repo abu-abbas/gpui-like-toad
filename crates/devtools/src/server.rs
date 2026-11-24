@@ -53,6 +53,91 @@ pub fn prepare_mailhog_log(config_dir: &Path, id: &str) -> PathBuf {
     instance.join("mailhog.log")
 }
 
+/// The MailHog log of one instance, without moving an old one (see
+/// [`prepare_mailhog_log`]).
+pub fn mailhog_log_path(config_dir: &Path, id: &str) -> PathBuf {
+    mailhog_log_dir(config_dir)
+        .join(file_name(id))
+        .join("mailhog.log")
+}
+
+fn redis_log_dir(config_dir: &Path) -> PathBuf {
+    log_dir(config_dir).join("redis")
+}
+
+/// The Redis log of one instance: `server-logs/developer-tools/redis/<id>/redis.log`,
+/// keyed by the tool's id like MailHog, so renaming the tool keeps it.
+pub fn redis_log_path(config_dir: &Path, id: &str) -> PathBuf {
+    redis_log_dir(config_dir)
+        .join(file_name(id))
+        .join("redis.log")
+}
+
+/// `server-data/developer-tools/`: every Developer Tools server keeps
+/// its files under `<kind>/<tool id>/` here, next to the logs layout.
+fn tools_data_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("server-data").join("developer-tools")
+}
+
+/// The folder a Redis instance runs in (its `dump.rdb`):
+/// `server-data/developer-tools/redis/<id>`.
+pub fn redis_data_dir(config_dir: &Path, id: &str) -> PathBuf {
+    tools_data_dir(config_dir).join("redis").join(file_name(id))
+}
+
+/// Where a local MailHog keeps its mail (maildir storage), so the inbox
+/// survives a server restart: `server-data/developer-tools/mailhog/<id>`.
+pub fn mailhog_mail_dir(config_dir: &Path, id: &str) -> PathBuf {
+    tools_data_dir(config_dir)
+        .join("mailhog")
+        .join(file_name(id))
+}
+
+/// Environment that makes MailHog store mail as files in `dir` instead of
+/// memory. Flags typed in the command still win over these.
+pub fn mailhog_storage_env(dir: &Path) -> Vec<(String, std::ffi::OsString)> {
+    vec![
+        ("MH_STORAGE".into(), "maildir".into()),
+        ("MH_MAILDIR_PATH".into(), dir.as_os_str().to_owned()),
+    ]
+}
+
+/// Log file and data folder of a Redis instance. Before 1.0.1 both were
+/// named after the tool (so a rename started an empty database); the old
+/// ones, found by the current name, are moved over once if the new place
+/// does not exist yet.
+pub fn prepare_redis(config_dir: &Path, id: &str, name: &str) -> (PathBuf, PathBuf) {
+    let log = redis_log_path(config_dir, id);
+    let data = redis_data_dir(config_dir, id);
+    // A tool named like the new kind folders keeps its old folder.
+    let reserved = ["redis", "mailhog"]
+        .iter()
+        .any(|kind| file_name(name).eq_ignore_ascii_case(kind));
+    if !name.trim().is_empty() && !reserved {
+        let old_data = data_dir(config_dir, name);
+        if fs::symlink_metadata(&old_data).is_ok_and(|m| m.is_dir())
+            && fs::symlink_metadata(&data).is_err()
+        {
+            if let Some(parent) = data.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::rename(&old_data, &data);
+        }
+        let old_log = log_path(config_dir, name);
+        if fs::symlink_metadata(&old_log).is_ok_and(|m| m.is_file())
+            && fs::symlink_metadata(&log).is_err()
+        {
+            if let Some(parent) = log.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if fs::rename(&old_log, &log).is_ok() {
+                let _ = fs::rename(rotated(&old_log), rotated(&log));
+            }
+        }
+    }
+    (log, data)
+}
+
 /// The folder a tool's server runs in, so files it writes by relative
 /// path (Redis' dump.rdb) stay apart per tool and survive restarts.
 pub fn data_dir(config_dir: &Path, tool_name: &str) -> PathBuf {
@@ -238,6 +323,16 @@ impl ServerProcess {
     /// Start `command` (split like a shell line, no shell involved) in
     /// `work_dir`, with its output in `log_path`.
     pub fn start(command: &str, log_path: &Path, work_dir: &Path) -> Result<Self, String> {
+        Self::start_with_env(command, log_path, work_dir, &[])
+    }
+
+    /// Same, with extra environment variables for the server.
+    pub fn start_with_env(
+        command: &str,
+        log_path: &Path,
+        work_dir: &Path,
+        env: &[(String, std::ffi::OsString)],
+    ) -> Result<Self, String> {
         let args = crate::console::split_args(command)?;
         let args: Vec<String> = args
             .into_iter()
@@ -255,6 +350,7 @@ impl ServerProcess {
         let log = Arc::new(Mutex::new(log));
         let mut cmd = Command::new(&exe);
         cmd.args(&args[1..])
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -554,13 +650,34 @@ pub fn list_logs(config_dir: &Path) -> Vec<LogFile> {
             Some(LogFile { name, path, size })
         })
         .collect();
-    out.extend(mailhog_logs(&mailhog_log_dir(config_dir), false));
-    out.extend(mailhog_logs(&config_dir.join("server-logs"), true));
+    out.extend(instance_logs(
+        &mailhog_log_dir(config_dir),
+        "MailHog",
+        "mailhog.log",
+        false,
+    ));
+    out.extend(instance_logs(
+        &redis_log_dir(config_dir),
+        "Redis",
+        "redis.log",
+        false,
+    ));
+    out.extend(instance_logs(
+        &config_dir.join("server-logs"),
+        "MailHog",
+        "mailhog.log",
+        true,
+    ));
     out.sort_by_key(|l| l.name.to_lowercase());
     out
 }
 
-fn mailhog_logs(dir: &Path, legacy: bool) -> impl Iterator<Item = LogFile> {
+fn instance_logs<'a>(
+    dir: &Path,
+    label: &'a str,
+    file: &'a str,
+    legacy: bool,
+) -> impl Iterator<Item = LogFile> + 'a {
     fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -572,13 +689,13 @@ fn mailhog_logs(dir: &Path, legacy: bool) -> impl Iterator<Item = LogFile> {
             {
                 return None;
             }
-            let path = entry.path().join("mailhog.log");
+            let path = entry.path().join(file);
             let meta = fs::metadata(&path).ok()?;
             if !meta.is_file() {
                 return None;
             }
             let suffix = if legacy { " (legacy)" } else { "" };
-            let name = format!("MailHog ({}){suffix}", id.to_string_lossy());
+            let name = format!("{label} ({}){suffix}", id.to_string_lossy());
             let size = meta.len() + fs::metadata(rotated(&path)).map(|m| m.len()).unwrap_or(0);
             Some(LogFile { name, path, size })
         })
@@ -597,6 +714,29 @@ pub fn clear_log(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redis_moves_name_keyed_data_and_log_to_its_id() {
+        let dir = temp();
+        let cfg = dir.as_path();
+        let old_data = data_dir(cfg, "local-redis");
+        fs::create_dir_all(&old_data).unwrap();
+        fs::write(old_data.join("dump.rdb"), b"x").unwrap();
+        fs::create_dir_all(log_dir(cfg)).unwrap();
+        fs::write(log_path(cfg, "local-redis"), b"log").unwrap();
+        let (log, data) = prepare_redis(cfg, "t1", "local-redis");
+        assert_eq!(data, cfg.join("server-data/developer-tools/redis/t1"));
+        assert_eq!(log, log_dir(cfg).join("redis/t1/redis.log"));
+        assert!(data.join("dump.rdb").is_file());
+        assert!(log.is_file());
+        assert!(!old_data.exists());
+        // A rename later keeps the same folder and never moves another one in.
+        fs::create_dir_all(data_dir(cfg, "Redis localhost")).unwrap();
+        let (_, again) = prepare_redis(cfg, "t1", "Redis localhost");
+        assert_eq!(again, data);
+        assert!(data.join("dump.rdb").is_file());
+        assert!(list_logs(cfg).iter().any(|l| l.name == "Redis (t1)"));
+    }
 
     fn temp() -> PathBuf {
         // A counter, not a timestamp: tests run in parallel inside one

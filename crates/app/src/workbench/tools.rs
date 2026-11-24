@@ -96,7 +96,9 @@ pub(super) struct ToolsState {
     pub form: Option<ToolForm>,
     pub confirm: Option<ToolConfirm>,
     pub mail: HashMap<String, MailView>,
-    pub pilot: Option<super::tool_pilot::ToolPilot>,
+    /// One open extension session per tool, so switching tools keeps
+    /// the others connected.
+    pub pilots: HashMap<String, super::tool_pilot::ToolPilot>,
     /// Stops still in flight, including after the user switches to another tool.
     pub pilot_stopping: HashSet<String>,
     pub folded: bool,
@@ -123,15 +125,12 @@ impl ToolsState {
     }
 
     fn is_open(&self, id: &str) -> bool {
-        self.pilot.as_ref().is_some_and(|p| p.instance == id) || self.mail.contains_key(id)
+        self.pilots.contains_key(id) || self.mail.contains_key(id)
     }
 
     pub fn is_live(&self, id: &str) -> bool {
         self.mail.get(id).is_some_and(|v| v.reachable)
-            || self
-                .pilot
-                .as_ref()
-                .is_some_and(|v| v.instance == id && v.reachable())
+            || self.pilots.get(id).is_some_and(|v| v.reachable())
     }
 
     /// The active tool, if it still exists.
@@ -200,22 +199,14 @@ impl Workbench {
         if let Some(install) = extension {
             if self
                 .tools
-                .pilot
-                .as_ref()
-                .is_none_or(|p| p.instance != id || p.needs_reopen(&install.path))
+                .pilots
+                .get(id)
+                .is_none_or(|p| p.needs_reopen(&install.path))
             {
                 self.open_tool_pilot(tool, install.path, cx);
             }
             cx.notify();
             return;
-        }
-        if self
-            .tools
-            .pilot
-            .as_ref()
-            .is_some_and(|pilot| pilot.instance != id)
-        {
-            self.close_tool_pilot(cx);
         }
         if !self.tools.mail.contains_key(id) {
             let view = MailView::new(&tool, window, cx);
@@ -245,14 +236,7 @@ impl Workbench {
     /// Close tool `id`'s session; the instance stays in the list.
     pub(super) fn close_tool(&mut self, id: &str, cx: &mut Context<Self>) {
         self.tools.mail.remove(id);
-        if self
-            .tools
-            .pilot
-            .as_ref()
-            .is_some_and(|pilot| pilot.instance == id)
-        {
-            self.close_tool_pilot(cx);
-        }
+        self.close_tool_pilot(id, cx);
         if self.tools.active.as_deref() == Some(id) {
             self.tools.active = None;
         }
@@ -668,11 +652,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let live = self.tools.is_live(&tool.id);
-        let pilot = self
-            .tools
-            .pilot
-            .as_ref()
-            .filter(|pilot| pilot.instance == tool.id);
+        let pilot = self.tools.pilots.get(&tool.id);
         let open = self.tools.is_open(&tool.id);
         let active = self.tools.active.as_deref() == Some(tool.id.as_str());
         let id = tool.id.clone();
@@ -843,7 +823,7 @@ impl Workbench {
                                     && !flags.running,
                                 |row| row.child(status_dot(theme.success)),
                             )
-                            .children(pilot.and_then(|_| {
+                            .children(pilot.filter(|_| active).and_then(|_| {
                                 self.render_tool_pilot(
                                     ora_core::extension_ui::Slot::Sidebar,
                                     theme,

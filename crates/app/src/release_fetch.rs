@@ -96,7 +96,9 @@ fn http_agent() -> Result<ureq::Agent, String> {
         builder = builder.proxy(proxy);
     }
     Ok(builder
-        .timeout_global(Some(Duration::from_secs(10)))
+        // 10 s was too tight on slow or proxied networks (Redis install
+        // failed with "timeout: global"); small requests also retry.
+        .timeout_global(Some(Duration::from_secs(30)))
         // OS trust store (macOS Keychain, Windows, Linux CA bundle), so
         // corporate TLS-inspecting proxies work like in the browser.
         .tls_config(
@@ -107,6 +109,39 @@ fn http_agent() -> Result<ureq::Agent, String> {
         .user_agent(concat!("kilat/", env!("CARGO_PKG_VERSION")))
         .build()
         .into())
+}
+
+/// Run a small request up to 3 times, retrying only on a timeout or a
+/// dropped connection (never on an HTTP error or a bad signature).
+fn with_retry<T>(mut attempt: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let mut last = String::new();
+    for n in 0..3 {
+        if n > 0 {
+            std::thread::sleep(Duration::from_millis(500 * n));
+        }
+        match attempt() {
+            Ok(v) => return Ok(v),
+            Err(e) if is_transient(&e) => {
+                crate::error_log::append(&format!(
+                    "Download: attempt {} of 3 failed (will retry): {e}",
+                    n + 1
+                ));
+                last = e;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(format!(
+        "{last} (tried 3 times; check your network or the Update proxy in About Kilat)"
+    ))
+}
+
+fn is_transient(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("timeout")
+        || e.contains("timed out")
+        || e.contains("connection")
+        || e.contains("reset")
 }
 
 /// Blocking fetch of the latest release; run on a background thread.
@@ -158,12 +193,17 @@ fn download_agent() -> Result<ureq::Agent, String> {
 
 /// Blocking GET of a small text asset (checksum list, signature).
 fn fetch_text(agent: &ureq::Agent, asset: &update::Asset) -> Result<String, String> {
-    let mut resp = agent.get(&asset.url).call().map_err(net_err)?;
-    resp.body_mut()
-        .with_config()
-        .limit(1024 * 1024)
-        .read_to_string()
-        .map_err(|e| format!("{}: {}", asset.name, net_err(e)))
+    with_retry(|| {
+        let mut resp = agent
+            .get(&asset.url)
+            .call()
+            .map_err(|e| format!("{}: {}", asset.name, net_err(e)))?;
+        resp.body_mut()
+            .with_config()
+            .limit(1024 * 1024)
+            .read_to_string()
+            .map_err(|e| format!("{}: {}", asset.name, net_err(e)))
+    })
 }
 
 /// Fetch and check the signed `SHA256SUMS` and `<asset>.minisig` of
@@ -253,6 +293,10 @@ pub(crate) fn download_asset(
 /// Blocking GET of a release by tag, as JSON text.
 fn fetch_release_by_tag(tag: &str) -> Result<String, String> {
     let agent = http_agent()?;
+    with_retry(|| fetch_release_by_tag_once(&agent, tag))
+}
+
+fn fetch_release_by_tag_once(agent: &ureq::Agent, tag: &str) -> Result<String, String> {
     let mut resp = agent
         .get(&update::release_by_tag_api(tag))
         .header("Accept", "application/vnd.github+json")
@@ -291,6 +335,18 @@ pub(crate) fn fetch_extension_index() -> Result<ExtensionIndex, String> {
 /// and signature (signed for exactly `entry.version`), and put it under
 /// the config folder. Refuses a build for another app version or platform.
 pub(crate) fn install_extension(entry: &IndexEntry) -> Result<store::RemoteInstall, String> {
+    install_extension_inner(entry).inspect_err(|err| {
+        crate::error_log::append(&format!(
+            "Extension install failed: {} {} (tag {}, {}): {err}",
+            entry.id,
+            entry.version,
+            entry.tag,
+            extension_index::current_platform()
+        ));
+    })
+}
+
+fn install_extension_inner(entry: &IndexEntry) -> Result<store::RemoteInstall, String> {
     let app = update::Version::parse(env!("CARGO_PKG_VERSION"))
         .ok_or_else(|| "Unknown app version.".to_string())?;
     if !entry.compatible_with(app) {
@@ -303,7 +359,8 @@ pub(crate) fn install_extension(entry: &IndexEntry) -> Result<store::RemoteInsta
     let file = entry
         .file_for(&platform)
         .ok_or_else(|| format!("{} is not available for {platform}.", entry.name))?;
-    let body = fetch_release_by_tag(&entry.tag)?;
+    let body = fetch_release_by_tag(&entry.tag)
+        .map_err(|e| format!("reading release {}: {e}", entry.tag))?;
     let assets = update::parse_tagged_assets(&body, &entry.tag)
         .ok_or_else(|| format!("The release {} could not be read.", entry.tag))?;
     let asset = assets
@@ -311,9 +368,13 @@ pub(crate) fn install_extension(entry: &IndexEntry) -> Result<store::RemoteInsta
         .find(|a| a.name == file)
         .cloned()
         .ok_or_else(|| format!("{file} is missing from release {}.", entry.tag))?;
-    let proof = fetch_proof_from(&assets, &entry.version.to_string(), &asset)?;
-    let (_staging, temp) = download_to_staging(&asset)?;
-    proof.verify_file(&temp, release_verify::release_public_key())?;
+    let proof = fetch_proof_from(&assets, &entry.version.to_string(), &asset)
+        .map_err(|e| format!("checksum/signature: {e}"))?;
+    let (_staging, temp) =
+        download_to_staging(&asset).map_err(|e| format!("downloading {}: {e}", asset.name))?;
+    proof
+        .verify_file(&temp, release_verify::release_public_key())
+        .map_err(|e| format!("verifying {}: {e}", asset.name))?;
     store::finish_remote_install(&entry.id, &entry.version.to_string(), &asset.name, &temp)
         .map_err(|e| format!("Could not install {}: {e}", entry.name))
 }

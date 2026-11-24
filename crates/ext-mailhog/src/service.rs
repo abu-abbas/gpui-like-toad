@@ -69,7 +69,11 @@ fn start_local(target: &MailHogTarget, params: &Value) -> Result<Option<ManagedS
             || server::default_command(false, target.port),
             str::to_owned,
         );
-    let process = ServerProcess::start(&command, &logs, &data)?;
+    // Mail is stored as files, so the inbox survives a restart.
+    let mail = server::mailhog_mail_dir(&config, id);
+    std::fs::create_dir_all(&mail).map_err(|err| err.to_string())?;
+    let process =
+        ServerProcess::start_with_env(&command, &logs, &mail, &server::mailhog_storage_env(&mail))?;
     server::record_pid(&data, process.pid(), &command);
     let mut server = ManagedServer { process, data };
     server::wait_port(&target.host, target.port, Duration::from_secs(15), || {

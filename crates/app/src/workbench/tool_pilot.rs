@@ -20,6 +20,22 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 const TIMEOUT: Duration = Duration::from_secs(20);
 
 type Process = Arc<Mutex<ExtProcess>>;
+type Generation = gpui_kit::EntityId;
+
+impl super::tools::ToolsState {
+    /// The session whose panels belong to `generation` (a stale reply for
+    /// a closed or reopened session finds none).
+    fn pilot_by_gen(&mut self, generation: Generation) -> Option<&mut ToolPilot> {
+        self.pilots
+            .values_mut()
+            .find(|pilot| pilot.explorer.entity_id() == generation)
+    }
+
+    /// The session of the tool shown now.
+    fn active_pilot(&self) -> Option<&ToolPilot> {
+        self.active.as_deref().and_then(|id| self.pilots.get(id))
+    }
+}
 
 pub(super) struct ToolPilot {
     pub instance: String,
@@ -233,7 +249,11 @@ impl Workbench {
         program: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        let previous = self.tools.pilot.take().and_then(|pilot| pilot.process);
+        let previous = self
+            .tools
+            .pilots
+            .remove(&tool.id)
+            .and_then(|pilot| pilot.process);
         let start_requested = super::tools_server::can_start(&tool);
         let label = tool.kind.label();
         let read_only = tool.read_only();
@@ -252,22 +272,25 @@ impl Workbench {
             })
             .collect();
         let typed = self.tools.session_passwords.get(&tool.id).cloned();
-        self.tools.pilot = Some(ToolPilot {
-            instance: tool.id.clone(),
-            kind: tool.kind,
-            program: program.clone(),
-            sidebar,
-            explorer,
-            main,
-            process: None,
-            server: ServerOwnership::Unreported,
-            stopped: false,
-            revision: 0,
-            busy: true,
-            failure: None,
-            polling: None,
-            _subscriptions: subscriptions,
-        });
+        self.tools.pilots.insert(
+            tool.id.clone(),
+            ToolPilot {
+                instance: tool.id.clone(),
+                kind: tool.kind,
+                program: program.clone(),
+                sidebar,
+                explorer,
+                main,
+                process: None,
+                server: ServerOwnership::Unreported,
+                stopped: false,
+                revision: 0,
+                busy: true,
+                failure: None,
+                polling: None,
+                _subscriptions: subscriptions,
+            },
+        );
         spawn_tool_job(
             cx,
             move || {
@@ -277,12 +300,7 @@ impl Workbench {
                 start(program, tool, typed)
             },
             move |this, result, cx| {
-                let Some(pilot) = this
-                    .tools
-                    .pilot
-                    .as_mut()
-                    .filter(|pilot| pilot.explorer.entity_id() == generation)
-                else {
+                let Some(pilot) = this.tools.pilot_by_gen(generation) else {
                     return;
                 };
                 pilot.busy = false;
@@ -290,14 +308,14 @@ impl Workbench {
                     Ok(connected) => {
                         pilot.process = Some(connected.process);
                         pilot.server = connected.server;
-                        this.apply_pilot_update(connected.update, cx);
+                        this.apply_pilot_update(generation, connected.update, cx);
                         if start_requested && connected.server == ServerOwnership::External {
                             this.push_message(format!(
                                 "{label} was already running. Connected to the existing server."
                             ));
                         }
                     }
-                    Err(error) => this.pilot_failed(error, cx),
+                    Err(error) => this.pilot_failed(generation, error, cx),
                 }
             },
         );
@@ -307,9 +325,9 @@ impl Workbench {
     pub(super) fn stop_pilot_server(&mut self, id: &str, restart: bool, cx: &mut Context<Self>) {
         let Some(pilot) = self
             .tools
-            .pilot
-            .as_mut()
-            .filter(|pilot| pilot.instance == id && pilot.manages_server())
+            .pilots
+            .get_mut(id)
+            .filter(|pilot| pilot.manages_server())
         else {
             return;
         };
@@ -335,17 +353,12 @@ impl Workbench {
             },
             move |this, result, cx| {
                 this.tools.pilot_stopping.remove(&id);
-                if let Some(pilot) = this
-                    .tools
-                    .pilot
-                    .as_mut()
-                    .filter(|pilot| pilot.explorer.entity_id() == generation)
-                {
+                if let Some(pilot) = this.tools.pilot_by_gen(generation) {
                     pilot.busy = false;
                     match result {
                         Ok(update) => {
                             pilot.stopped = true;
-                            this.apply_pilot_update(update, cx);
+                            this.apply_pilot_update(generation, update, cx);
                             if restart {
                                 if let Some(tool) = this.tools.get(&id).cloned() {
                                     if let Some(install) = this.tool_extension(&tool) {
@@ -354,7 +367,7 @@ impl Workbench {
                                 }
                             }
                         }
-                        Err(error) => this.pilot_failed(error, cx),
+                        Err(error) => this.pilot_failed(generation, error, cx),
                     }
                 }
             },
@@ -362,8 +375,9 @@ impl Workbench {
         cx.notify();
     }
 
-    pub(super) fn close_tool_pilot(&mut self, cx: &mut Context<Self>) {
-        if let Some(pilot) = self.tools.pilot.take() {
+    /// Disconnect tool `id`'s extension session, if it has one.
+    pub(super) fn close_tool_pilot(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(pilot) = self.tools.pilots.remove(id) {
             if let Some(process) = pilot.process {
                 self.retire_pilot_process(pilot.instance, process, cx);
             }
@@ -389,17 +403,23 @@ impl Workbench {
             tool.kind.extension_id() == id && self.tools.pilot_stopping.contains(&tool.id)
         }) || self
             .tools
-            .pilot
-            .as_ref()
-            .is_some_and(|pilot| ours(pilot) && pilot.busy)
+            .pilots
+            .values()
+            .any(|pilot| ours(pilot) && pilot.busy)
         {
             return false;
         }
-        if self.tools.pilot.as_ref().is_some_and(ours) {
-            if let Some(pilot) = self.tools.pilot.take() {
-                if self.tools.active.as_deref() == Some(pilot.instance.as_str()) {
-                    self.tools.active = None;
-                }
+        let closing: Vec<String> = self
+            .tools
+            .pilots
+            .values()
+            .filter(|pilot| ours(pilot))
+            .map(|pilot| pilot.instance.clone())
+            .collect();
+        for id in closing {
+            self.tools.pilots.remove(&id);
+            if self.tools.active.as_deref() == Some(id.as_str()) {
+                self.tools.active = None;
             }
         }
         true
@@ -411,24 +431,17 @@ impl Workbench {
         event: &Event,
         cx: &mut Context<Self>,
     ) {
-        let active = self.tools.active.as_deref();
-        if self.tools.pilot.as_ref().is_none_or(|pilot| {
-            active != Some(pilot.instance.as_str())
-                || pilot.explorer.entity_id() != generation
-                || pilot.revision != event.revision
-        }) {
+        let Some(pilot) = self.tools.active_pilot().filter(|pilot| {
+            pilot.explorer.entity_id() == generation && pilot.revision == event.revision
+        }) else {
             return;
-        }
-        if self.tools.pilot.as_ref().is_some_and(|pilot| pilot.busy) {
+        };
+        if pilot.busy {
             if !matches!(
                 event.event,
                 ora_core::extension_ui::EventKind::Change { .. }
             ) {
-                let label = self
-                    .tools
-                    .pilot
-                    .as_ref()
-                    .map_or("The tool", |p| p.kind.label());
+                let label = pilot.kind.label();
                 self.push_message(format!(
                     "{label} is still loading. Try again when it finishes."
                 ));
@@ -436,7 +449,7 @@ impl Workbench {
             }
             return;
         }
-        if let Some(pilot) = self.tools.pilot.as_ref().filter(|pilot| pilot.stopped) {
+        if pilot.stopped {
             if event.slot == Slot::Explorer
                 && event.node.as_str() == "start-server"
                 && matches!(event.event, ora_core::extension_ui::EventKind::Click { .. })
@@ -446,24 +459,28 @@ impl Workbench {
             }
             return;
         }
-        self.pilot_request("ui.event", json!(event), Origin::UserEvent, cx);
+        self.pilot_request(generation, "ui.event", json!(event), Origin::UserEvent, cx);
     }
 
     fn pilot_request(
         &mut self,
+        generation: Generation,
         method: &'static str,
         params: serde_json::Value,
         origin: Origin,
         cx: &mut Context<Self>,
     ) {
-        let Some(pilot) = self.tools.pilot.as_mut().filter(|pilot| !pilot.busy) else {
+        let Some(pilot) = self
+            .tools
+            .pilot_by_gen(generation)
+            .filter(|pilot| !pilot.busy)
+        else {
             return;
         };
         let Some(process) = pilot.process.clone() else {
             return;
         };
         pilot.busy = true;
-        let generation = pilot.explorer.entity_id();
         spawn_tool_job(
             cx,
             move || {
@@ -472,38 +489,47 @@ impl Workbench {
                 (result, process.is_broken(), process.stderr_tail())
             },
             move |this, (result, broken, stderr), cx| {
-                let Some(pilot) = this.tools.pilot.as_mut().filter(|pilot| {
-                    pilot.explorer.entity_id() == generation && pilot.process.is_some()
-                }) else {
+                let Some(pilot) = this
+                    .tools
+                    .pilot_by_gen(generation)
+                    .filter(|pilot| pilot.process.is_some())
+                else {
                     return;
                 };
                 pilot.busy = false;
                 match result {
-                    Ok(update) => this.apply_pilot_update(update, cx),
+                    Ok(update) => this.apply_pilot_update(generation, update, cx),
                     Err(error) if broken => {
                         let error = if stderr.is_empty() {
                             error.to_string()
                         } else {
                             format!("{error}\n{stderr}")
                         };
-                        this.pilot_failed(error, cx);
+                        this.pilot_failed(generation, error, cx);
                     }
                     Err(error) if origin == Origin::Tick => {
-                        this.pilot_failed(error.to_string(), cx)
+                        this.pilot_failed(generation, error.to_string(), cx)
                     }
                     Err(error) => {
                         this.push_message(error.to_string());
-                        this.schedule_pilot_poll(Some(5000), cx);
+                        this.schedule_pilot_poll(generation, Some(5000), cx);
                     }
                 }
             },
         );
     }
 
-    fn apply_pilot_update(&mut self, update: ViewUpdate, cx: &mut Context<Self>) {
-        let Some(pilot) = self.tools.pilot.as_mut() else {
+    fn apply_pilot_update(
+        &mut self,
+        generation: Generation,
+        update: ViewUpdate,
+        cx: &mut Context<Self>,
+    ) {
+        let active = self.tools.active.clone();
+        let Some(pilot) = self.tools.pilot_by_gen(generation) else {
             return;
         };
+        let shown = active.as_deref() == Some(pilot.instance.as_str());
         if update.revision < pilot.revision {
             return;
         }
@@ -518,7 +544,7 @@ impl Workbench {
                 .panel(slot)
                 .update(cx, |panel, cx| panel.update(update.revision, tree, cx));
         }
-        if self.tools.active.as_deref() == Some(pilot.instance.as_str()) {
+        if shown {
             for effect in update.effects {
                 match effect {
                     Effect::Copy { text } => cx.write_to_clipboard(
@@ -531,36 +557,41 @@ impl Workbench {
                 }
             }
         }
-        self.schedule_pilot_poll(update.poll_ms, cx);
+        self.schedule_pilot_poll(generation, update.poll_ms, cx);
         cx.notify();
     }
 
-    fn schedule_pilot_poll(&mut self, poll_ms: Option<u32>, cx: &mut Context<Self>) {
-        let Some(pilot) = self.tools.pilot.as_mut() else {
+    fn schedule_pilot_poll(
+        &mut self,
+        generation: Generation,
+        poll_ms: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pilot) = self.tools.pilot_by_gen(generation) else {
             return;
         };
-        let generation = pilot.explorer.entity_id();
         pilot.polling = poll_ms.map(|ms| {
             cx.spawn(async move |view, cx| loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(ms.into()))
                     .await;
                 let result = view.update(cx, |this, cx| {
-                    let Some(pilot) = this
-                        .tools
-                        .pilot
-                        .as_ref()
-                        .filter(|pilot| pilot.explorer.entity_id() == generation)
-                    else {
+                    let active = this.tools.active.clone();
+                    let Some(pilot) = this.tools.pilot_by_gen(generation) else {
                         return false;
                     };
                     if pilot.process.is_none() {
                         return false;
                     }
-                    if !pilot.busy && this.tools.active.as_deref() == Some(pilot.instance.as_str())
-                    {
+                    if !pilot.busy && active.as_deref() == Some(pilot.instance.as_str()) {
                         let revision = pilot.revision;
-                        this.pilot_request("ui.tick", json!(Tick { revision }), Origin::Tick, cx);
+                        this.pilot_request(
+                            generation,
+                            "ui.tick",
+                            json!(Tick { revision }),
+                            Origin::Tick,
+                            cx,
+                        );
                         return false;
                     }
                     true
@@ -572,8 +603,8 @@ impl Workbench {
         });
     }
 
-    fn pilot_failed(&mut self, error: String, cx: &mut Context<Self>) {
-        let Some(pilot) = self.tools.pilot.as_mut() else {
+    fn pilot_failed(&mut self, generation: Generation, error: String, cx: &mut Context<Self>) {
+        let Some(pilot) = self.tools.pilot_by_gen(generation) else {
             return;
         };
         let process = pilot.process.take();
@@ -592,10 +623,7 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
-        let pilot = self.tools.pilot.as_ref()?;
-        if self.tools.active.as_deref() != Some(pilot.instance.as_str()) {
-            return None;
-        }
+        let pilot = self.tools.active_pilot()?;
         if slot == Slot::Main {
             if let Some(error) = &pilot.failure {
                 let id = pilot.instance.clone();
@@ -616,7 +644,7 @@ impl Workbench {
                                 .label("Reconnect")
                                 .disabled(self.tools.pilot_stopping.contains(&pilot.instance))
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.close_tool_pilot(cx);
+                                    this.close_tool_pilot(&id, cx);
                                     this.open_tool(&id, window, cx);
                                 })),
                         )

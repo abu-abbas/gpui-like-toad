@@ -38,6 +38,24 @@ likewise identify their item by ID. List `more` requests another page. The
 extension supplies the resulting view, including any rows it wants to keep
 on screen. The host must keep the view bounded.
 
+## Components added in Kilat 0.1.65
+
+These are part of protocol v1 but an older Kilat rejects them as unknown
+types, so an extension that sends them sets `min_app` to `0.1.65` or later.
+
+- `banner`: `tone`, `icon`, `title`, `text` and `children` (badges, progress,
+  buttons) on the right, drawn as a tinted strip.
+- `progress`: `value` from 0 to 1, `tone`, `label`, `trailing`.
+- `card`: `icon`, `title`, `badge`, `badge_tone`, `subtitle` and an optional
+  `child`, drawn as a bordered box with a header line.
+- `diff`: like `table`, but each cell is `{"text", "old"?, "removed"?}`. With
+  `old` the old value is struck out next to the new one; `removed` strikes
+  the value out.
+- `button` takes an optional `icon` and the `success` variant.
+
+Icon names: `flask`, `lock`, `undo`, `check`, `zap`, `table`, `x`, `alert`,
+`copy`, plus the list icons (`search`, `trash`, `refresh`, `key`, `type-*`).
+
 ## Validation
 
 The host validates an entire reply before applying it. Each free-form string

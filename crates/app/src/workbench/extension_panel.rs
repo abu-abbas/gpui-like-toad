@@ -92,7 +92,15 @@ impl ExtensionPanel {
                         collect(child, fields);
                     }
                 }
-                Node::Scroll { child } => collect(child, fields),
+                Node::Scroll { child }
+                | Node::Card {
+                    child: Some(child), ..
+                } => collect(child, fields),
+                Node::Banner { children, .. } => {
+                    for child in children {
+                        collect(child, fields);
+                    }
+                }
                 Node::Tabs { items, .. } => {
                     for item in items {
                         collect(&item.child, fields);
@@ -168,6 +176,90 @@ impl ExtensionPanel {
         }
     }
 
+    /// The "Server stopped" explorer view of a Developer Tool (heading,
+    /// muted note, Start button): same compact header with the tool icon
+    /// as the connected view, so the column does not jump when the server
+    /// stops.
+    fn stopped_layout(
+        &self,
+        kind: store::ToolKind,
+        tree: &Node,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        if self.slot != Slot::Explorer {
+            return None;
+        }
+        let Node::Column { children } = tree else {
+            return None;
+        };
+        let [Node::Text {
+            text: title,
+            style: Some(TextStyle::Heading),
+            ..
+        }, Node::Text { text: note, .. }, Node::Button {
+            id,
+            label,
+            variant,
+            disabled,
+            writes,
+            confirm,
+            ..
+        }] = children.as_slice()
+        else {
+            return None;
+        };
+        let header = div()
+            .h(px(32.))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(SPACE_2))
+            .px(px(SPACE_2))
+            .text_sm()
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(tools::tool_icon(kind, true, theme))
+            .child(title.as_str().to_owned());
+        let start = self.action(
+            Action {
+                id,
+                item: None,
+                variant: *variant,
+                disabled: *disabled,
+                writes: *writes,
+                confirm: confirm.as_ref(),
+                button: Button::new(id.as_str().to_owned())
+                    .small()
+                    .icon(IconName::Play)
+                    .label(label.as_str().to_owned()),
+            },
+            cx,
+        );
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .min_h(px(0.))
+                .min_w(px(0.))
+                .overflow_hidden()
+                .bg(theme.sidebar)
+                .px(px(SPACE_2))
+                .py(px(6.))
+                .gap(px(6.))
+                .child(header)
+                .child(
+                    div()
+                        .px(px(SPACE_2))
+                        .text_size(crate::theme::ui_size(theme, FONT_CAPTION))
+                        .text_color(theme.muted_foreground)
+                        .child(note.as_str().to_owned()),
+                )
+                .child(div().px(px(SPACE_2)).flex().child(start))
+                .into_any_element(),
+        )
+    }
+
     fn action(&self, action: Action<'_>, cx: &mut Context<Self>) -> Button {
         let Action {
             id,
@@ -185,6 +277,7 @@ impl ExtensionPanel {
             Some(ButtonVariant::Primary) => button.primary(),
             Some(ButtonVariant::Danger) => button.danger(),
             Some(ButtonVariant::Ghost) => button.ghost(),
+            Some(ButtonVariant::Success) => button.success(),
             _ => button,
         };
         button
@@ -324,8 +417,8 @@ impl ExtensionPanel {
                     )
                     .into_any_element()
             }
-            Node::Icon { name } => interface_icon(name)
-                .map(|name| Icon::new(name).into_any_element())
+            Node::Icon { name } => node_icon(name)
+                .map(IntoElement::into_any_element)
                 .unwrap_or_else(|| div().into_any_element()),
             Node::Link { label, url } => {
                 let url = url.as_str().to_owned();
@@ -343,8 +436,16 @@ impl ExtensionPanel {
                 disabled,
                 writes,
                 confirm,
-            } => self
-                .action(
+                icon,
+            } => {
+                let button = Button::new(id.as_str().to_owned())
+                    .small()
+                    .label(label.as_str().to_owned());
+                let button = match icon.as_ref().and_then(node_icon) {
+                    Some(icon) => button.icon(icon),
+                    None => button,
+                };
+                self.action(
                     Action {
                         id,
                         item: None,
@@ -352,13 +453,12 @@ impl ExtensionPanel {
                         disabled: *disabled,
                         writes: *writes,
                         confirm: confirm.as_ref(),
-                        button: Button::new(id.as_str().to_owned())
-                            .small()
-                            .label(label.as_str().to_owned()),
+                        button,
                     },
                     cx,
                 )
-                .into_any_element(),
+                .into_any_element()
+            }
             Node::Input { id, .. } => Input::new(&self.fields[id].input)
                 .small()
                 .w_full()
@@ -612,6 +712,230 @@ impl ExtensionPanel {
                 .text_color(theme.muted_foreground)
                 .child(text.as_str().to_owned())
                 .into_any_element(),
+            Node::Banner {
+                tone,
+                icon,
+                title,
+                text,
+                children,
+            } => {
+                let tint = color(*tone, theme);
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(SPACE_3))
+                    .px(px(SPACE_3))
+                    .py(px(SPACE_2))
+                    .rounded(px(RADIUS_MD))
+                    .border_1()
+                    .border_color(tint.opacity(0.45))
+                    .bg(tint.opacity(0.10))
+                    .children(icon.as_ref().and_then(node_icon).map(|icon| {
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .size(px(30.))
+                            .rounded(px(RADIUS_MD))
+                            .bg(tint.opacity(0.18))
+                            .text_color(tint)
+                            .child(icon)
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(220.))
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.foreground)
+                                    .child(title.as_str().to_owned()),
+                            )
+                            .children(text.as_ref().map(|text| {
+                                div()
+                                    .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                                    .text_color(theme.muted_foreground)
+                                    .child(text.as_str().to_owned())
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(SPACE_2))
+                            .children(
+                                children
+                                    .iter()
+                                    .map(|child| self.render_node(child, theme, cx)),
+                            ),
+                    )
+                    .into_any_element()
+            }
+            Node::Progress {
+                value,
+                tone,
+                label,
+                trailing,
+            } => {
+                let tint = color(*tone, theme);
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .w(px(180.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                            .text_color(theme.foreground)
+                            .child(
+                                label
+                                    .as_ref()
+                                    .map(|t| t.as_str().to_owned())
+                                    .unwrap_or_default(),
+                            )
+                            .child(
+                                trailing
+                                    .as_ref()
+                                    .map(|t| t.as_str().to_owned())
+                                    .unwrap_or_default(),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .h(px(6.))
+                            .w_full()
+                            .rounded(px(3.))
+                            .overflow_hidden()
+                            .bg(tint.opacity(0.2))
+                            .child(div().h_full().w(relative(value.clamp(0.0, 1.0))).bg(tint)),
+                    )
+                    .into_any_element()
+            }
+            Node::Card {
+                icon,
+                title,
+                badge,
+                badge_tone,
+                subtitle,
+                child,
+            } => div()
+                .flex()
+                .flex_col()
+                .flex_none()
+                .rounded(px(RADIUS_MD))
+                .border_1()
+                .border_color(theme.border)
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(SPACE_2))
+                        .px(px(SPACE_2))
+                        .py(px(6.))
+                        .bg(theme.secondary.opacity(0.6))
+                        .children(
+                            icon.as_ref()
+                                .and_then(node_icon)
+                                .map(|icon| div().text_color(theme.muted_foreground).child(icon)),
+                        )
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.foreground)
+                                .child(title.as_str().to_owned()),
+                        )
+                        .children(badge.as_ref().map(|badge| {
+                            let tint = color(*badge_tone, theme);
+                            div()
+                                .px(px(6.))
+                                .rounded(px(4.))
+                                .bg(tint.opacity(0.15))
+                                .text_color(tint)
+                                .text_size(crate::theme::ui_size(theme, FONT_CAPTION))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(badge.as_str().to_owned())
+                        }))
+                        .children(subtitle.as_ref().map(|subtitle| {
+                            div()
+                                .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                                .text_color(theme.muted_foreground)
+                                .child(subtitle.as_str().to_owned())
+                        })),
+                )
+                .children(child.as_ref().map(|child| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .p(px(SPACE_2))
+                        .child(self.render_node(child, theme, cx))
+                }))
+                .into_any_element(),
+            Node::Diff { columns, rows } => {
+                let cell = |cell: &ora_core::extension_ui::DiffCell| {
+                    let new = cell.text.as_str().to_owned();
+                    let struck = |text: String| {
+                        div()
+                            .px(px(4.))
+                            .rounded(px(3.))
+                            .bg(theme.danger.opacity(0.14))
+                            .text_color(theme.danger)
+                            .line_through()
+                            .child(text)
+                    };
+                    let inner = div().flex().flex_row().flex_wrap().gap(px(4.));
+                    let inner = if cell.removed {
+                        inner.child(struck(new))
+                    } else if let Some(old) = &cell.old {
+                        inner.child(struck(old.as_str().to_owned())).child(
+                            div()
+                                .px(px(4.))
+                                .rounded(px(3.))
+                                .bg(theme.success.opacity(0.16))
+                                .text_color(theme.success)
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(new),
+                        )
+                    } else {
+                        inner.child(new)
+                    };
+                    div().flex_1().min_w(px(0.)).child(inner)
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                    .child(
+                        text_row(columns.iter())
+                            .py(px(4.))
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground),
+                    )
+                    .children(rows.iter().enumerate().map(|(ix, row)| {
+                        div()
+                            .flex()
+                            .gap(px(SPACE_2))
+                            .py(px(4.))
+                            .when(ix % 2 == 1, |row| row.bg(theme.secondary.opacity(0.35)))
+                            .children(row.iter().map(cell))
+                    }))
+                    .into_any_element()
+            }
         }
     }
     fn tab_strip(
@@ -662,6 +986,24 @@ fn color(tone: Option<Tone>, theme: &gpui_kit::component::Theme) -> Hsla {
     }
 }
 
+/// Icons a node can name: the list icons plus a few for banners and cards.
+fn node_icon(name: &Text) -> Option<Icon> {
+    use gpui_kit::assets::IconName as Lucide;
+    let icon = match name.as_str() {
+        "flask" => Icon::new(Lucide::FlaskConical),
+        "lock" => Icon::new(Lucide::Lock),
+        "undo" => Icon::new(IconName::Undo2),
+        "check" => Icon::new(IconName::Check),
+        "zap" => Icon::new(IconName::Zap),
+        "table" => Icon::new(IconName::Table),
+        "x" => Icon::new(IconName::X),
+        "alert" => Icon::new(IconName::CircleAlert),
+        "copy" => Icon::new(IconName::Copy),
+        _ => Icon::new(interface_icon(name)?),
+    };
+    Some(icon)
+}
+
 fn interface_icon(name: &Text) -> Option<IconName> {
     match name.as_str() {
         "search" => Some(IconName::Search),
@@ -691,6 +1033,15 @@ impl Render for ExtensionPanel {
                         .map(|tree| self.render_node(tree, &theme, cx)),
                 )
                 .into_any_element();
+        }
+        if let Some(kind) = self.layout {
+            if let Some(view) = self
+                .tree
+                .as_ref()
+                .and_then(|tree| self.stopped_layout(kind, tree, &theme, cx))
+            {
+                return view;
+            }
         }
         if self.layout == Some(store::ToolKind::MailHog) {
             if let Some(view) = self

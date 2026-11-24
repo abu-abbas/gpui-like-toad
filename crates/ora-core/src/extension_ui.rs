@@ -74,6 +74,18 @@ pub enum ButtonVariant {
     Secondary,
     Ghost,
     Danger,
+    Success,
+}
+
+/// A cell of a [`Node::Diff`] table. `old` set: the value changed from
+/// `old` to `text`. `removed`: the value is gone (a deleted row).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiffCell {
+    pub text: Text,
+    pub old: Option<Text>,
+    #[serde(default)]
+    pub removed: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -155,6 +167,8 @@ pub enum Node {
         #[serde(default)]
         writes: bool,
         confirm: Option<Text>,
+        /// An interface icon name (see `docs/extension-ui-protocol.md`).
+        icon: Option<Text>,
     },
     Input {
         id: Text,
@@ -199,6 +213,37 @@ pub enum Node {
     },
     Empty {
         text: Text,
+    },
+    /// A tinted strip: icon, title and text on the left, `children`
+    /// (badges, progress, buttons) on the right.
+    Banner {
+        tone: Option<Tone>,
+        icon: Option<Text>,
+        title: Text,
+        text: Option<Text>,
+        #[serde(default)]
+        children: Vec<Node>,
+    },
+    /// A bar filled to `value` (0 to 1) with a label and a trailing text.
+    Progress {
+        value: f32,
+        tone: Option<Tone>,
+        label: Option<Text>,
+        trailing: Option<Text>,
+    },
+    /// A bordered box with a header line and an optional body.
+    Card {
+        icon: Option<Text>,
+        title: Text,
+        badge: Option<Text>,
+        badge_tone: Option<Tone>,
+        subtitle: Option<Text>,
+        child: Option<Box<Node>>,
+    },
+    /// A table whose cells can show an old value struck out next to the new one.
+    Diff {
+        columns: Vec<Text>,
+        rows: Vec<Vec<DiffCell>>,
     },
 }
 
@@ -394,6 +439,29 @@ impl Node {
                 }
             }
             Self::Scroll { child } => child.validate(depth + 1, budget, ids)?,
+            Self::Card {
+                child: Some(child), ..
+            } => child.validate(depth + 1, budget, ids)?,
+            Self::Banner { children, .. } => {
+                for child in children {
+                    child.validate(depth + 1, budget, ids)?;
+                }
+            }
+            Self::Progress { value, .. } => {
+                if !value.is_finite() || !(0.0..=1.0).contains(value) {
+                    return Err("extension UI progress is outside 0 to 1");
+                }
+            }
+            Self::Diff { columns, rows } => {
+                spend(budget, columns.len())?;
+                spend(budget, rows.len())?;
+                for row in rows {
+                    if row.len() != columns.len() {
+                        return Err("extension UI table row does not match its columns");
+                    }
+                    spend(budget, row.len())?;
+                }
+            }
             Self::Link { url, .. } => validate_url(url)?,
             Self::Menu { items, .. } => {
                 spend(budget, items.len())?;
@@ -458,6 +526,28 @@ mod tests {
 
     fn check(reply: Value, origin: Origin) -> Result<ViewUpdate, String> {
         decode_update(&reply.to_string(), origin)
+    }
+
+    #[test]
+    fn banner_progress_card_and_diff_validate() {
+        let tree = json!({"type": "column", "children": [
+            {"type": "banner", "tone": "warning", "icon": "flask", "title": "Waiting",
+             "text": "2 rows", "children": [
+                {"type": "progress", "value": 0.5, "tone": "warning", "label": "Auto rollback",
+                 "trailing": "2:30"},
+                {"type": "button", "id": "commit", "label": "Commit", "variant": "success",
+                 "icon": "check", "writes": true}
+             ]},
+            {"type": "card", "icon": "table", "title": "EMP", "badge": "UPDATE",
+             "badge_tone": "warning", "child": {"type": "diff", "columns": ["ID", "SALARY"],
+                "rows": [[{"text": "1"}, {"text": "110", "old": "100"}],
+                         [{"text": "2"}, {"text": "200", "removed": true}]]}}
+        ]});
+        check(update(tree), Origin::Open).unwrap();
+        let bad = json!({"type": "progress", "value": 1.5});
+        assert!(check(update(bad), Origin::Open).is_err());
+        let ragged = json!({"type": "diff", "columns": ["A", "B"], "rows": [[{"text": "1"}]]});
+        assert!(check(update(ragged), Origin::Open).is_err());
     }
 
     #[test]

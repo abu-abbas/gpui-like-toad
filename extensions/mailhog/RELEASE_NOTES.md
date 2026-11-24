@@ -1,6 +1,12 @@
 # MailHog extension release notes
 
-## 1.0.2 · Unreleased
+## 1.0.3 · Unreleased
+
+Minimum Kilat version `0.1.60`.
+
+- A MailHog server started by Kilat now stores mail as files in `server-data/developer-tools/mailhog/<instance-id>/` (maildir), so the inbox survives a server restart. Storage flags typed in the server command still win.
+
+## [1.0.2](https://github.com/abu-abbas/kilat/releases/tag/ext-mailhog-1.0.2) · 2026-11-24
 
 Minimum Kilat version `0.1.60`.
 

@@ -63,6 +63,7 @@ always an object. A method an extension cannot do answers with an error.
 | `list_indexes` | optional `database`, `owner`, `table` | list |
 | `list_constraints`, `trigger_scripts` | `owner`, `table` | lists |
 | `explain_plan`, `explain_plan_nodes` | `sql` | text lines / plan nodes |
+| `explain_analyze` | `sql` | text lines. Runs the statement inside a transaction that is always rolled back (PostgreSQL 1.0.1+, MySQL 1.0.2+); Kilat 0.1.63+ shows the Explain analyze button only for a dialect that declares it |
 
 ### Databases of one server (SQL Server)
 A server that lets one session read several databases (`Capabilities.databases`)
@@ -121,8 +122,10 @@ earlier Kilat versions put it).
 An extension of kind `tool` has its own methods. The MailHog extension
 (`crates/ext-mailhog`, id `mailhog`) wraps the MailHog HTTP API client of
 `crates/devtools`; the JSON of messages and targets is in
-`devtools/src/mailhog_wire.rs`, used by both sides. Kilat keeps drawing the
-Inbox; the extension only answers with data.
+`devtools/src/mailhog_wire.rs`. The released extension draws its Inbox
+with the declarative UI of `docs/extension-ui.md` (`ui.open`, `ui.event`,
+`ui.tick`, as for Redis). The data methods `list`, `search`, `delete` and
+`delete_all` below are still answered, but Kilat no longer calls them.
 
 | method | params | result |
 |---|---|---|
@@ -133,6 +136,7 @@ Inbox; the extension only answers with data.
 | `search` | `kind` (`containing`, `from`, `to`), `query`, `start` | like `list` |
 | `delete` | `id` | `{}` |
 | `delete_all` | none | `{}` |
+| `ui.open`, `ui.event`, `ui.tick` | as in `docs/extension-ui.md` | a view update |
 
 `managed_server` is true only when this extension process started the
 server. Older extensions omit it. Kilat enables Stop and Restart when

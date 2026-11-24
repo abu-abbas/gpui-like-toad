@@ -58,6 +58,7 @@ Confirm the current version in the signed index and choose an unused
 |---|---|
 | `sqlite` | [SQLite](../extensions/sqlite/RELEASE_NOTES.md) |
 | `mailhog` | [MailHog](../extensions/mailhog/RELEASE_NOTES.md) |
+| `redis` | [Redis](../extensions/redis/RELEASE_NOTES.md) |
 | `postgres` | [PostgreSQL](../extensions/postgres/RELEASE_NOTES.md) |
 | `mysql` | [MySQL](../extensions/mysql/RELEASE_NOTES.md) |
 | `mssql` | [SQL Server](../extensions/mssql/RELEASE_NOTES.md) |
@@ -66,9 +67,24 @@ Confirm the current version in the signed index and choose an unused
 ## Publishing
 
 Actions > Release extension > Run workflow, pick the extension and a new
-version (`X.Y.Z`). Paste the prepared notes in **Release notes**. The workflow
+version (`X.Y.Z`). Paste the whole prepared entry in **Release notes**,
+including its `Minimum Kilat version` line; an empty field publishes a
+release whose description only names the build commit. The workflow
 adds the build commit and install location to the release description. You
 can also edit the release description on GitHub to add Markdown formatting.
+
+When a feature also needs a newer Kilat (for example a new button), say so
+in the entry: "appears in Kilat X.Y.Z and newer". `min_app` only says which
+Kilat can run the extension at all.
+
+After the release is published, in the next PR:
+
+- turn `## X.Y.Z · Unreleased` into
+  `## [X.Y.Z](https://github.com/abu-abbas/kilat/releases/tag/ext-<id>-X.Y.Z) · YYYY-MM-DD`
+  (the publication date in Asia/Jakarta time, like the existing entries);
+- keep one entry per published version: a change that was not in a published
+  build goes into a new unreleased entry, never into an entry that already
+  shipped.
 
 The workflow checks the signing key, builds Linux x86_64,
 Windows x86_64 and macOS arm64, checks that each program answers the

@@ -142,7 +142,10 @@ impl Workbench {
                             },
                         ));
                     }
-                    Err(err) => online.note = Some((true, format!("Could not check: {err}"))),
+                    Err(err) => {
+                        crate::error_log::append(&format!("Extension index check failed: {err}"));
+                        online.note = Some((true, format!("Could not check: {err}")));
+                    }
                 }
                 cx.notify();
             });
@@ -170,7 +173,11 @@ impl Workbench {
         online.busy = Some(id.to_string());
         online.note = Some((false, format!("Downloading and verifying {name}…")));
         let task = cx.background_executor().spawn(async move {
-            let index = crate::release_fetch::fetch_extension_index()?;
+            let index = crate::release_fetch::fetch_extension_index().inspect_err(|e| {
+                crate::error_log::append(&format!(
+                    "Extension install failed: {id}: extension index: {e}"
+                ))
+            })?;
             let entry = index
                 .get(id)
                 .cloned()
@@ -224,6 +231,7 @@ impl Workbench {
         if self.settings.ext_online.installed.contains_key(id) {
             if let Err(err) = store::remove_remote_install(id) {
                 let name = store::extension_info(id).map_or(id, |i| i.name);
+                crate::error_log::append(&format!("Extension uninstall failed: {id}: {err}"));
                 self.settings.ext_online.note = Some((
                     true,
                     format!("Could not remove the downloaded {name}: {err}"),
@@ -291,6 +299,7 @@ impl Workbench {
             self.extensions.uninstall(id);
         }
         if let Err(err) = store::save_extensions(&self.extensions) {
+            crate::error_log::append(&format!("Saving extensions.json failed: {err}"));
             self.push_message(format!("Could not save extensions: {err}"));
         }
         cx.notify();

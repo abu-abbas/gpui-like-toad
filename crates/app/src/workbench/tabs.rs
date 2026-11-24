@@ -256,6 +256,9 @@ impl Workbench {
                             .and_then(|id| self.conn_by_id(id))
                             .and_then(|conn| ui_helpers::environment_badge(conn.access(), theme)),
                     )
+                    .when(self.tab_has_open_tx(tab), |this| {
+                        this.child(transaction::tx_dot(("tab-tx", tab.id), theme))
+                    })
                     // Which connection the tab runs on, once more than one
                     // is open (or "closed" when its connection is gone).
                     .when_some(self.tab_conn_label(tab), |this, (label, closed)| {
@@ -390,6 +393,13 @@ impl Workbench {
             self.active_tab = pos;
         } else {
             self.active_tab = old_active.min(self.tabs.len() - 1);
+        }
+        // A dry run belongs to its tab: closing the tab rolls it back.
+        if self
+            .dryrun_tab()
+            .is_some_and(|id| !self.tabs.iter().any(|t| t.id == id))
+        {
+            self.close_dryrun(cx);
         }
         self.follow_tab_conn(cx);
         cx.notify();
