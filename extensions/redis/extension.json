@@ -1,0 +1,8 @@
+{
+  "id": "redis",
+  "name": "Redis",
+  "description": "Browse keys, read values and run commands.",
+  "kind": "tool",
+  "crate": "kilat-ext-redis",
+  "min_app": "0.1.63"
+}

@@ -69,10 +69,10 @@ mod conns;
 mod data_tab;
 mod db_events;
 mod db_icon;
+mod dryrun;
 mod explorer;
 mod extension_panel;
 mod grid_clipboard;
-mod mailhog_pilot;
 mod object_ops;
 mod profiles;
 mod query;
@@ -85,9 +85,9 @@ mod settings;
 mod sidebar;
 mod sqlite_form;
 mod tabs;
+mod tool_pilot;
 mod tools;
 mod tools_mail;
-mod tools_redis;
 mod tools_server;
 mod transfer;
 mod transfer_ui;
@@ -483,6 +483,8 @@ pub struct Workbench {
     object_dialog: Option<ObjectDialog>,
     /// The Data Transfer wizard, while it is showing.
     transfer: Option<transfer::TransferWizard>,
+    /// The Dry-run dialog, while it is showing.
+    dryrun: Option<dryrun::DryRun>,
     /// "Save scripts before disconnect?" dialog, while it is showing.
     disconnect_prompt: Option<conns::DisconnectPrompt>,
     /// The Info panel under data / script tabs is folded to its header.
@@ -498,6 +500,8 @@ pub struct Workbench {
     completion: Rc<SqlCompletionProvider>,
     /// GitHub Releases update check state (see `updates.rs`).
     updates: UpdateState,
+    /// Data tabs count all rows by themselves after a page loads.
+    auto_count: bool,
     /// Developer Tools (Redis, MailHog): saved instances and open views.
     tools: tools::ToolsState,
     /// Installed extensions (Settings > Extensions).
@@ -596,6 +600,7 @@ impl Workbench {
             cell_editor: None,
             object_dialog: None,
             transfer: None,
+            dryrun: None,
             disconnect_prompt: None,
             info_collapsed: layout.info_collapsed,
             side_conn_folded: false,
@@ -604,6 +609,7 @@ impl Workbench {
             catalog,
             completion,
             updates: UpdateState::load(cx),
+            auto_count: store::load_auto_count(),
             tools: tools::ToolsState::load(),
             extensions: store::load_extensions(),
             _subscriptions: vec![appearance_sub, settings_search_sub, proxy_sub, quit_sub],
@@ -854,6 +860,9 @@ impl Render for Workbench {
             })
             .when(self.transfer.is_some(), |this| {
                 this.child(self.render_transfer(&theme, cx))
+            })
+            .when(self.dryrun.is_some(), |this| {
+                this.child(self.render_dryrun(&theme, cx))
             })
             .when(self.disconnect_prompt.is_some(), |this| {
                 this.child(self.render_disconnect_prompt(&theme, cx))

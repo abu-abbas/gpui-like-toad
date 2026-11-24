@@ -117,12 +117,37 @@ impl Workbench {
             self.load_data_view(cx);
             return;
         }
-        let sql = self.editor_text(cx);
-        self.run_sql(sql, cx);
+        // F5: the selection if there is one, else the whole editor, run as
+        // a script (one statement after the other).
+        let sql = {
+            let state = self.active_tab().editor.read(cx);
+            let range = state.selected_range();
+            let text = state.value().to_string();
+            if range.start < range.end && range.end <= text.len() {
+                text[range].to_string()
+            } else {
+                text
+            }
+        };
+        let statements = ora_core::sql::script_statements(&sql);
+        if statements.len() < 2 {
+            return self.run_sql(sql, cx);
+        }
+        self.conn.status = "Running script…".to_string();
+        self.conn.pending_sql = Some(sql);
+        self.active_tab_mut().statement_results.clear();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.conn.cancel_script = Some(cancelled.clone());
+        let job = Job::Script {
+            statements,
+            cancelled,
+        };
+        self.spawn_db(job, PendingOp::Run, cx);
     }
 
-    /// "Run Current": the selection if there is one, else the statement
-    /// the cursor sits in (statements end at `;`).
+    /// "Run Current" (Ctrl/Cmd+Enter, F9): the selection if there is one,
+    /// else the statement the cursor sits in (`;`, blank line or `/` line;
+    /// PL/SQL blocks stay whole).
     pub(super) fn run_current(&mut self, cx: &mut Context<Self>) {
         if self.conn.busy || self.show_empty_workspace || self.conn.session.is_none() {
             return self.run(cx);
@@ -130,21 +155,23 @@ impl Workbench {
         if self.active_tab().data.is_some() {
             return self.run(cx);
         }
-        let editor = self.active_tab().editor.clone();
-        let sql = {
-            let state = editor.read(cx);
-            let range = state.selected_range();
-            let text = state.value().to_string();
-            if range.start < range.end && range.end <= text.len() {
-                text[range].to_string()
-            } else {
-                statement_at(&text, state.cursor())
-            }
-        };
+        let sql = self.current_statement(cx);
         self.run_sql(sql, cx);
     }
 
-    fn run_sql(&mut self, sql: String, cx: &mut Context<Self>) {
+    /// The selection if there is one, else the statement the cursor sits in.
+    pub(super) fn current_statement(&self, cx: &App) -> String {
+        let state = self.active_tab().editor.read(cx);
+        let range = state.selected_range();
+        let text = state.value().to_string();
+        if range.start < range.end && range.end <= text.len() {
+            text[range].to_string()
+        } else {
+            statement_at(&text, state.cursor())
+        }
+    }
+
+    pub(super) fn run_sql(&mut self, sql: String, cx: &mut Context<Self>) {
         if clean_statement(&sql).is_empty() {
             self.push_message("The editor is empty.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;

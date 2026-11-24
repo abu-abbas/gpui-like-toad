@@ -76,9 +76,11 @@ jobs:
             target/debug
           key: cargo-ci-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-ci-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.version }}-
+      # kilat-ext-redis tests run against a real server (skipped without one).
+      - run: sudo apt-get update && sudo apt-get install -y redis-server
       - run: cargo fmt --check
-      - run: cargo clippy -p ora-core -p ora-driver -p sqlite-driver -p devtools -p kilat-ext-sqlite -p kilat-ext-mailhog -p postgres-driver -p kilat-ext-postgres -p mysql-driver -p kilat-ext-mysql --all-targets --locked -- -D warnings
-      - run: cargo test -p ora-core -p ora-driver -p sqlite-driver -p devtools -p kilat-ext-sqlite -p kilat-ext-mailhog -p postgres-driver -p kilat-ext-postgres -p mysql-driver -p kilat-ext-mysql --locked
+      - run: cargo clippy -p ora-core -p ora-driver -p sqlite-driver -p devtools -p kilat-ext-sqlite -p kilat-ext-mailhog -p kilat-ext-redis -p kilat-ext-dryrun -p postgres-driver -p kilat-ext-postgres -p mysql-driver -p kilat-ext-mysql --all-targets --locked -- -D warnings
+      - run: cargo test -p ora-core -p ora-driver -p sqlite-driver -p devtools -p kilat-ext-sqlite -p kilat-ext-mailhog -p kilat-ext-redis -p kilat-ext-dryrun -p postgres-driver -p kilat-ext-postgres -p mysql-driver -p kilat-ext-mysql --locked
 
   # Kompilasi GUI pertama dan satu-satunya yang terpercaya: VM dev tidak
   # cukup RAM untuk gpui-kit. Job ini juga menjalankan unit test app crate.

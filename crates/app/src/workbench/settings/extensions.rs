@@ -18,10 +18,17 @@ pub(super) enum ExtFilter {
     Installed,
     Databases,
     Tools,
+    Actions,
 }
 
 impl ExtFilter {
-    const ALL: [Self; 4] = [Self::All, Self::Installed, Self::Databases, Self::Tools];
+    const ALL: [Self; 5] = [
+        Self::All,
+        Self::Installed,
+        Self::Databases,
+        Self::Tools,
+        Self::Actions,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -29,6 +36,7 @@ impl ExtFilter {
             Self::Installed => "Installed",
             Self::Databases => "Databases",
             Self::Tools => "Developer tools",
+            Self::Actions => "SQL tools",
         }
     }
 
@@ -38,13 +46,15 @@ impl ExtFilter {
             Self::Installed => installed,
             Self::Databases => info.kind == store::ExtensionKind::Database,
             Self::Tools => info.kind == store::ExtensionKind::Tool,
+            Self::Actions => info.kind == store::ExtensionKind::Action,
         }
     }
 }
 
 /// Does this build know how to run the downloaded extension?
 fn has_online_version(id: &str) -> bool {
-    id == super::super::mailhog_pilot::ID
+    store::ToolKind::from_key(id).is_some()
+        || id == super::super::dryrun::ID
         || ora_core::DbKind::ALL
             .iter()
             .any(|k| *k != ora_core::DbKind::Oracle && k.key() == id)
@@ -202,10 +212,11 @@ impl Workbench {
         if self.settings.ext_online.working() {
             return;
         }
-        if id == super::super::mailhog_pilot::ID && !self.stop_mailhog_before_uninstall() {
+        if store::ToolKind::from_key(id).is_some() && !self.stop_pilot_before_uninstall(id) {
+            let name = store::extension_info(id).map_or(id, |i| i.name);
             self.settings.ext_online.note = Some((
                 true,
-                "Wait for the MailHog request to finish, then retry.".into(),
+                format!("Wait for the {name} request to finish, then retry."),
             ));
             cx.notify();
             return;
