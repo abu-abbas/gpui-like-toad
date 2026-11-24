@@ -570,3 +570,15 @@ fn migrate_copy_fallback_keeps_old_and_nests() {
     assert!(old.join("a/b/f.txt").exists());
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn auto_count_defaults_off_and_keeps_other_settings() {
+    let dir = scratch("auto-count");
+    assert!(!load_auto_count_in(&dir));
+    save_theme_preference_in(&dir, ThemePreference::Dark).unwrap();
+    save_auto_count_in(&dir, true).unwrap();
+    assert!(load_auto_count_in(&dir));
+    assert_eq!(load_theme_preference_in(&dir), ThemePreference::Dark);
+    save_auto_count_in(&dir, false).unwrap();
+    assert!(!load_auto_count_in(&dir));
+}

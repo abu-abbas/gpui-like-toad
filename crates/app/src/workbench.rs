@@ -495,6 +495,8 @@ pub struct Workbench {
     completion: Rc<SqlCompletionProvider>,
     /// GitHub Releases update check state (see `updates.rs`).
     updates: UpdateState,
+    /// Data tabs count all rows by themselves after a page loads.
+    auto_count: bool,
     /// Developer Tools (Redis, MailHog): saved instances and open views.
     tools: tools::ToolsState,
     /// Installed extensions (Settings > Extensions).
@@ -600,6 +602,7 @@ impl Workbench {
             catalog,
             completion,
             updates: UpdateState::load(cx),
+            auto_count: store::load_auto_count(),
             tools: tools::ToolsState::load(),
             extensions: store::load_extensions(),
             _subscriptions: vec![appearance_sub, settings_search_sub, proxy_sub, quit_sub],
