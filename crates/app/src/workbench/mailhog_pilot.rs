@@ -8,7 +8,7 @@ use devtools::mailhog::MailHogTarget;
 use devtools::mailhog_wire::target_to_value;
 use ora_core::extension_host::{CallError, ExtProcess};
 use ora_core::extension_ui::{decode_update, Effect, Event, Open, Origin, Slot, Tick, ViewUpdate};
-use ora_core::store::ToolInstance;
+use ora_core::store::{ToolInstance, ToolKind};
 use serde_json::json;
 
 use super::extension_panel::ExtensionPanel;
@@ -27,6 +27,8 @@ pub(super) struct MailhogPilot {
     explorer: Entity<ExtensionPanel>,
     main: Entity<ExtensionPanel>,
     process: Option<Process>,
+    managed_server: bool,
+    stopped: bool,
     revision: u32,
     busy: bool,
     failure: Option<String>,
@@ -46,6 +48,20 @@ impl MailhogPilot {
     pub fn reachable(&self) -> bool {
         self.process.is_some() && self.failure.is_none()
     }
+
+    pub(super) fn manages_server(&self) -> bool {
+        self.reachable() && self.managed_server
+    }
+
+    pub(super) fn connecting(&self) -> bool {
+        !self.reachable() && self.busy
+    }
+}
+
+struct Connected {
+    process: Process,
+    update: ViewUpdate,
+    managed_server: bool,
 }
 
 fn call(
@@ -59,11 +75,7 @@ fn call(
     decode_update(&store::to_json(&reply), origin).map_err(|err| process.violation(&err))
 }
 
-fn start(
-    program: PathBuf,
-    tool: ToolInstance,
-    typed: Option<String>,
-) -> Result<(Process, ViewUpdate), String> {
+fn start(program: PathBuf, tool: ToolInstance, typed: Option<String>) -> Result<Connected, String> {
     let password = resolve_password(&tool, typed);
     let target = MailHogTarget {
         host: tool.host.clone(),
@@ -81,13 +93,15 @@ fn start(
         "server_command": tool.server_command,
         "instance_id": tool.id,
     });
-    process
+    let reply = process
         .call(
             "connect",
             store::parse_json(&payload.to_string())?,
             Duration::from_secs(30),
         )
         .map_err(|err| err.to_string())?;
+    // Older extensions omit this field. Only offer Stop when ownership is known.
+    let managed_server = reply.get("managed_server").and_then(store::Json::as_bool) == Some(true);
     let update = call(
         &mut process,
         "ui.open",
@@ -97,10 +111,22 @@ fn start(
         Origin::Open,
     )
     .map_err(|err| err.to_string())?;
-    Ok((Arc::new(Mutex::new(process)), update))
+    Ok(Connected {
+        process: Arc::new(Mutex::new(process)),
+        update,
+        managed_server,
+    })
 }
 
 impl Workbench {
+    pub(super) fn mailhog_extension(&self, tool: &ToolInstance) -> Option<store::RemoteInstall> {
+        if tool.kind == ToolKind::MailHog && self.extensions.tool_enabled(tool.kind) {
+            store::remote_install(ID)
+        } else {
+            None
+        }
+    }
+
     pub(super) fn open_mailhog_pilot(
         &mut self,
         tool: ToolInstance,
@@ -129,6 +155,8 @@ impl Workbench {
             explorer,
             main,
             process: None,
+            managed_server: false,
+            stopped: false,
             revision: 0,
             busy: true,
             failure: None,
@@ -149,11 +177,70 @@ impl Workbench {
                 };
                 pilot.busy = false;
                 match result {
-                    Ok((process, update)) => {
-                        pilot.process = Some(process);
-                        this.apply_mailhog_update(update, cx);
+                    Ok(connected) => {
+                        pilot.process = Some(connected.process);
+                        pilot.managed_server = connected.managed_server;
+                        this.apply_mailhog_update(connected.update, cx);
                     }
                     Err(error) => this.mailhog_failed(error, cx),
+                }
+            },
+        );
+        cx.notify();
+    }
+
+    pub(super) fn stop_mailhog_server(&mut self, id: &str, restart: bool, cx: &mut Context<Self>) {
+        let Some(pilot) = self
+            .tools
+            .pilot
+            .as_mut()
+            .filter(|pilot| pilot.instance == id && pilot.manages_server())
+        else {
+            return;
+        };
+        let Some(process) = pilot.process.take() else {
+            return;
+        };
+        let generation = pilot.explorer.entity_id();
+        pilot.polling = None;
+        pilot.busy = true;
+        let id = id.to_owned();
+        self.tools.mailhog_stopping.insert(id.clone());
+        spawn_tool_job(
+            cx,
+            move || {
+                let mut process = process.lock().unwrap_or_else(|err| err.into_inner());
+                call(
+                    &mut process,
+                    "server.stop",
+                    serde_json::Value::Null,
+                    Origin::UserEvent,
+                )
+                .map_err(|err| err.to_string())
+            },
+            move |this, result, cx| {
+                this.tools.mailhog_stopping.remove(&id);
+                if let Some(pilot) = this
+                    .tools
+                    .pilot
+                    .as_mut()
+                    .filter(|pilot| pilot.explorer.entity_id() == generation)
+                {
+                    pilot.busy = false;
+                    match result {
+                        Ok(update) => {
+                            pilot.stopped = true;
+                            this.apply_mailhog_update(update, cx);
+                            if restart {
+                                if let Some(tool) = this.tools.get(&id).cloned() {
+                                    if let Some(install) = this.mailhog_extension(&tool) {
+                                        this.open_mailhog_pilot(tool, install.path, cx);
+                                    }
+                                }
+                            }
+                        }
+                        Err(error) => this.mailhog_failed(error, cx),
+                    }
                 }
             },
         );
@@ -206,6 +293,16 @@ impl Workbench {
             }
             return;
         }
+        if let Some(pilot) = self.tools.pilot.as_ref().filter(|pilot| pilot.stopped) {
+            if event.slot == Slot::Explorer
+                && event.node.as_str() == "start-server"
+                && matches!(event.event, ora_core::extension_ui::EventKind::Click { .. })
+            {
+                let id = pilot.instance.clone();
+                self.start_tool_server(&id, cx);
+            }
+            return;
+        }
         self.mailhog_request("ui.event", json!(event), Origin::UserEvent, cx);
     }
 
@@ -232,12 +329,9 @@ impl Workbench {
                 (result, process.is_broken(), process.stderr_tail())
             },
             move |this, (result, broken, stderr), cx| {
-                let Some(pilot) = this
-                    .tools
-                    .pilot
-                    .as_mut()
-                    .filter(|pilot| pilot.explorer.entity_id() == generation)
-                else {
+                let Some(pilot) = this.tools.pilot.as_mut().filter(|pilot| {
+                    pilot.explorer.entity_id() == generation && pilot.process.is_some()
+                }) else {
                     return;
                 };
                 pilot.busy = false;
@@ -385,7 +479,10 @@ impl Workbench {
                         .into_any_element(),
                 );
             }
-            if !pilot.reachable() {
+            if !pilot.reachable()
+                && !pilot.stopped
+                && !self.tools.mailhog_stopping.contains(&pilot.instance)
+            {
                 return Some(loading_state("Connecting to MailHog…", theme).into_any_element());
             }
         }

@@ -23,6 +23,30 @@ impl Inbox {
         self.replace_page(page);
     }
 
+    pub fn stopped(&mut self) -> Result<Value, String> {
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or("Inbox revision exhausted.")?;
+        *self = Self {
+            revision,
+            ..Self::default()
+        };
+        Ok(json!({
+            "version": VERSION,
+            "revision": revision,
+            "slots": [
+                {"slot": "sidebar", "tree": null},
+                {"slot": "explorer", "tree": {"type": "column", "children": [
+                    {"type": "text", "text": "Inbox", "style": "heading"},
+                    {"type": "text", "text": "Server stopped.", "tone": "muted"},
+                    {"type": "button", "id": "start-server", "label": "Start server", "variant": "primary"}
+                ]}},
+                {"slot": "main", "tree": null}
+            ]
+        }))
+    }
+
     pub fn handle(
         &mut self,
         client: &MailHogClient,
@@ -287,4 +311,30 @@ fn clip(text: &str, limit: usize) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use ora_core::extension_ui::{decode_update, Node, Origin};
+
+    use super::*;
+
+    #[test]
+    fn stopped_view_declares_start_and_ends_polling() {
+        let mut inbox = Inbox {
+            revision: 7,
+            ..Inbox::default()
+        };
+        let json = inbox.stopped().unwrap();
+        let update = decode_update(&json.to_string(), Origin::UserEvent).unwrap();
+        assert_eq!(update.revision, 8);
+        assert_eq!(update.poll_ms, None);
+        let explorer = update.slots.iter().find(|slot| slot.slot == Slot::Explorer);
+        let Some(Node::Column { children }) = explorer.and_then(|slot| slot.tree.as_ref()) else {
+            panic!("expected a stopped view in the explorer");
+        };
+        assert!(children.iter().any(|node| matches!(node,
+            Node::Button { id, disabled: false, .. } if id.as_str() == "start-server"
+        )));
+    }
 }

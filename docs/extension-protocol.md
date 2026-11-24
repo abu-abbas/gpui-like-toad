@@ -87,12 +87,19 @@ Inbox; the extension only answers with data.
 
 | method | params | result |
 |---|---|---|
-| `connect` | `target` `{host, port, https, username, password}` | `{total}`; fails when the API does not answer like MailHog |
-| `disconnect` | none | `{}` |
+| `connect` | `target` `{host, port, https, username, password}`, optional `start_server`, `server_command`, `instance_id`, `read_only` | `{total, managed_server}`. Fails when the MailHog API does not answer. |
+| `disconnect` | none | `{}`. Stops a local server started by this extension process. |
+| `server.stop` | none | Stops a server owned by the extension and returns the declarative stopped view. |
 | `list` | `start` (messages to skip, newest first) | messages in chunks, then `{total, count}` |
 | `search` | `kind` (`containing`, `from`, `to`), `query`, `start` | like `list` |
 | `delete` | `id` | `{}` |
 | `delete_all` | none | `{}` |
+
+`managed_server` is true only when this extension process started the
+server. Older extensions omit it. Kilat enables Stop and Restart when
+the field is true. The stopped view declares a `start-server` button in the
+Explorer slot. Kilat routes its click to a new connection using the saved
+profile, and the extension starts the server as part of `connect`.
 
 Every `chunk` of `list` and `search` is `{"messages": [message, ...]}`, at
 most about 512 KB each. A message has `id`, `from`, `to`, `cc`, `subject`,

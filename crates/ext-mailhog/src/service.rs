@@ -147,12 +147,21 @@ impl Service {
                 self.read_only = p.get("read_only").and_then(Value::as_bool).unwrap_or(false);
                 let total = page.total;
                 self.inbox.seed(page);
-                json!({ "total": total })
+                json!({ "total": total, "managed_server": self.server.is_some() })
             }
             "disconnect" => {
                 self.client = None;
                 self.server = None;
                 json!({})
+            }
+            "server.stop" => {
+                let server = self
+                    .server
+                    .take()
+                    .ok_or("Kilat did not start this server.")?;
+                drop(server);
+                self.client = None;
+                self.inbox.stopped()?
             }
             "list" => {
                 let page = self.client()?.list(start(&p))?;

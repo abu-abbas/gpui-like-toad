@@ -136,6 +136,15 @@ impl Workbench {
         let Some(tool) = self.tools.get(id).cloned() else {
             return;
         };
+        if let Some(install) = self.mailhog_extension(&tool) {
+            let flags = self.mailhog_server_flags(&tool);
+            if flags.can_start && !flags.start_disabled() {
+                self.tools.active = Some(tool.id.clone());
+                self.rail = RailPanel::Connections;
+                self.open_mailhog_pilot(tool, install.path, cx);
+            }
+            return;
+        }
         if !can_start(&tool) || self.server_busy(id) || self.server_running(id) {
             return;
         }
@@ -211,6 +220,15 @@ impl Workbench {
 
     /// Stop the server Kilat started; `then_start` restarts it.
     pub(super) fn stop_tool_server(&mut self, id: &str, then_start: bool, cx: &mut Context<Self>) {
+        if self
+            .tools
+            .pilot
+            .as_ref()
+            .is_some_and(|pilot| pilot.instance == id)
+        {
+            self.stop_mailhog_server(id, then_start, cx);
+            return;
+        }
         let Some(slot) = self.tools.servers.get_mut(id) else {
             return;
         };
@@ -383,10 +401,25 @@ impl Workbench {
 
     /// What the server menu needs, taken at render time.
     pub(super) fn server_flags(&self, tool: &ToolInstance) -> ServerFlags {
+        if self.mailhog_extension(tool).is_some() {
+            return self.mailhog_server_flags(tool);
+        }
         ServerFlags {
             can_start: can_start(tool),
             running: self.server_running(&tool.id),
             busy: self.server_busy(&tool.id),
+            connected: false,
+        }
+    }
+
+    fn mailhog_server_flags(&self, tool: &ToolInstance) -> ServerFlags {
+        let pilot = self.tools.pilot.as_ref().filter(|p| p.instance == tool.id);
+        ServerFlags {
+            can_start: can_start(tool),
+            running: pilot.is_some_and(|p| p.manages_server()),
+            busy: self.tools.mailhog_stopping.contains(&tool.id)
+                || pilot.is_some_and(|p| p.connecting()),
+            connected: pilot.is_some_and(|p| p.reachable()),
         }
     }
 
@@ -571,6 +604,13 @@ pub(super) struct ServerFlags {
     pub can_start: bool,
     pub running: bool,
     pub busy: bool,
+    connected: bool,
+}
+
+impl ServerFlags {
+    fn start_disabled(&self) -> bool {
+        self.running || self.busy || self.connected
+    }
 }
 
 /// "Start server" / "Restart server" / "Stop server" menu entries for a
@@ -591,7 +631,7 @@ pub(super) fn server_menu(
         .item(
             PopupMenuItem::new("Start server")
                 .icon(Icon::new(IconName::Play))
-                .disabled(running || busy)
+                .disabled(flags.start_disabled())
                 .on_click(move |_, _, cx| {
                     e1.update(cx, |this, cx| this.start_tool_server(&i1, cx))
                 }),
