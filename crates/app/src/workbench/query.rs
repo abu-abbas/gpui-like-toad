@@ -215,6 +215,99 @@ impl Workbench {
         self.spawn_db(Job::Explain { sql }, PendingOp::Explain, cx);
     }
 
+    /// EXPLAIN ANALYZE runs the statement. A plain SELECT gets a one-time
+    /// hint; anything else is refused on a Read Only connection and needs an
+    /// explicit confirmation (plus the production prompt on PROD).
+    pub(super) fn explain_analyze(&mut self, cx: &mut Context<Self>) {
+        if self.conn.busy || self.show_empty_workspace {
+            return;
+        }
+        if self.conn.session.is_none() {
+            self.push_message("Connect to a database first.".to_string());
+            self.active_tab_mut().results_tab = ResultsTab::Messages;
+            cx.notify();
+            return;
+        }
+        if !self.active_dialect().capabilities().explain_analyze {
+            self.push_message("EXPLAIN ANALYZE is not available for this database.".to_string());
+            self.active_tab_mut().results_tab = ResultsTab::Messages;
+            cx.notify();
+            return;
+        }
+        let sql = self.editor_text(cx);
+        if clean_statement(&sql).is_empty() {
+            self.push_message("The editor is empty.".to_string());
+            self.active_tab_mut().results_tab = ResultsTab::Messages;
+            cx.notify();
+            return;
+        }
+        let read = ora_core::sql::is_read_query(&sql);
+        if !read && self.conn.access().read_only {
+            self.push_message(
+                "EXPLAIN ANALYZE runs the statement, so it is blocked on a Read Only connection \
+                 unless the statement is a plain SELECT."
+                    .to_string(),
+            );
+            self.active_tab_mut().results_tab = ResultsTab::Messages;
+            cx.notify();
+            return;
+        }
+        let (title, text) = if !read {
+            (
+                "Run EXPLAIN ANALYZE?",
+                "EXPLAIN ANALYZE really EXECUTES this statement to measure it. \
+                 Kilat runs it inside a transaction that is always rolled back, so its changes are \
+                 undone, but the statement does the work and takes locks while it runs, and \
+                 sequences, non-transactional tables and functions with outside effects are not \
+                 undone. Do not use it on data you cannot afford to touch.",
+            )
+        } else if !self.explain_analyze_hinted {
+            (
+                "Run EXPLAIN ANALYZE?",
+                "EXPLAIN ANALYZE executes the query to measure it, so it takes as long as the \
+                 query itself. A plain SELECT changes nothing, but a function called inside it \
+                 can still have side effects, and Kilat cannot rule that out. You will not be \
+                 asked again for plain SELECTs this session.",
+            )
+        } else {
+            return self.start_explain_analyze(sql, cx);
+        };
+        let handle = self.window_handle;
+        let warning = text.to_string();
+        cx.spawn(async move |view, cx| {
+            let prompt = cx.update_window(handle, |_, window, cx| {
+                window.prompt(
+                    gpui_kit::PromptLevel::Warning,
+                    title,
+                    Some(&warning),
+                    &["Cancel", "Run and roll back"],
+                    cx,
+                )
+            });
+            let confirmed = match prompt {
+                Ok(prompt) => prompt.await == Ok(1),
+                Err(_) => false,
+            };
+            if confirmed {
+                let _ = view.update(cx, |this, cx| {
+                    if read {
+                        this.explain_analyze_hinted = true;
+                    }
+                    this.start_explain_analyze(sql, cx)
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn start_explain_analyze(&mut self, sql: String, cx: &mut Context<Self>) {
+        if self.conn.busy || self.conn.session.is_none() {
+            return;
+        }
+        self.conn.status = "Running EXPLAIN ANALYZE…".to_string();
+        self.spawn_db(Job::ExplainAnalyze { sql }, PendingOp::Explain, cx);
+    }
+
     pub(super) fn format_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.show_empty_workspace {
             return;

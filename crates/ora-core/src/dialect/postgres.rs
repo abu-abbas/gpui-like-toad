@@ -34,6 +34,7 @@ impl Dialect for PostgresDialect {
             transactional_ddl: true,
             row_edit: true,
             explain_text: true,
+            explain_analyze: true,
             truncate: true,
             special_tables: false,
             programs: false,

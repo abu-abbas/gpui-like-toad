@@ -587,6 +587,52 @@ impl DbClient for PostgresClient {
         catalog::trigger_scripts(self, owner, table)
     }
 
+    fn explain_analyze(&mut self, sql: &str) -> Result<Vec<String>, DbError> {
+        let sql = clean_statement(sql);
+        if !ora_core::sql::is_single_statement(sql) {
+            return Err(DbError::new("EXPLAIN ANALYZE runs one statement at a time"));
+        }
+        // DDL and utility commands are not offered: only statements the
+        // rollback below reliably undoes.
+        if !matches!(
+            first_word(sql).as_str(),
+            "select" | "with" | "values" | "table" | "insert" | "update" | "delete" | "merge"
+        ) {
+            return Err(DbError::new(
+                "EXPLAIN ANALYZE works on SELECT, INSERT, UPDATE, DELETE and MERGE only",
+            ));
+        }
+        let in_tx = self.in_tx;
+        let client = self.client()?;
+        // A savepoint inside the caller's open transaction (so their pending
+        // changes survive), else a transaction of its own. Either way the
+        // statement is rolled back, whether it worked or not.
+        let (open, undo) = if in_tx {
+            (
+                format!("SAVEPOINT {SAVEPOINT}_x"),
+                format!("ROLLBACK TO SAVEPOINT {SAVEPOINT}_x; RELEASE SAVEPOINT {SAVEPOINT}_x"),
+            )
+        } else {
+            ("BEGIN".to_string(), "ROLLBACK".to_string())
+        };
+        client.batch_execute(&open).map_err(db_err)?;
+        let result = client.simple_query(&format!("EXPLAIN (ANALYZE, BUFFERS) {sql}"));
+        let undone = client.batch_execute(&undo);
+        let messages = result.map_err(db_err)?;
+        undone.map_err(|e| {
+            DbError::new(format!(
+                "The plan ran but the rollback failed, check your data: {e}"
+            ))
+        })?;
+        Ok(messages
+            .into_iter()
+            .filter_map(|m| match m {
+                SimpleQueryMessage::Row(r) => r.get(0).map(str::to_string),
+                _ => None,
+            })
+            .collect())
+    }
+
     fn explain_plan(&mut self, sql: &str) -> Result<Vec<String>, DbError> {
         let sql = clean_statement(sql);
         let rows = self.text_rows(&format!("EXPLAIN {sql}"))?;
