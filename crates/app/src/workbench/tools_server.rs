@@ -136,12 +136,12 @@ impl Workbench {
         let Some(tool) = self.tools.get(id).cloned() else {
             return;
         };
-        if let Some(install) = self.mailhog_extension(&tool) {
-            let flags = self.mailhog_server_flags(&tool);
+        if let Some(install) = self.tool_extension(&tool) {
+            let flags = self.pilot_server_flags(&tool);
             if flags.can_start && !flags.start_disabled() {
                 self.tools.active = Some(tool.id.clone());
                 self.rail = RailPanel::Connections;
-                self.open_mailhog_pilot(tool, install.path, cx);
+                self.open_tool_pilot(tool, install.path, cx);
             }
             return;
         }
@@ -226,7 +226,7 @@ impl Workbench {
             .as_ref()
             .is_some_and(|pilot| pilot.instance == id)
         {
-            self.stop_mailhog_server(id, then_start, cx);
+            self.stop_pilot_server(id, then_start, cx);
             return;
         }
         let Some(slot) = self.tools.servers.get_mut(id) else {
@@ -345,36 +345,21 @@ impl Workbench {
 
     fn tool_log_tab_shown(&self, id: &str) -> bool {
         self.tools
-            .redis
+            .mail
             .get(id)
-            .is_some_and(|v| v.tab == super::tools_redis::RedisTab::Log)
-            || self
-                .tools
-                .mail
-                .get(id)
-                .is_some_and(|v| v.tab == super::tools_mail::MailTab::Log)
+            .is_some_and(|v| v.tab == super::tools_mail::MailTab::Log)
     }
 
     /// Connect the tool again (after its server came up).
     fn reconnect_tool(&mut self, id: &str, cx: &mut Context<Self>) {
-        if let Some(view) = self.tools.redis.get_mut(id) {
-            view.session = None;
-            view.keys.clear();
-            view.cursor = 0;
-            self.redis_connect(id, cx);
-        } else if self.tools.mail.contains_key(id) {
+        if self.tools.mail.contains_key(id) {
             self.mail_connect(id, cx);
         }
     }
 
     /// Show `error` (or "Starting…") in place of the tool's content.
     fn set_tool_status(&mut self, id: &str, error: Option<String>, starting: bool) {
-        if let Some(view) = self.tools.redis.get_mut(id) {
-            view.connecting = starting;
-            if error.is_some() {
-                view.error = error;
-            }
-        } else if let Some(view) = self.tools.mail.get_mut(id) {
+        if let Some(view) = self.tools.mail.get_mut(id) {
             view.loading = starting;
             if error.is_some() {
                 view.reachable = false;
@@ -384,12 +369,6 @@ impl Workbench {
     }
 
     fn drop_tool_session(&mut self, id: &str, why: &str) {
-        if let Some(view) = self.tools.redis.get_mut(id) {
-            view.session = None;
-            view.epoch += 1;
-            view.connecting = false;
-            view.error = Some(why.into());
-        }
         if let Some(view) = self.tools.mail.get_mut(id) {
             view.reachable = false;
             view.messages.clear();
@@ -401,8 +380,8 @@ impl Workbench {
 
     /// What the server menu needs, taken at render time.
     pub(super) fn server_flags(&self, tool: &ToolInstance) -> ServerFlags {
-        if self.mailhog_extension(tool).is_some() {
-            return self.mailhog_server_flags(tool);
+        if self.tool_extension(tool).is_some() {
+            return self.pilot_server_flags(tool);
         }
         ServerFlags {
             can_start: can_start(tool),
@@ -412,12 +391,12 @@ impl Workbench {
         }
     }
 
-    fn mailhog_server_flags(&self, tool: &ToolInstance) -> ServerFlags {
+    fn pilot_server_flags(&self, tool: &ToolInstance) -> ServerFlags {
         let pilot = self.tools.pilot.as_ref().filter(|p| p.instance == tool.id);
         ServerFlags {
             can_start: can_start(tool),
             running: pilot.is_some_and(|p| p.manages_server()),
-            busy: self.tools.mailhog_stopping.contains(&tool.id)
+            busy: self.tools.pilot_stopping.contains(&tool.id)
                 || pilot.is_some_and(|p| p.connecting()),
             connected: pilot.is_some_and(|p| p.reachable()),
         }
