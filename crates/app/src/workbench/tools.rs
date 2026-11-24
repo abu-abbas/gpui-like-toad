@@ -15,6 +15,7 @@ use devtools::redis_tool::{RedisSession, RedisTarget};
 use ora_core::credentials::{CredentialStore as _, ExposeSecret as _};
 use ora_core::store::{ToolInstance, ToolKind};
 
+use super::mailhog_pilot::ServerOwnership;
 use super::tools_mail::MailView;
 use super::tools_redis::RedisView;
 use super::*;
@@ -125,6 +126,12 @@ impl ToolsState {
         self.instances.iter().find(|t| t.id == id)
     }
 
+    fn is_open(&self, id: &str) -> bool {
+        self.pilot.as_ref().is_some_and(|p| p.instance == id)
+            || self.redis.contains_key(id)
+            || self.mail.contains_key(id)
+    }
+
     pub fn is_live(&self, id: &str) -> bool {
         self.redis.get(id).is_some_and(|v| v.session.is_some())
             || self.mail.get(id).is_some_and(|v| v.reachable)
@@ -204,13 +211,23 @@ impl Workbench {
         let Some(tool) = self.tools.get(id).cloned() else {
             return;
         };
-        if self.tools.mailhog_stopping.contains(id)
-            && self.tools.pilot.as_ref().is_none_or(|p| p.instance != id)
-        {
+        if self.tools.mailhog_stopping.contains(id) {
             return;
         }
         self.tools.active = Some(id.to_string());
         self.rail = RailPanel::Connections;
+        if let Some(install) = self.mailhog_extension(&tool) {
+            if self
+                .tools
+                .pilot
+                .as_ref()
+                .is_none_or(|p| p.instance != id || p.needs_reopen(&install.path))
+            {
+                self.open_mailhog_pilot(tool, install.path, cx);
+            }
+            cx.notify();
+            return;
+        }
         if self
             .tools
             .pilot
@@ -218,13 +235,6 @@ impl Workbench {
             .is_some_and(|pilot| pilot.instance != id)
         {
             self.close_mailhog_pilot(cx);
-        }
-        if let Some(install) = self.mailhog_extension(&tool) {
-            if self.tools.pilot.is_none() {
-                self.open_mailhog_pilot(tool, install.path, cx);
-            }
-            cx.notify();
-            return;
         }
         match tool.kind {
             ToolKind::Redis => {
@@ -547,6 +557,9 @@ impl Workbench {
         let Some(tool) = self.tools.get(id) else {
             return;
         };
+        if !self.can_change_tool_profile(tool) {
+            return;
+        }
         self.tools.confirm = Some(ToolConfirm {
             title: format!("Remove {} \"{}\"?", tool.kind.label(), tool.name),
             text: "The saved settings and password are removed from Kilat. Nothing on the server changes."
@@ -558,6 +571,13 @@ impl Workbench {
     }
 
     fn remove_tool(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self
+            .tools
+            .get(id)
+            .is_none_or(|tool| !self.can_change_tool_profile(tool))
+        {
+            return;
+        }
         let instances: Vec<ToolInstance> = self
             .tools
             .instances
@@ -571,9 +591,6 @@ impl Workbench {
         }
         self.tools.instances = instances;
         self.tools.session_passwords.remove(id);
-        if self.server_running(id) {
-            self.stop_tool_server(id, false, cx);
-        }
         self.close_tool(id, cx);
         let id = id.to_string();
         cx.background_executor()
@@ -598,6 +615,11 @@ impl Workbench {
     // -----------------------------------------------------------------
     // Sidebar section
     // -----------------------------------------------------------------
+
+    fn can_change_tool_profile(&self, tool: &ToolInstance) -> bool {
+        let flags = self.server_flags(tool);
+        !self.tools.is_open(&tool.id) && !flags.busy && !flags.running
+    }
 
     pub(super) fn render_tools_section(
         &self,
@@ -690,15 +712,21 @@ impl Workbench {
             .pilot
             .as_ref()
             .filter(|pilot| pilot.instance == tool.id);
-        let open = pilot.is_some()
-            || self.tools.redis.contains_key(&tool.id)
-            || self.tools.mail.contains_key(&tool.id);
+        let open = self.tools.is_open(&tool.id);
         let active = self.tools.active.as_deref() == Some(tool.id.as_str());
         let id = tool.id.clone();
         let kind = tool.kind;
         let view = cx.entity();
         let menu_id = tool.id.clone();
         let flags = self.server_flags(tool);
+        let profile_editable = !open && !flags.busy && !flags.running;
+        let server_ownership = pilot
+            .filter(|_| flags.can_start)
+            .and_then(|p| p.server_ownership());
+        let newer_extension = server_ownership == Some(ServerOwnership::Unreported)
+            && pilot
+                .zip(self.mailhog_extension(tool))
+                .is_some_and(|(p, release)| p.needs_reopen(&release.path));
         div()
             .id(("tool-row", ix))
             .flex()
@@ -714,38 +742,82 @@ impl Workbench {
                     menu_id.clone(),
                     menu_id.clone(),
                 );
-                let menu = menu.item(
-                    PopupMenuItem::new("Open")
-                        .icon(Icon::new(IconName::LogIn))
-                        .on_click(move |_, window, cx| {
-                            v1.update(cx, |this, cx| this.open_tool(&i1, window, cx))
-                        }),
-                );
                 let menu = if open {
                     menu.item(
                         PopupMenuItem::new("Disconnect")
                             .icon(Icon::new(IconName::LogOut))
+                            .disabled(flags.busy)
                             .on_click(move |_, _, cx| {
-                                v2.update(cx, |this, cx| this.close_tool(&i2, cx))
+                                v2.update(cx, |this, cx| {
+                                    if this
+                                        .tools
+                                        .get(&i2)
+                                        .is_some_and(|t| !this.server_flags(t).busy)
+                                    {
+                                        this.close_tool(&i2, cx);
+                                    }
+                                })
                             }),
                     )
                 } else {
-                    menu
+                    menu.item(
+                        PopupMenuItem::new("Open")
+                            .icon(Icon::new(IconName::LogIn))
+                            .disabled(flags.busy)
+                            .on_click(move |_, window, cx| {
+                                v1.update(cx, |this, cx| this.open_tool(&i1, window, cx))
+                            }),
+                    )
                 };
-                let menu = super::tools_server::server_menu(menu, &i4, flags, &v4);
+                let menu = match server_ownership {
+                    Some(ServerOwnership::Unreported) if newer_extension => {
+                        let entity = view.clone();
+                        let id = menu_id.clone();
+                        menu.separator().item(
+                            PopupMenuItem::new("Reopen with updated MailHog extension")
+                                .icon(Icon::new(IconName::RefreshCw))
+                                .on_click(move |_, window, cx| {
+                                    entity.update(cx, |this, cx| this.open_tool(&id, window, cx))
+                                }),
+                        )
+                    }
+                    Some(ServerOwnership::Unreported) => {
+                        let entity = view.clone();
+                        menu.separator().item(
+                            PopupMenuItem::new("Update MailHog extension for server controls…")
+                                .on_click(move |_, window, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.open_extension_updates(window, cx)
+                                    });
+                                }),
+                        )
+                    }
+                    Some(ServerOwnership::External) => menu.separator().item(
+                        PopupMenuItem::new("Server running outside this session").disabled(true),
+                    ),
+                    _ => super::tools_server::server_menu(menu, &i4, flags, &v4),
+                };
                 menu.separator()
                     .item(
                         PopupMenuItem::new("Edit…")
                             .icon(Icon::new(IconName::SquarePen))
+                            .disabled(!profile_editable)
                             .on_click(move |_, window, cx| {
                                 v3.update(cx, |this, cx| {
-                                    this.open_tool_form(kind, Some(i3.clone()), window, cx)
+                                    if this
+                                        .tools
+                                        .get(&i3)
+                                        .is_some_and(|t| this.can_change_tool_profile(t))
+                                    {
+                                        this.open_tool_form(kind, Some(i3.clone()), window, cx);
+                                    }
                                 })
                             }),
                     )
                     .item(
                         PopupMenuItem::new("Remove…")
                             .icon(Icon::new(IconName::Trash))
+                            .disabled(!profile_editable)
                             .on_click(move |_, _, cx| {
                                 v4.update(cx, |this, cx| this.request_remove_tool(&i4, cx))
                             }),

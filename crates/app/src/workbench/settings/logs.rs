@@ -431,7 +431,7 @@ impl Workbench {
             .overflow_y_scroll()
             .child(if logs.is_empty() {
                 caption_text(
-                    "No server logs yet. Turn on \"Start server from Kilat\" on a Redis or MailHog connection; its output is saved here.".into(),
+                    "No server logs yet. Start Redis or MailHog from Kilat to capture its output. An already running server keeps its own logs.".into(),
                     theme,
                 )
             } else if text.trim().is_empty() {

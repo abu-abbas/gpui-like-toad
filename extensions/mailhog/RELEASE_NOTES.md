@@ -1,6 +1,12 @@
 # MailHog extension release notes
 
-## 1.0.1 · Unreleased
+## 1.0.2 · Unreleased
+
+Minimum Kilat version `0.1.60`.
+
+- Recreate the local MailHog log on the next line of output if its file or folder was removed while the server was running.
+
+## [1.0.1](https://github.com/abu-abbas/kilat/releases/tag/ext-mailhog-1.0.1) · 2026-11-24
 
 Minimum Kilat version `0.1.60`.
 

@@ -23,17 +23,35 @@ type Process = Arc<Mutex<ExtProcess>>;
 
 pub(super) struct MailhogPilot {
     pub instance: String,
+    program: PathBuf,
     sidebar: Entity<ExtensionPanel>,
     explorer: Entity<ExtensionPanel>,
     main: Entity<ExtensionPanel>,
     process: Option<Process>,
-    managed_server: bool,
+    server: ServerOwnership,
     stopped: bool,
     revision: u32,
     busy: bool,
     failure: Option<String>,
     polling: Option<gpui_kit::Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServerOwnership {
+    Unreported,
+    External,
+    Managed,
+}
+
+impl From<Option<bool>> for ServerOwnership {
+    fn from(reported: Option<bool>) -> Self {
+        match reported {
+            None => Self::Unreported,
+            Some(false) => Self::External,
+            Some(true) => Self::Managed,
+        }
+    }
 }
 
 impl MailhogPilot {
@@ -50,7 +68,15 @@ impl MailhogPilot {
     }
 
     pub(super) fn manages_server(&self) -> bool {
-        self.reachable() && self.managed_server
+        self.server_ownership() == Some(ServerOwnership::Managed)
+    }
+
+    pub(super) fn server_ownership(&self) -> Option<ServerOwnership> {
+        self.reachable().then_some(self.server)
+    }
+
+    pub(super) fn needs_reopen(&self, program: &std::path::Path) -> bool {
+        self.program != program && !self.connecting()
     }
 
     pub(super) fn connecting(&self) -> bool {
@@ -61,7 +87,7 @@ impl MailhogPilot {
 struct Connected {
     process: Process,
     update: ViewUpdate,
-    managed_server: bool,
+    server: ServerOwnership,
 }
 
 fn call(
@@ -101,7 +127,7 @@ fn start(program: PathBuf, tool: ToolInstance, typed: Option<String>) -> Result<
         )
         .map_err(|err| err.to_string())?;
     // Older extensions omit this field. Only offer Stop when ownership is known.
-    let managed_server = reply.get("managed_server").and_then(store::Json::as_bool) == Some(true);
+    let server = ServerOwnership::from(reply.get("managed_server").and_then(store::Json::as_bool));
     let update = call(
         &mut process,
         "ui.open",
@@ -114,8 +140,15 @@ fn start(program: PathBuf, tool: ToolInstance, typed: Option<String>) -> Result<
     Ok(Connected {
         process: Arc::new(Mutex::new(process)),
         update,
-        managed_server,
+        server,
     })
+}
+
+fn disconnect(process: Process) {
+    let mut process = process.lock().unwrap_or_else(|err| err.into_inner());
+    // Both released builds acknowledge disconnect after dropping their child.
+    let _ = process.call("disconnect", store::Json::Null, TIMEOUT);
+    process.stop();
 }
 
 impl Workbench {
@@ -133,7 +166,8 @@ impl Workbench {
         program: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        self.close_mailhog_pilot(cx);
+        let previous = self.tools.pilot.take().and_then(|pilot| pilot.process);
+        let start_requested = super::tools_server::can_start(&tool);
         let read_only = tool.read_only();
         let prod = tool.environment == ConnectionEnvironment::Production;
         let sidebar = cx.new(|_| ExtensionPanel::new(Slot::Sidebar, read_only, prod));
@@ -151,11 +185,12 @@ impl Workbench {
         let typed = self.tools.session_passwords.get(&tool.id).cloned();
         self.tools.pilot = Some(MailhogPilot {
             instance: tool.id.clone(),
+            program: program.clone(),
             sidebar,
             explorer,
             main,
             process: None,
-            managed_server: false,
+            server: ServerOwnership::Unreported,
             stopped: false,
             revision: 0,
             busy: true,
@@ -165,7 +200,12 @@ impl Workbench {
         });
         spawn_tool_job(
             cx,
-            move || start(program, tool, typed),
+            move || {
+                if let Some(previous) = previous {
+                    disconnect(previous);
+                }
+                start(program, tool, typed)
+            },
             move |this, result, cx| {
                 let Some(pilot) = this
                     .tools
@@ -179,8 +219,14 @@ impl Workbench {
                 match result {
                     Ok(connected) => {
                         pilot.process = Some(connected.process);
-                        pilot.managed_server = connected.managed_server;
+                        pilot.server = connected.server;
                         this.apply_mailhog_update(connected.update, cx);
+                        if start_requested && connected.server == ServerOwnership::External {
+                            this.push_message(
+                                "MailHog was already running. Connected to the existing server."
+                                    .into(),
+                            );
+                        }
                     }
                     Err(error) => this.mailhog_failed(error, cx),
                 }
@@ -250,15 +296,26 @@ impl Workbench {
     pub(super) fn close_mailhog_pilot(&mut self, cx: &mut Context<Self>) {
         if let Some(pilot) = self.tools.pilot.take() {
             if let Some(process) = pilot.process {
-                cx.background_executor()
-                    .spawn(async move { drop(process) })
-                    .detach();
+                self.retire_mailhog_process(pilot.instance, process, cx);
             }
         }
     }
 
+    fn retire_mailhog_process(&mut self, id: String, process: Process, cx: &mut Context<Self>) {
+        self.tools.mailhog_stopping.insert(id.clone());
+        spawn_tool_job(
+            cx,
+            move || disconnect(process),
+            move |this, (), _| {
+                this.tools.mailhog_stopping.remove(&id);
+            },
+        );
+    }
+
     pub(in crate::workbench) fn stop_mailhog_before_uninstall(&mut self) -> bool {
-        if self.tools.pilot.as_ref().is_some_and(|pilot| pilot.busy) {
+        if !self.tools.mailhog_stopping.is_empty()
+            || self.tools.pilot.as_ref().is_some_and(|pilot| pilot.busy)
+        {
             return false;
         }
         if let Some(pilot) = self.tools.pilot.take() {
@@ -433,14 +490,14 @@ impl Workbench {
         let Some(pilot) = self.tools.pilot.as_mut() else {
             return;
         };
-        if let Some(process) = pilot.process.take() {
-            cx.background_executor()
-                .spawn(async move { drop(process) })
-                .detach();
-        }
+        let process = pilot.process.take();
+        let id = pilot.instance.clone();
         pilot.polling = None;
         crate::error_log::append(&format!("MailHog extension: {error}"));
         pilot.failure = Some(error);
+        if let Some(process) = process {
+            self.retire_mailhog_process(id, process, cx);
+        }
     }
 
     pub(super) fn render_mailhog_pilot(
@@ -471,6 +528,7 @@ impl Workbench {
                             Button::new("reconnect-mailhog")
                                 .primary()
                                 .label("Reconnect")
+                                .disabled(self.tools.mailhog_stopping.contains(&pilot.instance))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.close_mailhog_pilot(cx);
                                     this.open_tool(&id, window, cx);

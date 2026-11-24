@@ -240,6 +240,15 @@ impl Workbench {
         cx.notify();
     }
 
+    pub(in crate::workbench) fn open_extension_updates(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_extensions_page(window, cx);
+        self.check_online_extensions(cx);
+    }
+
     /// A connection needs an extension that is not installed: open Settings >
     /// Extensions and say so there.
     pub(in crate::workbench) fn show_extension_needed(
