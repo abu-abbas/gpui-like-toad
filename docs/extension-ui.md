@@ -1,11 +1,15 @@
-# Extension UI (design, not built yet)
+# Extension UI
 
-Status: decided in review (2026-11-23). Built and used by the MailHog and Redis extensions.
+Status: decided in review (2026-11-23), built, and used by the MailHog
+(1.0.0 and newer) and Redis (1.0.0 and newer) extensions. Types and limits
+are in `ora-core` (`extension_ui.rs`); the wire format is in
+`docs/extension-ui-protocol.md`.
 
 ## Why
-Today SQLite is an extension (a separate program, `docs/extension-protocol.md`)
-but Redis and MailHog are not: their screens (about 3,800 lines in
-`workbench/tools*.rs`) live in the app, so every new tool would grow the app.
+Database extensions (SQLite, PostgreSQL, MySQL, SQL Server) reuse Kilat's own
+explorer and grid, but a tool such as Redis or MailHog needs screens of its
+own. Before this design those screens (about 3,800 lines in
+`workbench/tools*.rs`) lived in the app, so every new tool grew the app.
 An extension can only be a real package if it can also bring its screens.
 
 ## Idea
@@ -141,7 +145,11 @@ PROD guards (an extension declares whether an action changes data with
 and asks for confirmation on PROD), errors.log, the updater and signed
 downloads.
 
-## Plan (separate PRs, each reviewable on its own)
+## Plan (as built)
+All five steps are done. The built-in MailHog viewer (`workbench/tools_mail.rs`)
+is still in the app next to the extension; the bundled Redis browser was
+removed in Kilat 0.1.63.
+
 1. Protocol and types: `extension_ui.rs` in `ora-core` (tree, events,
    validation and limits, JSON), docs, tests. No drawing.
 2. Renderer in the app: draws a tree into a column, sends events, a fake

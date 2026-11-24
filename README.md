@@ -1,6 +1,6 @@
 # Kilat
 
-A fast, lightweight desktop database client for **Oracle** and **SQLite**, written in Rust with [gpui-kit](https://gpui-kit.com). One binary, no Oracle Client or Instant Client needed: Oracle connections use the thin driver, which speaks Oracle Net directly.
+A fast, lightweight desktop database client for **Oracle**, written in Rust with [gpui-kit](https://gpui-kit.com). One binary, no Oracle Client or Instant Client needed: Oracle connections use the thin driver, which speaks Oracle Net directly. **SQLite, PostgreSQL, MySQL/MariaDB and SQL Server**, the **Redis** and **MailHog** developer tools, and **Dry-run** for Oracle are signed extensions you install from Settings > Extensions.
 
 The explorer works like Toad (pick a schema, then browse objects by type), the connection sidebar and dialog follow Navicat, and the data grid borrows from TablePlus.
 
@@ -12,7 +12,13 @@ The explorer works like Toad (pick a schema, then browse objects by type), the c
 
 - **Oracle**, as **Oracle · Basic** (host, port and service name as separate fields) or **Oracle · TNS** (a `tnsnames.ora` alias or a full connect descriptor), optionally as SYSDBA.
 - Works with old accounts that only have a **10G password verifier**, which the upstream thin driver refuses (see [vendor/oracledb/PATCHES.md](vendor/oracledb/PATCHES.md)).
-- **SQLite**: pick a database file with Browse. Changes are kept in a transaction until you Commit or Rollback.
+- **Extensions** (Settings > Extensions, one click Install, Update and Uninstall; each download is checked against its SHA-256 checksum and minisign signature):
+  - **SQLite**: pick a database file with Browse. Changes are kept in a transaction until you Commit or Rollback.
+  - **PostgreSQL** and **MySQL/MariaDB**: browse, edit rows, Data Transfer, and **Explain analyze** (the statement runs in a transaction that is always rolled back).
+  - **SQL Server**: browse every database of a server, each data tab bound to its own database; read-only grid for now.
+  - **Redis** and **MailHog** under Developer Tools, with an optional local server started by the extension.
+  - **Dry-run** for Oracle: runs one `UPDATE` or `DELETE` without committing and shows the rows it would change, with an undo script.
+- A connection whose extension is not installed shows as a grey row; clicking it opens Settings > Extensions.
 - **Several connections open at once**, each with its own worker thread. Tabs belong to their connection; the connection pill in a SQL tab switches it to another open connection.
 - **Folders** in the Connections sidebar: create, rename in place, colour, nest, drag connections between them.
 - **Environment flag** per connection: DEV (green), STAGING (yellow) or PROD (red), shown next to the name.
@@ -41,7 +47,7 @@ The explorer works like Toad (pick a schema, then browse objects by type), the c
 
 - Dense, virtualized grid with **Limit/Offset** paging (1,000 rows by default) and a **Columns** picker.
 - **Filter bar** with AND/OR, values sent as bind variables, a SQL preview with Copy SQL and Open in SQL editor, and **Quick Filter** from a right click on a cell.
-- **Edit in place**: double click a cell, paste a block of cells (TSV), add, **duplicate** or delete rows. Pending changes are coloured until you Apply, and nothing is committed until you press Commit.
+- **Edit in place**: double click a cell or press Enter, move between cells with Tab, Shift+Tab and Enter, paste a block of cells (TSV), add, **duplicate** or delete rows. Pending changes are coloured until you Apply, and nothing is committed until you press Commit.
 - Copy rows as values, field names, INSERT/UPDATE statements or TSV.
 - Bottom tabs **Data / Structure / Index / DDL**, a **Details** panel for the selected row, and an **Info** panel for the query log and errors.
 
@@ -143,7 +149,12 @@ crates/
                   edits, CSV/XLSX export, CSV import, profiles, update logic,
                   demo backend.
   ora-driver/     DbClient for Oracle on rust-oracledb (thin mode).
-  sqlite-driver/  DbClient for SQLite on rusqlite; shipped as the downloadable SQLite extension (crates/ext-sqlite), not linked into the app.
+  sqlite-driver/, postgres-driver/, mysql-driver/, mssql-driver/
+                  DbClients for the other engines; shipped only inside their
+                  downloadable extensions, not linked into the app.
+  devtools/       Redis and MailHog clients and the local server runner.
+  ext-*/          Extension programs (sqlite, postgres, mysql, mssql, redis,
+                  mailhog, dryrun), see docs/extension-protocol.md.
   app/            gpui-kit GUI: workbench, explorer, grid, editor, settings,
                   updater, one worker thread per connection.
 vendor/oracledb/  rust-oracledb pinned at b1adfff with the 10G verifier patch.
@@ -155,7 +166,7 @@ The Oracle driver is vendored because every `oracledb` release on crates.io is y
 
 ## Releases
 
-Releases are made by hand: either run **Actions > Release > Run workflow** (optional version, default `0.1.<run number>`), or push a tag such as `v0.2.0`. The workflow builds Linux, Windows and macOS binaries, smoke tests `--version`, writes `SHA256SUMS`, signs every file with minisign and publishes a GitHub Release. The last five releases are kept. See [docs/release-signing.md](docs/release-signing.md).
+Releases are made by hand: either run **Actions > Release > Run workflow** (optional version, default `0.1.<run number>`), or push a tag such as `v0.2.0`. The workflow builds Linux, Windows and macOS binaries, smoke tests `--version`, writes `SHA256SUMS`, signs every file with minisign and publishes a GitHub Release. The last five releases are kept. See [docs/release-signing.md](docs/release-signing.md). Extensions have their own workflow, **Release extension**, and their own versions; see [docs/extension-release.md](docs/extension-release.md).
 
 ## License
 
