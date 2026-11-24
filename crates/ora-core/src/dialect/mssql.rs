@@ -32,6 +32,7 @@ impl Dialect for MssqlDialect {
             transactional_ddl: true,
             row_edit: false,
             explain_text: false,
+            explain_analyze: false,
             truncate: false,
             special_tables: false,
             programs: false,
