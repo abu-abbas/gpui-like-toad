@@ -13,6 +13,7 @@ use super::*;
 
 struct Field {
     input: Entity<InputState>,
+    clear_on_submit: bool,
     _subscription: Subscription,
     change: Option<gpui_kit::Task<()>>,
 }
@@ -75,13 +76,15 @@ impl ExtensionPanel {
     }
 
     fn init_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        fn collect<'a>(tree: &'a Node, fields: &mut Vec<(&'a Text, &'a Text, Option<&'a Text>)>) {
+        type Entry<'a> = (&'a Text, &'a Text, Option<&'a Text>, bool);
+        fn collect<'a>(tree: &'a Node, fields: &mut Vec<Entry<'a>>) {
             match tree {
                 Node::Input {
                     id,
                     value,
                     placeholder,
-                } => fields.push((id, value, placeholder.as_ref())),
+                    clear_on_submit,
+                } => fields.push((id, value, placeholder.as_ref(), *clear_on_submit)),
                 Node::Column { children } | Node::Row { children } => {
                     for child in children {
                         collect(child, fields);
@@ -101,8 +104,8 @@ impl ExtensionPanel {
             collect(tree, &mut entries);
         }
         self.fields
-            .retain(|id, _| entries.iter().any(|(key, _, _)| *key == id));
-        for (id, value, placeholder) in entries {
+            .retain(|id, _| entries.iter().any(|(key, ..)| *key == id));
+        for (id, value, placeholder, clear_on_submit) in entries {
             if self.fields.contains_key(id) {
                 continue;
             }
@@ -112,7 +115,7 @@ impl ExtensionPanel {
                     .default_value(value.as_str().to_owned())
             });
             let key = id.clone();
-            let subscription = cx.subscribe_in(&input, window, move |this, input, event, _, cx| {
+            let subscription = cx.subscribe_in(&input, window, move |this, input, event, window, cx| {
                 let Ok(value) = Text::new(input.read(cx).value().to_string()) else {
                     return;
                 };
@@ -122,7 +125,11 @@ impl ExtensionPanel {
                 match event {
                     InputEvent::PressEnter { .. } => {
                         field.change = None;
+                        let clear = field.clear_on_submit;
                         this.send(key.clone(), EventKind::Submit { value }, cx);
+                        if clear {
+                            input.update(cx, |state, cx| state.set_value("", window, cx));
+                        }
                     }
                     InputEvent::Change => {
                         let key = key.clone();
@@ -150,6 +157,7 @@ impl ExtensionPanel {
                 id.clone(),
                 Field {
                     input,
+                    clear_on_submit,
                     _subscription: subscription,
                     change: None,
                 },
@@ -664,6 +672,7 @@ mod tests {
                     id: id.clone(),
                     value: Text::new("server value".into()).unwrap(),
                     placeholder: None,
+                    clear_on_submit: false,
                 };
                 panel.update(1, Some(Some(tree())), cx);
                 panel.init_fields(window, cx);
