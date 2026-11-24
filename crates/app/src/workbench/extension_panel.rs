@@ -168,6 +168,89 @@ impl ExtensionPanel {
         }
     }
 
+    /// The "Server stopped" explorer view of a Developer Tool (heading,
+    /// muted note, Start button): same compact header with the tool icon
+    /// as the connected view, so the column does not jump when the server
+    /// stops.
+    fn stopped_layout(
+        &self,
+        kind: store::ToolKind,
+        tree: &Node,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        if self.slot != Slot::Explorer {
+            return None;
+        }
+        let Node::Column { children } = tree else {
+            return None;
+        };
+        let [Node::Text {
+            text: title,
+            style: Some(TextStyle::Heading),
+            ..
+        }, Node::Text { text: note, .. }, Node::Button {
+            id,
+            label,
+            variant,
+            disabled,
+            writes,
+            confirm,
+        }] = children.as_slice()
+        else {
+            return None;
+        };
+        let header = div()
+            .h(px(32.))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(SPACE_2))
+            .px(px(SPACE_2))
+            .text_sm()
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(tools::tool_icon(kind, true, theme))
+            .child(title.as_str().to_owned());
+        let start = self.action(
+            Action {
+                id,
+                item: None,
+                variant: *variant,
+                disabled: *disabled,
+                writes: *writes,
+                confirm: confirm.as_ref(),
+                button: Button::new(id.as_str().to_owned())
+                    .small()
+                    .icon(IconName::Play)
+                    .label(label.as_str().to_owned()),
+            },
+            cx,
+        );
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .min_h(px(0.))
+                .min_w(px(0.))
+                .overflow_hidden()
+                .bg(theme.sidebar)
+                .px(px(SPACE_2))
+                .py(px(6.))
+                .gap(px(6.))
+                .child(header)
+                .child(
+                    div()
+                        .px(px(SPACE_2))
+                        .text_size(crate::theme::ui_size(theme, FONT_CAPTION))
+                        .text_color(theme.muted_foreground)
+                        .child(note.as_str().to_owned()),
+                )
+                .child(div().px(px(SPACE_2)).flex().child(start))
+                .into_any_element(),
+        )
+    }
+
     fn action(&self, action: Action<'_>, cx: &mut Context<Self>) -> Button {
         let Action {
             id,
@@ -691,6 +774,15 @@ impl Render for ExtensionPanel {
                         .map(|tree| self.render_node(tree, &theme, cx)),
                 )
                 .into_any_element();
+        }
+        if let Some(kind) = self.layout {
+            if let Some(view) = self
+                .tree
+                .as_ref()
+                .and_then(|tree| self.stopped_layout(kind, tree, &theme, cx))
+            {
+                return view;
+            }
         }
         if self.layout == Some(store::ToolKind::MailHog) {
             if let Some(view) = self

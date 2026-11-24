@@ -105,8 +105,22 @@ pub(super) fn command_of(tool: &ToolInstance) -> String {
     }
 }
 
+/// Same places the extensions use: per instance id, so a rename keeps
+/// the log and the data.
 pub(super) fn log_path_of(tool: &ToolInstance) -> PathBuf {
-    server::log_path(&store::config_dir(), &tool.name)
+    let config = store::config_dir();
+    match tool.kind {
+        ToolKind::Redis => server::redis_log_path(&config, &tool.id),
+        ToolKind::MailHog => server::mailhog_log_path(&config, &tool.id),
+    }
+}
+
+fn data_dir_of(tool: &ToolInstance) -> PathBuf {
+    let config = store::config_dir();
+    match tool.kind {
+        ToolKind::Redis => server::prepare_redis(&config, &tool.id, &tool.name).1,
+        ToolKind::MailHog => server::mailhog_data_dir(&config, &tool.id),
+    }
 }
 
 enum Started {
@@ -149,7 +163,7 @@ impl Workbench {
             return;
         }
         let log_path = log_path_of(&tool);
-        let work_dir = server::data_dir(&store::config_dir(), &tool.name);
+        let work_dir = data_dir_of(&tool);
         let slot = self
             .tools
             .servers
@@ -220,12 +234,7 @@ impl Workbench {
 
     /// Stop the server Kilat started; `then_start` restarts it.
     pub(super) fn stop_tool_server(&mut self, id: &str, then_start: bool, cx: &mut Context<Self>) {
-        if self
-            .tools
-            .pilot
-            .as_ref()
-            .is_some_and(|pilot| pilot.instance == id)
-        {
+        if self.tools.pilots.contains_key(id) {
             self.stop_pilot_server(id, then_start, cx);
             return;
         }
@@ -392,7 +401,7 @@ impl Workbench {
     }
 
     fn pilot_server_flags(&self, tool: &ToolInstance) -> ServerFlags {
-        let pilot = self.tools.pilot.as_ref().filter(|p| p.instance == tool.id);
+        let pilot = self.tools.pilots.get(&tool.id);
         ServerFlags {
             can_start: can_start(tool),
             running: pilot.is_some_and(|p| p.manages_server()),

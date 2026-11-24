@@ -90,15 +90,22 @@ fn start_local(target: &RedisTarget, p: &Value) -> Result<Option<ManagedServer>,
         return Ok(None);
     }
     let name = text(p, "name");
+    let id = p
+        .get("instance_id")
+        .and_then(Value::as_str)
+        .filter(|id| {
+            !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+        .ok_or("Invalid Redis instance ID.")?;
     let config = ora_core::store::config_dir();
+    let (log, data) = server::prepare_redis(&config, id, &name);
     let command = Some(text(p, "server_command"))
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| server::default_command(true, target.port));
-    let process = ServerProcess::start(
-        &command,
-        &server::log_path(&config, &name),
-        &server::data_dir(&config, &name),
-    )?;
+    let process = ServerProcess::start(&command, &log, &data)?;
     server::record_pid(&config, process.pid(), &command);
     let mut managed = ManagedServer { process, config };
     server::wait_port(&target.host, target.port, Duration::from_secs(15), || {

@@ -390,7 +390,7 @@ fn the_extension_starts_stops_and_restarts_its_own_server() {
     let mut ext = ExtProcess::start_command(command, "redis", "test", WAIT).unwrap();
     let payload = json!({
         "target": {"host": "127.0.0.1", "port": port, "username": "", "tls": false},
-        "database": 0, "start_server": true, "name": "Local Redis",
+        "database": 0, "start_server": true, "name": "Local Redis", "instance_id": "tool-1",
         "server_command": format!("redis-server --port {port} --save \"\" --appendonly no"),
     });
     let reply = ext.call("connect", params(payload), WAIT).unwrap();
@@ -402,8 +402,8 @@ fn the_extension_starts_stops_and_restarts_its_own_server() {
         .call("ui.open", params(json!({"slot": "explorer"})), WAIT)
         .unwrap();
     assert!(to_json(&update).contains("Connected"));
-    // The server's output goes to the Developer Tools log.
-    let log = config.join("Kilat/server-logs/developer-tools/Local Redis.log");
+    // The server's output goes to the Developer Tools log, keyed by id.
+    let log = config.join("Kilat/server-logs/developer-tools/redis/tool-1/redis.log");
     assert!(log.is_file(), "no log at {}", log.display());
 
     let stopped = ext.call("server.stop", Json::Null, WAIT).unwrap();

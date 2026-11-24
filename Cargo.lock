@@ -4289,7 +4289,7 @@ dependencies = [
 
 [[package]]
 name = "kilat-ext-redis"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "devtools",
  "ora-core",
