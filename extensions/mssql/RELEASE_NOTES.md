@@ -1,5 +1,11 @@
 # SQL Server extension release notes
 
+## [1.0.1](https://github.com/abu-abbas/kilat/releases/tag/ext-mssql-1.0.1) · 2026-11-25
+
+Minimum Kilat version `0.1.64`.
+
+- No change in what the extension does. The extension list now says it needs Kilat 0.1.64 or newer (1.0.0 was listed as 0.1.63), so Kilat 0.1.63 no longer offers to install it.
+
 ## [1.0.0](https://github.com/abu-abbas/kilat/releases/tag/ext-mssql-1.0.0) · 2026-11-25
 
 Minimum Kilat version `0.1.64`.
