@@ -1,4 +1,5 @@
-//! Workbench entry point for the optional declarative MailHog Inbox.
+//! Workbench side of a developer tool that runs as an extension: starts its
+//! program, forwards view events and applies the trees it sends back.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -15,14 +16,14 @@ use super::extension_panel::ExtensionPanel;
 use super::tools::{resolve_password, spawn_tool_job};
 use super::*;
 
-pub(super) const ID: &str = "mailhog";
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const TIMEOUT: Duration = Duration::from_secs(20);
 
 type Process = Arc<Mutex<ExtProcess>>;
 
-pub(super) struct MailhogPilot {
+pub(super) struct ToolPilot {
     pub instance: String,
+    pub kind: ToolKind,
     program: PathBuf,
     sidebar: Entity<ExtensionPanel>,
     explorer: Entity<ExtensionPanel>,
@@ -54,7 +55,7 @@ impl From<Option<bool>> for ServerOwnership {
     }
 }
 
-impl MailhogPilot {
+impl ToolPilot {
     fn panel(&self, slot: Slot) -> &Entity<ExtensionPanel> {
         match slot {
             Slot::Sidebar => &self.sidebar,
@@ -101,24 +102,89 @@ fn call(
     decode_update(&store::to_json(&reply), origin).map_err(|err| process.violation(&err))
 }
 
+/// What `connect` needs for this tool: the target, its limits and the
+/// local-server settings.
+fn connect_payload(
+    tool: &ToolInstance,
+    password: Option<String>,
+    start_server: bool,
+) -> serde_json::Value {
+    let mut payload = match tool.kind {
+        ToolKind::MailHog => json!({
+            "target": target_to_value(&MailHogTarget {
+                host: tool.host.clone(),
+                port: tool.port,
+                https: tool.tls,
+                username: tool.username.clone(),
+                password,
+            }),
+        }),
+        ToolKind::Redis => json!({
+            "target": {
+                "host": tool.host,
+                "port": tool.port,
+                "username": tool.username,
+                "password": password,
+                "tls": tool.tls,
+            },
+            "database": tool.database,
+            "allow_dangerous": tool.allow_dangerous,
+        }),
+    };
+    if let Some(fields) = payload.as_object_mut() {
+        fields.insert("read_only".into(), json!(tool.read_only()));
+        fields.insert("start_server".into(), json!(start_server));
+        fields.insert("server_command".into(), json!(tool.server_command));
+        fields.insert("instance_id".into(), json!(tool.id));
+        fields.insert("name".into(), json!(tool.name));
+    }
+    payload
+}
+
+/// The form's Test button for a tool that only exists as an extension:
+/// connect once through its program, then disconnect. Never starts a server.
+pub(super) fn test_connection(
+    tool: &ToolInstance,
+    password: Option<String>,
+) -> Result<String, String> {
+    let id = tool.kind.extension_id();
+    let install = store::remote_install(id).ok_or_else(|| {
+        format!(
+            "Install the {} extension in Settings > Extensions to test this connection.",
+            tool.kind.label()
+        )
+    })?;
+    let mut process =
+        ExtProcess::start(&install.path, id, env!("CARGO_PKG_VERSION"), START_TIMEOUT)
+            .map_err(|err| err.to_string())?;
+    let payload = connect_payload(tool, password, false);
+    let reply = process
+        .call(
+            "connect",
+            store::parse_json(&payload.to_string())?,
+            Duration::from_secs(30),
+        )
+        .map_err(|err| err.to_string());
+    let _ = process.call("disconnect", store::Json::Null, TIMEOUT);
+    process.stop();
+    let reply = reply?;
+    let version = reply
+        .get("version")
+        .and_then(store::Json::as_str)
+        .unwrap_or("?");
+    Ok(format!(
+        "Connected to {} {version} at {}.",
+        tool.kind.label(),
+        tool.address()
+    ))
+}
+
 fn start(program: PathBuf, tool: ToolInstance, typed: Option<String>) -> Result<Connected, String> {
     let password = resolve_password(&tool, typed);
-    let target = MailHogTarget {
-        host: tool.host.clone(),
-        port: tool.port,
-        https: tool.tls,
-        username: tool.username.clone(),
-        password,
-    };
-    let mut process = ExtProcess::start(&program, ID, env!("CARGO_PKG_VERSION"), START_TIMEOUT)
+    let id = tool.kind.extension_id();
+    let payload = connect_payload(&tool, password, tool.start_server);
+    let mut process = ExtProcess::start(&program, id, env!("CARGO_PKG_VERSION"), START_TIMEOUT)
         .map_err(|err| err.to_string())?;
-    let payload = json!({
-        "target": target_to_value(&target),
-        "read_only": tool.read_only(),
-        "start_server": tool.start_server,
-        "server_command": tool.server_command,
-        "instance_id": tool.id,
-    });
     let reply = process
         .call(
             "connect",
@@ -152,15 +218,16 @@ fn disconnect(process: Process) {
 }
 
 impl Workbench {
-    pub(super) fn mailhog_extension(&self, tool: &ToolInstance) -> Option<store::RemoteInstall> {
-        if tool.kind == ToolKind::MailHog && self.extensions.tool_enabled(tool.kind) {
-            store::remote_install(ID)
+    /// The downloaded program of an installed tool extension, if any.
+    pub(super) fn tool_extension(&self, tool: &ToolInstance) -> Option<store::RemoteInstall> {
+        if self.extensions.tool_enabled(tool.kind) {
+            store::remote_install(tool.kind.extension_id())
         } else {
             None
         }
     }
 
-    pub(super) fn open_mailhog_pilot(
+    pub(super) fn open_tool_pilot(
         &mut self,
         tool: ToolInstance,
         program: PathBuf,
@@ -168,23 +235,26 @@ impl Workbench {
     ) {
         let previous = self.tools.pilot.take().and_then(|pilot| pilot.process);
         let start_requested = super::tools_server::can_start(&tool);
+        let label = tool.kind.label();
         let read_only = tool.read_only();
         let prod = tool.environment == ConnectionEnvironment::Production;
         let sidebar = cx.new(|_| ExtensionPanel::new(Slot::Sidebar, read_only, prod));
-        let explorer = cx.new(|_| ExtensionPanel::new(Slot::Explorer, read_only, prod).mailhog());
-        let main = cx.new(|_| ExtensionPanel::new(Slot::Main, read_only, prod).mailhog());
+        let explorer =
+            cx.new(|_| ExtensionPanel::new(Slot::Explorer, read_only, prod).layout(tool.kind));
+        let main = cx.new(|_| ExtensionPanel::new(Slot::Main, read_only, prod).layout(tool.kind));
         let generation = explorer.entity_id();
         let subscriptions = [&sidebar, &explorer, &main]
             .into_iter()
             .map(|panel| {
                 cx.subscribe(panel, move |this, _, event: &Event, cx| {
-                    this.mailhog_event(generation, event, cx);
+                    this.pilot_event(generation, event, cx);
                 })
             })
             .collect();
         let typed = self.tools.session_passwords.get(&tool.id).cloned();
-        self.tools.pilot = Some(MailhogPilot {
+        self.tools.pilot = Some(ToolPilot {
             instance: tool.id.clone(),
+            kind: tool.kind,
             program: program.clone(),
             sidebar,
             explorer,
@@ -220,22 +290,21 @@ impl Workbench {
                     Ok(connected) => {
                         pilot.process = Some(connected.process);
                         pilot.server = connected.server;
-                        this.apply_mailhog_update(connected.update, cx);
+                        this.apply_pilot_update(connected.update, cx);
                         if start_requested && connected.server == ServerOwnership::External {
-                            this.push_message(
-                                "MailHog was already running. Connected to the existing server."
-                                    .into(),
-                            );
+                            this.push_message(format!(
+                                "{label} was already running. Connected to the existing server."
+                            ));
                         }
                     }
-                    Err(error) => this.mailhog_failed(error, cx),
+                    Err(error) => this.pilot_failed(error, cx),
                 }
             },
         );
         cx.notify();
     }
 
-    pub(super) fn stop_mailhog_server(&mut self, id: &str, restart: bool, cx: &mut Context<Self>) {
+    pub(super) fn stop_pilot_server(&mut self, id: &str, restart: bool, cx: &mut Context<Self>) {
         let Some(pilot) = self
             .tools
             .pilot
@@ -251,7 +320,7 @@ impl Workbench {
         pilot.polling = None;
         pilot.busy = true;
         let id = id.to_owned();
-        self.tools.mailhog_stopping.insert(id.clone());
+        self.tools.pilot_stopping.insert(id.clone());
         spawn_tool_job(
             cx,
             move || {
@@ -265,7 +334,7 @@ impl Workbench {
                 .map_err(|err| err.to_string())
             },
             move |this, result, cx| {
-                this.tools.mailhog_stopping.remove(&id);
+                this.tools.pilot_stopping.remove(&id);
                 if let Some(pilot) = this
                     .tools
                     .pilot
@@ -276,16 +345,16 @@ impl Workbench {
                     match result {
                         Ok(update) => {
                             pilot.stopped = true;
-                            this.apply_mailhog_update(update, cx);
+                            this.apply_pilot_update(update, cx);
                             if restart {
                                 if let Some(tool) = this.tools.get(&id).cloned() {
-                                    if let Some(install) = this.mailhog_extension(&tool) {
-                                        this.open_mailhog_pilot(tool, install.path, cx);
+                                    if let Some(install) = this.tool_extension(&tool) {
+                                        this.open_tool_pilot(tool, install.path, cx);
                                     }
                                 }
                             }
                         }
-                        Err(error) => this.mailhog_failed(error, cx),
+                        Err(error) => this.pilot_failed(error, cx),
                     }
                 }
             },
@@ -293,40 +362,50 @@ impl Workbench {
         cx.notify();
     }
 
-    pub(super) fn close_mailhog_pilot(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_tool_pilot(&mut self, cx: &mut Context<Self>) {
         if let Some(pilot) = self.tools.pilot.take() {
             if let Some(process) = pilot.process {
-                self.retire_mailhog_process(pilot.instance, process, cx);
+                self.retire_pilot_process(pilot.instance, process, cx);
             }
         }
     }
 
-    fn retire_mailhog_process(&mut self, id: String, process: Process, cx: &mut Context<Self>) {
-        self.tools.mailhog_stopping.insert(id.clone());
+    fn retire_pilot_process(&mut self, id: String, process: Process, cx: &mut Context<Self>) {
+        self.tools.pilot_stopping.insert(id.clone());
         spawn_tool_job(
             cx,
             move || disconnect(process),
             move |this, (), _| {
-                this.tools.mailhog_stopping.remove(&id);
+                this.tools.pilot_stopping.remove(&id);
             },
         );
     }
 
-    pub(in crate::workbench) fn stop_mailhog_before_uninstall(&mut self) -> bool {
-        if !self.tools.mailhog_stopping.is_empty()
-            || self.tools.pilot.as_ref().is_some_and(|pilot| pilot.busy)
+    /// Close the open view of the tool extension `id` before it is removed.
+    /// `false` while one of its requests is still running.
+    pub(in crate::workbench) fn stop_pilot_before_uninstall(&mut self, id: &str) -> bool {
+        let ours = |pilot: &ToolPilot| pilot.kind.extension_id() == id;
+        if self.tools.instances.iter().any(|tool| {
+            tool.kind.extension_id() == id && self.tools.pilot_stopping.contains(&tool.id)
+        }) || self
+            .tools
+            .pilot
+            .as_ref()
+            .is_some_and(|pilot| ours(pilot) && pilot.busy)
         {
             return false;
         }
-        if let Some(pilot) = self.tools.pilot.take() {
-            if self.tools.active.as_deref() == Some(pilot.instance.as_str()) {
-                self.tools.active = None;
+        if self.tools.pilot.as_ref().is_some_and(ours) {
+            if let Some(pilot) = self.tools.pilot.take() {
+                if self.tools.active.as_deref() == Some(pilot.instance.as_str()) {
+                    self.tools.active = None;
+                }
             }
         }
         true
     }
 
-    fn mailhog_event(
+    fn pilot_event(
         &mut self,
         generation: gpui_kit::EntityId,
         event: &Event,
@@ -345,7 +424,14 @@ impl Workbench {
                 event.event,
                 ora_core::extension_ui::EventKind::Change { .. }
             ) {
-                self.push_message("MailHog is still loading. Try again when it finishes.".into());
+                let label = self
+                    .tools
+                    .pilot
+                    .as_ref()
+                    .map_or("The tool", |p| p.kind.label());
+                self.push_message(format!(
+                    "{label} is still loading. Try again when it finishes."
+                ));
                 cx.notify();
             }
             return;
@@ -360,10 +446,10 @@ impl Workbench {
             }
             return;
         }
-        self.mailhog_request("ui.event", json!(event), Origin::UserEvent, cx);
+        self.pilot_request("ui.event", json!(event), Origin::UserEvent, cx);
     }
 
-    fn mailhog_request(
+    fn pilot_request(
         &mut self,
         method: &'static str,
         params: serde_json::Value,
@@ -393,28 +479,28 @@ impl Workbench {
                 };
                 pilot.busy = false;
                 match result {
-                    Ok(update) => this.apply_mailhog_update(update, cx),
+                    Ok(update) => this.apply_pilot_update(update, cx),
                     Err(error) if broken => {
                         let error = if stderr.is_empty() {
                             error.to_string()
                         } else {
                             format!("{error}\n{stderr}")
                         };
-                        this.mailhog_failed(error, cx);
+                        this.pilot_failed(error, cx);
                     }
                     Err(error) if origin == Origin::Tick => {
-                        this.mailhog_failed(error.to_string(), cx)
+                        this.pilot_failed(error.to_string(), cx)
                     }
                     Err(error) => {
                         this.push_message(error.to_string());
-                        this.schedule_mailhog_poll(Some(5000), cx);
+                        this.schedule_pilot_poll(Some(5000), cx);
                     }
                 }
             },
         );
     }
 
-    fn apply_mailhog_update(&mut self, update: ViewUpdate, cx: &mut Context<Self>) {
+    fn apply_pilot_update(&mut self, update: ViewUpdate, cx: &mut Context<Self>) {
         let Some(pilot) = self.tools.pilot.as_mut() else {
             return;
         };
@@ -445,11 +531,11 @@ impl Workbench {
                 }
             }
         }
-        self.schedule_mailhog_poll(update.poll_ms, cx);
+        self.schedule_pilot_poll(update.poll_ms, cx);
         cx.notify();
     }
 
-    fn schedule_mailhog_poll(&mut self, poll_ms: Option<u32>, cx: &mut Context<Self>) {
+    fn schedule_pilot_poll(&mut self, poll_ms: Option<u32>, cx: &mut Context<Self>) {
         let Some(pilot) = self.tools.pilot.as_mut() else {
             return;
         };
@@ -474,7 +560,7 @@ impl Workbench {
                     if !pilot.busy && this.tools.active.as_deref() == Some(pilot.instance.as_str())
                     {
                         let revision = pilot.revision;
-                        this.mailhog_request("ui.tick", json!(Tick { revision }), Origin::Tick, cx);
+                        this.pilot_request("ui.tick", json!(Tick { revision }), Origin::Tick, cx);
                         return false;
                     }
                     true
@@ -486,21 +572,21 @@ impl Workbench {
         });
     }
 
-    fn mailhog_failed(&mut self, error: String, cx: &mut Context<Self>) {
+    fn pilot_failed(&mut self, error: String, cx: &mut Context<Self>) {
         let Some(pilot) = self.tools.pilot.as_mut() else {
             return;
         };
         let process = pilot.process.take();
         let id = pilot.instance.clone();
         pilot.polling = None;
-        crate::error_log::append(&format!("MailHog extension: {error}"));
+        crate::error_log::append(&format!("{} extension: {error}", pilot.kind.label()));
         pilot.failure = Some(error);
         if let Some(process) = process {
-            self.retire_mailhog_process(id, process, cx);
+            self.retire_pilot_process(id, process, cx);
         }
     }
 
-    pub(super) fn render_mailhog_pilot(
+    pub(super) fn render_tool_pilot(
         &self,
         slot: Slot,
         theme: &gpui_kit::component::Theme,
@@ -525,12 +611,12 @@ impl Workbench {
                         .child("Connection lost")
                         .child(caption_text(error.clone(), theme))
                         .child(
-                            Button::new("reconnect-mailhog")
+                            Button::new("reconnect-tool")
                                 .primary()
                                 .label("Reconnect")
-                                .disabled(self.tools.mailhog_stopping.contains(&pilot.instance))
+                                .disabled(self.tools.pilot_stopping.contains(&pilot.instance))
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.close_mailhog_pilot(cx);
+                                    this.close_tool_pilot(cx);
                                     this.open_tool(&id, window, cx);
                                 })),
                         )
@@ -539,9 +625,12 @@ impl Workbench {
             }
             if !pilot.reachable()
                 && !pilot.stopped
-                && !self.tools.mailhog_stopping.contains(&pilot.instance)
+                && !self.tools.pilot_stopping.contains(&pilot.instance)
             {
-                return Some(loading_state("Connecting to MailHog…", theme).into_any_element());
+                return Some(
+                    loading_state(&format!("Connecting to {}…", pilot.kind.label()), theme)
+                        .into_any_element(),
+                );
             }
         }
         Some(pilot.panel(slot).clone().into_any_element())

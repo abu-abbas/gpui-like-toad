@@ -740,9 +740,9 @@ impl Workbench {
                             if self.conn.session.is_none() {
                                 "Connect first, then run a query to see results here."
                             } else if cfg!(target_os = "macos") {
-                                "Run a query to see results here. ⌘↩ or F5 runs the active tab."
+                                "Run a query to see results here. ⌘↩ or F9 runs the current statement, F5 runs the whole script."
                             } else {
-                                "Run a query to see results here. Ctrl+Enter or F5 runs the active tab."
+                                "Run a query to see results here. Ctrl+Enter or F9 runs the current statement, F5 runs the whole script."
                             }
                             .to_string(),
                             theme,

@@ -8,16 +8,14 @@
 //! applies results.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use devtools::mailhog::{MailHogClient, MailHogTarget};
-use devtools::redis_tool::{RedisSession, RedisTarget};
 use ora_core::credentials::{CredentialStore as _, ExposeSecret as _};
 use ora_core::store::{ToolInstance, ToolKind};
 
-use super::mailhog_pilot::ServerOwnership;
+use super::tool_pilot::ServerOwnership;
 use super::tools_mail::MailView;
-use super::tools_redis::RedisView;
 use super::*;
 
 /// Brand-like tint for a tool's icon: Redis red, MailHog amber.
@@ -57,7 +55,6 @@ pub(super) fn env_tag(
 #[derive(Clone)]
 pub(super) enum ConfirmAction {
     RemoveTool(String),
-    DeleteKey { tool: String, db: u32, key: Vec<u8> },
     DeleteAllMail(String),
 }
 
@@ -98,11 +95,10 @@ pub(super) struct ToolsState {
     pub picker: bool,
     pub form: Option<ToolForm>,
     pub confirm: Option<ToolConfirm>,
-    pub redis: HashMap<String, RedisView>,
     pub mail: HashMap<String, MailView>,
-    pub pilot: Option<super::mailhog_pilot::MailhogPilot>,
+    pub pilot: Option<super::tool_pilot::ToolPilot>,
     /// Stops still in flight, including after the user switches to another tool.
-    pub mailhog_stopping: HashSet<String>,
+    pub pilot_stopping: HashSet<String>,
     pub folded: bool,
     /// Passwords typed without "Save password": kept for this run only.
     pub session_passwords: HashMap<String, String>,
@@ -127,14 +123,11 @@ impl ToolsState {
     }
 
     fn is_open(&self, id: &str) -> bool {
-        self.pilot.as_ref().is_some_and(|p| p.instance == id)
-            || self.redis.contains_key(id)
-            || self.mail.contains_key(id)
+        self.pilot.as_ref().is_some_and(|p| p.instance == id) || self.mail.contains_key(id)
     }
 
     pub fn is_live(&self, id: &str) -> bool {
-        self.redis.get(id).is_some_and(|v| v.session.is_some())
-            || self.mail.get(id).is_some_and(|v| v.reachable)
+        self.mail.get(id).is_some_and(|v| v.reachable)
             || self
                 .pilot
                 .as_ref()
@@ -154,16 +147,6 @@ pub(super) struct ToolDraft {
     pub password: Option<String>,
 }
 
-fn redis_target(t: &ToolInstance, password: Option<String>) -> RedisTarget {
-    RedisTarget {
-        host: t.host.clone(),
-        port: t.port,
-        username: t.username.clone(),
-        password,
-        tls: t.tls,
-    }
-}
-
 fn mail_target(t: &ToolInstance, password: Option<String>) -> MailHogTarget {
     MailHogTarget {
         host: t.host.clone(),
@@ -172,14 +155,6 @@ fn mail_target(t: &ToolInstance, password: Option<String>) -> MailHogTarget {
         username: t.username.clone(),
         password,
     }
-}
-
-/// Connect to a Redis instance (blocking): the session and its server info.
-pub(super) fn connect_redis(
-    t: &ToolInstance,
-    password: Option<String>,
-) -> Result<(RedisSession, devtools::redis_tool::ServerInfo), String> {
-    RedisSession::connect(&redis_target(t, password), t.database)
 }
 
 pub(super) fn mail_client(t: &ToolInstance, password: Option<String>) -> Arc<MailHogClient> {
@@ -211,19 +186,25 @@ impl Workbench {
         let Some(tool) = self.tools.get(id).cloned() else {
             return;
         };
-        if self.tools.mailhog_stopping.contains(id) {
+        if self.tools.pilot_stopping.contains(id) {
+            return;
+        }
+        let extension = self.tool_extension(&tool);
+        // Redis only exists as an extension.
+        if tool.kind == ToolKind::Redis && extension.is_none() {
+            self.show_extension_needed(tool.kind.extension_id(), window, cx);
             return;
         }
         self.tools.active = Some(id.to_string());
         self.rail = RailPanel::Connections;
-        if let Some(install) = self.mailhog_extension(&tool) {
+        if let Some(install) = extension {
             if self
                 .tools
                 .pilot
                 .as_ref()
                 .is_none_or(|p| p.instance != id || p.needs_reopen(&install.path))
             {
-                self.open_mailhog_pilot(tool, install.path, cx);
+                self.open_tool_pilot(tool, install.path, cx);
             }
             cx.notify();
             return;
@@ -234,23 +215,12 @@ impl Workbench {
             .as_ref()
             .is_some_and(|pilot| pilot.instance != id)
         {
-            self.close_mailhog_pilot(cx);
+            self.close_tool_pilot(cx);
         }
-        match tool.kind {
-            ToolKind::Redis => {
-                if !self.tools.redis.contains_key(id) {
-                    let view = RedisView::new(&tool, window, cx);
-                    self.tools.redis.insert(id.to_string(), view);
-                    self.connect_or_start(&tool, cx);
-                }
-            }
-            ToolKind::MailHog => {
-                if !self.tools.mail.contains_key(id) {
-                    let view = MailView::new(&tool, window, cx);
-                    self.tools.mail.insert(id.to_string(), view);
-                    self.connect_or_start(&tool, cx);
-                }
-            }
+        if !self.tools.mail.contains_key(id) {
+            let view = MailView::new(&tool, window, cx);
+            self.tools.mail.insert(id.to_string(), view);
+            self.connect_or_start(&tool, cx);
         }
         cx.notify();
     }
@@ -262,16 +232,11 @@ impl Workbench {
         let id = tool.id.as_str();
         if self.server_busy(id) {
             // Starting or restarting: it connects when done.
-            if let Some(v) = self.tools.redis.get_mut(id) {
-                v.connecting = true;
-            }
             if let Some(v) = self.tools.mail.get_mut(id) {
                 v.loading = true;
             }
         } else if super::tools_server::can_start(tool) && !self.server_running(id) {
             self.start_tool_server(id, cx);
-        } else if tool.kind == ToolKind::Redis {
-            self.redis_connect(id, cx);
         } else {
             self.mail_connect(id, cx);
         }
@@ -279,7 +244,6 @@ impl Workbench {
 
     /// Close tool `id`'s session; the instance stays in the list.
     pub(super) fn close_tool(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.tools.redis.remove(id);
         self.tools.mail.remove(id);
         if self
             .tools
@@ -287,7 +251,7 @@ impl Workbench {
             .as_ref()
             .is_some_and(|pilot| pilot.instance == id)
         {
-            self.close_mailhog_pilot(cx);
+            self.close_tool_pilot(cx);
         }
         if self.tools.active.as_deref() == Some(id) {
             self.tools.active = None;
@@ -471,9 +435,7 @@ impl Workbench {
                     let tool = draft.tool;
                     let password = resolve_password(&tool, draft.password);
                     match tool.kind {
-                        ToolKind::Redis => connect_redis(&tool, password).map(|(_, info)| {
-                            format!("Connected to Redis {} at {}.", info.version, tool.address())
-                        }),
+                        ToolKind::Redis => super::tool_pilot::test_connection(&tool, password),
                         ToolKind::MailHog => mail_client(&tool, password)
                             .list(0)
                             .map(|page| format!("MailHog answered: {} message(s).", page.total)),
@@ -606,7 +568,6 @@ impl Workbench {
         };
         match confirm.action {
             ConfirmAction::RemoveTool(id) => self.remove_tool(&id, cx),
-            ConfirmAction::DeleteKey { tool, db, key } => self.redis_delete_key(&tool, db, key, cx),
             ConfirmAction::DeleteAllMail(tool) => self.mail_delete(&tool, None, cx),
         }
         cx.notify();
@@ -725,7 +686,7 @@ impl Workbench {
             .and_then(|p| p.server_ownership());
         let newer_extension = server_ownership == Some(ServerOwnership::Unreported)
             && pilot
-                .zip(self.mailhog_extension(tool))
+                .zip(self.tool_extension(tool))
                 .is_some_and(|(p, release)| p.needs_reopen(&release.path));
         div()
             .id(("tool-row", ix))
@@ -774,22 +735,27 @@ impl Workbench {
                         let entity = view.clone();
                         let id = menu_id.clone();
                         menu.separator().item(
-                            PopupMenuItem::new("Reopen with updated MailHog extension")
-                                .icon(Icon::new(IconName::RefreshCw))
-                                .on_click(move |_, window, cx| {
-                                    entity.update(cx, |this, cx| this.open_tool(&id, window, cx))
-                                }),
+                            PopupMenuItem::new(format!(
+                                "Reopen with updated {} extension",
+                                kind.label()
+                            ))
+                            .icon(Icon::new(IconName::RefreshCw))
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |this, cx| this.open_tool(&id, window, cx))
+                            }),
                         )
                     }
                     Some(ServerOwnership::Unreported) => {
                         let entity = view.clone();
                         menu.separator().item(
-                            PopupMenuItem::new("Update MailHog extension for server controls…")
-                                .on_click(move |_, window, cx| {
-                                    entity.update(cx, |this, cx| {
-                                        this.open_extension_updates(window, cx)
-                                    });
-                                }),
+                            PopupMenuItem::new(format!(
+                                "Update {} extension for server controls…",
+                                kind.label()
+                            ))
+                            .on_click(move |_, window, cx| {
+                                entity
+                                    .update(cx, |this, cx| this.open_extension_updates(window, cx));
+                            }),
                         )
                     }
                     Some(ServerOwnership::External) => menu.separator().item(
@@ -878,7 +844,7 @@ impl Workbench {
                                 |row| row.child(status_dot(theme.success)),
                             )
                             .children(pilot.and_then(|_| {
-                                self.render_mailhog_pilot(
+                                self.render_tool_pilot(
                                     ora_core::extension_ui::Slot::Sidebar,
                                     theme,
                                     cx,
@@ -899,15 +865,13 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
         if let Some(panel) =
-            self.render_mailhog_pilot(ora_core::extension_ui::Slot::Explorer, theme, cx)
+            self.render_tool_pilot(ora_core::extension_ui::Slot::Explorer, theme, cx)
         {
             return Some(panel);
         }
         let tool = self.tools.active_tool()?.clone();
         Some(match tool.kind {
-            ToolKind::Redis => self
-                .render_redis_explorer(&tool, theme, cx)
-                .into_any_element(),
+            ToolKind::Redis => div().size_full().into_any_element(),
             ToolKind::MailHog => self
                 .render_mail_explorer(&tool, theme, cx)
                 .into_any_element(),
@@ -919,14 +883,12 @@ impl Workbench {
         theme: &gpui_kit::component::Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
-        if let Some(panel) =
-            self.render_mailhog_pilot(ora_core::extension_ui::Slot::Main, theme, cx)
-        {
+        if let Some(panel) = self.render_tool_pilot(ora_core::extension_ui::Slot::Main, theme, cx) {
             return Some(panel);
         }
         let tool = self.tools.active_tool()?.clone();
         Some(match tool.kind {
-            ToolKind::Redis => self.render_redis_main(&tool, theme, cx).into_any_element(),
+            ToolKind::Redis => div().size_full().into_any_element(),
             ToolKind::MailHog => self.render_mail_main(&tool, theme, cx).into_any_element(),
         })
     }
@@ -1010,11 +972,11 @@ impl Workbench {
                     .px(px(SPACE_4))
                     .pb(px(SPACE_4))
                     .children(
-                        (!self.extensions.tool_enabled(ToolKind::Redis)
+                        (!self.extension_ready(ToolKind::Redis.extension_id())
                             && !self.extensions.tool_enabled(ToolKind::MailHog))
                         .then(|| caption_text("No developer tool is installed yet.".into(), theme)),
                     )
-                    .children(self.extensions.tool_enabled(ToolKind::Redis).then(|| {
+                    .children(self.extension_ready(ToolKind::Redis.extension_id()).then(|| {
                         choice(
                             ToolKind::Redis,
                             "Browse keys, read values, run commands.",
@@ -1509,13 +1471,4 @@ pub(super) fn spawn_tool_job<T: Send + 'static>(
         });
     })
     .detach();
-}
-
-/// A Redis session shared between the UI and background jobs; jobs take
-/// turns on it.
-pub(super) type SharedRedis = Arc<Mutex<RedisSession>>;
-
-pub(super) fn with_session<T>(session: &SharedRedis, f: impl FnOnce(&mut RedisSession) -> T) -> T {
-    let mut guard = session.lock().unwrap_or_else(|e| e.into_inner());
-    f(&mut guard)
 }
