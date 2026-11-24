@@ -80,6 +80,7 @@ mod quick_open;
 mod result_export;
 mod results;
 mod results_grid;
+mod row_count;
 mod settings;
 mod sidebar;
 mod sqlite_form;
