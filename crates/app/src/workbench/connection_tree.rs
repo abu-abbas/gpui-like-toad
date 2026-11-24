@@ -787,7 +787,9 @@ impl Workbench {
                             .when(open_tx, |row| {
                                 row.child(transaction::tx_dot("demo-tx", theme))
                             })
-                            .when(active, |row| row.child(status_dot(theme.success))),
+                            .when(active && !open_tx, |row| {
+                                row.child(status_dot(theme.success))
+                            }),
                     ),
             );
         }
@@ -983,7 +985,7 @@ impl Workbench {
                             )
                         })
                         .when(
-                            connected && environment == ConnectionEnvironment::None,
+                            connected && environment == ConnectionEnvironment::None && !open_tx,
                             |row| row.child(status_dot(theme.success)),
                         ),
                     ),
