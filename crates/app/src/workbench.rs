@@ -145,6 +145,8 @@ enum ResultsTab {
     Results,
     Plan,
     Messages,
+    /// The Dry-run extension's view, for the tab it was started from.
+    DryRun,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -900,9 +902,6 @@ impl Render for Workbench {
             })
             .when(self.transfer.is_some(), |this| {
                 this.child(self.render_transfer(&theme, cx))
-            })
-            .when(self.dryrun.is_some(), |this| {
-                this.child(self.render_dryrun(&theme, cx))
             })
             .when(self.disconnect_prompt.is_some(), |this| {
                 this.child(self.render_disconnect_prompt(&theme, cx))

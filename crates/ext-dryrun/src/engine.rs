@@ -23,6 +23,10 @@ const REREAD_CHUNK: usize = 100;
 /// undo script).
 const CELL_BYTES: usize = 4000;
 const ROWID_COLUMN: &str = "KILAT_RID";
+/// Seconds the capture waits for row locks. The dry run has its own session,
+/// so rows another session changed and has not committed (often the user's
+/// own editor) would make the statement wait forever.
+const LOCK_WAIT_SECS: u32 = 10;
 /// The view carries the script as one string, which the UI protocol caps at
 /// 64 KiB. A longer script is not written (a cut one would look complete).
 pub const UNDO_MAX_BYTES: usize = 60_000;
@@ -109,7 +113,7 @@ fn count_triggers(client: &mut dyn DbClient, parsed: &Parsed) -> Option<u64> {
         ),
         None => (
             "SELECT COUNT(*) FROM ALL_TRIGGERS WHERE TABLE_OWNER = \
-             SYS_CONTEXT('USERDENV', 'CURRENT_SCHEMA') AND TABLE_NAME = :1 \
+             SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AND TABLE_NAME = :1 \
              AND STATUS = 'ENABLED'",
             vec![parsed.table.name()],
         ),
@@ -153,6 +157,20 @@ fn capture(client: &mut dyn DbClient, sql: &str, expect_rows: usize) -> Result<C
     })
 }
 
+/// A clear message for a row lock timeout; any other error as it is.
+fn locked_message(error: &str) -> String {
+    if error.contains("ORA-30006") || error.contains("ORA-00054") {
+        format!(
+            "The rows are locked by another session that has not committed yet, often this \
+             same connection in the SQL editor or a data tab. Commit or Roll back there, then \
+             run Dry-run again. ({})",
+            error.trim()
+        )
+    } else {
+        error.to_string()
+    }
+}
+
 /// Run `sql` as a dry run. The statement stays uncommitted in `client`'s
 /// session; the caller rolls it back.
 pub fn run(client: &mut dyn DbClient, statement: &str) -> Result<Report, String> {
@@ -160,12 +178,15 @@ pub fn run(client: &mut dyn DbClient, statement: &str) -> Result<Report, String>
     let parsed = sql::parse(&sql)?;
     let triggers = count_triggers(client, &parsed);
 
-    // Old values.
-    let old = capture(
-        client,
-        &select_rows(&parsed, parsed.where_clause.as_deref()),
-        CAPTURE_ROWS,
-    )?;
+    // Old values. `FOR UPDATE WAIT` locks the rows the statement will touch
+    // (it would lock them anyway) and gives up when another session holds
+    // them, instead of waiting without end in the statement itself.
+    let capture_sql = format!(
+        "{}\nFOR UPDATE WAIT {LOCK_WAIT_SECS}",
+        select_rows(&parsed, parsed.where_clause.as_deref())
+    );
+    let old =
+        capture(client, &capture_sql, CAPTURE_ROWS).map_err(|error| locked_message(&error))?;
     let truncated = old.truncated;
     let mut old_rows = old.rows;
     if truncated {

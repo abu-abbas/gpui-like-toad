@@ -190,7 +190,7 @@ fn update_reports_old_and_new_and_an_undo_script() {
     // The capture used the statement's own alias and WHERE.
     assert_eq!(
         db.queries[0],
-        "SELECT e.ROWID AS KILAT_RID, e.* FROM emp e WHERE e.dept = 10"
+        "SELECT e.ROWID AS KILAT_RID, e.* FROM emp e WHERE e.dept = 10\nFOR UPDATE WAIT 10"
     );
     assert!(db.queries[1].contains("e.ROWID IN (CHARTOROWID('AAA1'), CHARTOROWID('AAA2'))"));
 }
@@ -314,4 +314,15 @@ fn a_script_over_the_view_limit_is_not_written() {
     assert!(report.undo.is_none());
     assert!(report.notes.iter().any(|n| n.contains("not written")));
     assert!(!report.partial);
+}
+
+#[test]
+fn a_row_lock_timeout_says_what_to_do() {
+    let message = locked_message("ORA-30006: resource busy; acquire with WAIT timeout expired");
+    assert!(message.contains("Commit or Roll back"));
+    assert!(message.contains("ORA-30006"));
+    assert_eq!(
+        locked_message("ORA-00942: table or view does not exist"),
+        "ORA-00942: table or view does not exist"
+    );
 }

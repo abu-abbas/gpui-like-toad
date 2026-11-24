@@ -391,6 +391,13 @@ impl Workbench {
         } else {
             self.active_tab = old_active.min(self.tabs.len() - 1);
         }
+        // A dry run belongs to its tab: closing the tab rolls it back.
+        if self
+            .dryrun_tab()
+            .is_some_and(|id| !self.tabs.iter().any(|t| t.id == id))
+        {
+            self.close_dryrun(cx);
+        }
         self.follow_tab_conn(cx);
         cx.notify();
     }

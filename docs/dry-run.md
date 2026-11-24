@@ -19,12 +19,13 @@ So it becomes a third kind, `action`:
   statement in **its own Oracle session**. The app starts it with the active
   connection's profile and password (the same `connect` call a database
   extension gets) and sends the statement.
-- The app side is small: a **Dry-run** button in the SQL editor toolbar (shown
-  only when the extension is installed and the active connection is Oracle)
-  and a dialog that draws the extension's declarative view (the protocol of
+- The app side is small: a **Dry-run** button (flask icon) right after Run
+  in the SQL editor toolbar (shown only when the extension is installed and
+  the active connection is Oracle) and a **Dry-run** tab next to Messages in
+  the editor's result pane that draws the extension's declarative view (the protocol of
   `extension-ui-protocol.md`, slot `main`). The diff, the warnings and the
   undo script are all view trees; the app has no Dry-run drawing code.
-- "Run for real" in the dialog closes it and runs the statement through the
+- "Run for real" in the Dry-run tab closes it and runs the statement through the
   editor's normal path, so Read Only, PROD confirmation and history keep
   working. The extension never commits.
 
@@ -37,7 +38,11 @@ Why a separate session instead of the editor's session:
 - Nothing in the editor's connection (pending edits, open transaction) is
   touched.
 - The cost: the dry-run does **not** see changes the user made in the editor
-  session and has not committed yet. The dialog says so.
+  session and has not committed yet. When the editor's connection has
+  uncommitted changes, the Dry-run tab says so before it starts (with
+  "Dry-run anyway"), and the capture uses `FOR UPDATE WAIT 10`: rows locked
+  by another session stop the dry run after 10 seconds with a message to
+  Commit or Roll back first, instead of waiting without end.
 
 ## Phase 1 scope
 Assumptions (the mockup was approved as a direction only):
@@ -48,7 +53,7 @@ Assumptions (the mockup was approved as a direction only):
 - The target table is found by its name in the statement (`[schema.]table
   [alias]`), and the changed rows by `ROWID`.
 - At most 1,000 rows are captured. The affected count is always exact (the
-  database reports it). Above 1,000, the dialog shows the first 200 old/new
+  database reports it). Above 1,000, the Dry-run tab shows the first 200 old/new
   rows and says that no undo script is written.
 - At most 200 changed rows are drawn.
 - The connection's password must be saved in the keychain: Kilat never keeps
@@ -64,9 +69,10 @@ Assumptions (the mockup was approved as a direction only):
    database is touched.
 2. Count enabled triggers on the table. A trigger can do work a rollback
    does not undo (autonomous transactions, mail, database links), so the
-   dialog warns.
-3. Capture the old rows:
-   `SELECT ROWID, t.* FROM table t WHERE <where> FETCH FIRST 1001 ROWS ONLY`.
+   Dry-run tab warns.
+3. Capture (and lock) the old rows:
+   `SELECT ROWID, t.* FROM table t WHERE <where> FOR UPDATE WAIT 10`, reading
+   at most 1,001 of them.
 4. Run the statement in the session (no commit). The reported affected
    count is kept.
 5. Read the rows again by `ROWID` (`UPDATE` only) and compare cell by cell.
@@ -80,7 +86,7 @@ Assumptions (the mockup was approved as a direction only):
    `disconnect`, process exit, or 5 minutes pass. A watchdog thread rolls
    back at the deadline.
 
-Known limits, shown in the dialog:
+Known limits, shown in the Dry-run tab:
 
 - Rows another session changes between step 3 and step 4 can make "old" differ
   from what the statement saw (no serializable transaction is used).
@@ -108,6 +114,6 @@ treats specially (the extension declares it with `writes: true`), so the
 app's Read Only and PROD guards apply.
 
 ## Release
-Needs an app release (new kind `action`, toolbar button, dialog) **and** an
+Needs an app release (new kind `action`, toolbar button, Dry-run tab) **and** an
 extension release (`dryrun` 1.0.0, `min_app` the app version that ships the
 button). Order: app first, then the extension.

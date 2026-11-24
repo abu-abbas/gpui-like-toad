@@ -1,5 +1,12 @@
 # Dry-run extension release notes
 
+## [1.0.1](https://github.com/abu-abbas/kilat/releases/tag/ext-dryrun-1.0.1) · 2026-11-24
+
+Minimum Kilat version `0.1.63`.
+
+- Dry-run no longer waits forever when the rows are locked by another session that has not committed yet (often the same connection in the SQL editor or a data tab). After 10 seconds it stops and says to Commit or Roll back there first.
+- The trigger warning works again for tables without a schema prefix (the trigger count query had a typo and was skipped).
+
 ## [1.0.0](https://github.com/abu-abbas/kilat/releases/tag/ext-dryrun-1.0.0) · 2026-11-24
 
 Minimum Kilat version `0.1.63`.

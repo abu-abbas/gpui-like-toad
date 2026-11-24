@@ -27,6 +27,9 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 type Process = Arc<Mutex<ExtProcess>>;
 
 enum Stage {
+    /// The editor's session has changes that are not committed. Dry-run has
+    /// its own session, so rows they lock would make it wait; ask first.
+    Uncommitted,
     Working,
     Ready,
     Failed(String),
@@ -35,13 +38,24 @@ enum Stage {
 pub(super) struct DryRun {
     sql: String,
     conn_id: u64,
+    /// The editor tab whose result pane shows it.
+    tab_id: u64,
     panel: Entity<ExtensionPanel>,
     process: Option<Process>,
     revision: u32,
     busy: bool,
     stage: Stage,
     polling: Option<gpui_kit::Task<()>>,
+    pending: Option<Pending>,
     _subscription: Subscription,
+}
+
+/// What the background start needs, kept while the dialog asks about
+/// uncommitted changes.
+struct Pending {
+    program: std::path::PathBuf,
+    profile: ConnectionProfile,
+    profile_id: String,
 }
 
 struct Started {
@@ -145,8 +159,24 @@ impl Workbench {
                 .is_some_and(|last| !last.demo && last.profile.kind == DbKind::Oracle)
     }
 
+    /// The editor tab that has the Dry-run result tab, while one is open.
+    pub(super) fn dryrun_tab(&self) -> Option<u64> {
+        self.dryrun.as_ref().map(|dry| dry.tab_id)
+    }
+
     pub(super) fn open_dryrun(&mut self, cx: &mut Context<Self>) {
-        if self.dryrun.is_some() || self.conn.busy || !self.dryrun_available() {
+        if let Some(tab_id) = self.dryrun_tab() {
+            if tab_id == self.active_tab().id {
+                self.active_tab_mut().results_tab = ResultsTab::DryRun;
+            } else {
+                self.push_message(
+                    "A dry run is still open in another tab. Close it there first.".to_string(),
+                );
+            }
+            cx.notify();
+            return;
+        }
+        if self.conn.busy || !self.dryrun_available() {
             return;
         }
         let sql = self.current_statement(cx);
@@ -186,17 +216,54 @@ impl Workbench {
         let subscription = cx.subscribe(&panel, move |this, _, event: &Event, cx| {
             this.dryrun_event(generation, event, cx);
         });
+        let uncommitted = self.conn.uncommitted;
+        let tab_id = self.active_tab().id;
+        self.active_tab_mut().results_tab = ResultsTab::DryRun;
         self.dryrun = Some(DryRun {
-            sql: sql.clone(),
+            sql,
             conn_id,
+            tab_id,
             panel,
             process: None,
             revision: 0,
-            busy: true,
-            stage: Stage::Working,
+            busy: !uncommitted,
+            stage: if uncommitted {
+                Stage::Uncommitted
+            } else {
+                Stage::Working
+            },
             polling: None,
+            pending: Some(Pending {
+                program,
+                profile,
+                profile_id,
+            }),
             _subscription: subscription,
         });
+        if !uncommitted {
+            self.start_dryrun(cx);
+        }
+        cx.notify();
+    }
+
+    /// Start the extension and run the statement (after the uncommitted
+    /// question, when there was one).
+    pub(super) fn start_dryrun(&mut self, cx: &mut Context<Self>) {
+        let Some(dry) = self.dryrun.as_mut() else {
+            return;
+        };
+        let Some(Pending {
+            program,
+            profile,
+            profile_id,
+        }) = dry.pending.take()
+        else {
+            return;
+        };
+        dry.busy = true;
+        dry.stage = Stage::Working;
+        let sql = dry.sql.clone();
+        let generation = dry.panel.entity_id();
         spawn_tool_job(
             cx,
             move || start(program, profile, profile_id, sql),
@@ -228,10 +295,27 @@ impl Workbench {
 
     /// Close the dialog and roll the dry run back.
     pub(super) fn close_dryrun(&mut self, cx: &mut Context<Self>) {
-        if let Some(process) = self.dryrun.take().and_then(|dry| dry.process) {
+        let Some(dry) = self.dryrun.take() else {
+            return;
+        };
+        self.leave_dryrun_tab(dry.tab_id);
+        if let Some(process) = dry.process {
             std::thread::spawn(move || finish(process));
         }
         cx.notify();
+    }
+
+    /// Show Messages again in the tab that showed the dry run.
+    fn leave_dryrun_tab(&mut self, tab_id: u64) {
+        for tab in self
+            .tabs
+            .iter_mut()
+            .chain(std::iter::once(&mut self.scratch_tab))
+        {
+            if tab.id == tab_id && tab.results_tab == ResultsTab::DryRun {
+                tab.results_tab = ResultsTab::Messages;
+            }
+        }
     }
 
     fn dryrun_event(
@@ -263,6 +347,7 @@ impl Workbench {
         let Some(dry) = self.dryrun.take() else {
             return;
         };
+        self.leave_dryrun_tab(dry.tab_id);
         let (sql, conn_id, process) = (dry.sql, dry.conn_id, dry.process);
         cx.notify();
         spawn_tool_job(
@@ -420,9 +505,51 @@ impl Workbench {
             return div().into_any_element();
         };
         let body = match &dry.stage {
-            Stage::Working => {
-                loading_state("Running the statement without committing…", theme).into_any_element()
-            }
+            Stage::Uncommitted => div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(SPACE_3))
+                .p(px(SPACE_4))
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.foreground)
+                        .child("This connection has changes that are not committed yet"),
+                )
+                .child(caption_text(
+                    "Dry-run runs in its own session. If your uncommitted changes touch the \
+                     same rows, it waits for them and stops after 10 seconds. Commit or Roll \
+                     back in the editor toolbar first, or try anyway when the changes are on \
+                     other rows."
+                        .to_string(),
+                    theme,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(SPACE_2))
+                        .child(
+                            Button::new("dryrun-cancel")
+                                .small()
+                                .label("Close")
+                                .on_click(cx.listener(|this, _, _, cx| this.close_dryrun(cx))),
+                        )
+                        .child(
+                            Button::new("dryrun-anyway")
+                                .small()
+                                .primary()
+                                .label("Dry-run anyway")
+                                .on_click(cx.listener(|this, _, _, cx| this.start_dryrun(cx))),
+                        ),
+                )
+                .into_any_element(),
+            Stage::Working => loading_state("Running the statement without committing…", theme)
+                .size_full()
+                .into_any_element(),
             Stage::Failed(error) => div()
                 .flex()
                 .flex_col()
@@ -433,65 +560,36 @@ impl Workbench {
                 .into_any_element(),
             Stage::Ready => dry.panel.clone().into_any_element(),
         };
-        let card = div()
-            .id("dryrun-dialog")
+        let header = div()
             .flex()
-            .flex_col()
-            .w(px(860.))
-            .max_w_full()
-            .h(px(560.))
-            .max_h_full()
-            .rounded(px(RADIUS_MD))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .shadow_lg()
-            .overflow_hidden()
-            .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
-                    this.close_dryrun(cx);
-                }
-            }))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .flex_none()
-                    .p(px(SPACE_3))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.foreground)
-                            .child("Dry-run"),
-                    )
-                    .child(
-                        Button::new("dryrun-close")
-                            .small()
-                            .ghost()
-                            .label("Close")
-                            .tooltip("Close and roll back")
-                            .on_click(cx.listener(|this, _, _, cx| this.close_dryrun(cx))),
-                    ),
-            )
-            .child(div().flex_1().min_h(px(0.)).child(body));
-        div()
-            .id("dryrun-scrim")
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .flex()
-            .flex_col()
+            .flex_row()
             .items_center()
-            .pt(px(60.))
-            .pb(px(24.))
-            .bg(crate::theme::modal_scrim(theme))
-            .occlude()
-            .child(card)
+            .justify_between()
+            .flex_none()
+            .px(px(SPACE_3))
+            .py(px(SPACE_1))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(caption_text(
+                "Runs in its own session and never commits. Close rolls it back.".to_string(),
+                theme,
+            ))
+            .child(
+                Button::new("dryrun-close")
+                    .small()
+                    .ghost()
+                    .icon(IconName::X)
+                    .label("Close and roll back")
+                    .on_click(cx.listener(|this, _, _, cx| this.close_dryrun(cx))),
+            );
+        div()
+            .id("dryrun-pane")
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(div().flex_1().min_h(px(0.)).child(body))
             .into_any_element()
     }
 }

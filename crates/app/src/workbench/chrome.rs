@@ -476,17 +476,6 @@ impl Workbench {
                             cx.listener(|this, _, window, cx| this.format_editor(window, cx)),
                         ),
                 )
-                .when(self.dryrun_available(), |bar| {
-                    bar.child(
-                        Button::new("dryrun")
-                            .small()
-                            .ghost()
-                            .icon(IconName::Undo2)
-                            .loading(busy)
-                            .tooltip("Dry-run: run the statement without committing")
-                            .on_click(cx.listener(|this, _, _, cx| this.open_dryrun(cx))),
-                    )
-                })
                 .child(
                     Button::new("run")
                         .small()
@@ -499,7 +488,19 @@ impl Workbench {
                             Some("Workbench"),
                         )
                         .on_click(cx.listener(|this, _, _, cx| this.run_current(cx))),
-                );
+                )
+                .when(self.dryrun_available(), |bar| {
+                    bar.child(
+                        Button::new("dryrun")
+                            .small()
+                            .ghost()
+                            .icon(gpui_kit::assets::IconName::FlaskConical)
+                            .label("Dry-run")
+                            .disabled(busy)
+                            .tooltip("Dry-run: run the statement without committing")
+                            .on_click(cx.listener(|this, _, _, cx| this.open_dryrun(cx))),
+                    )
+                });
         }
 
         bar = bar.child(

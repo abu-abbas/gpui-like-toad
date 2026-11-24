@@ -582,6 +582,9 @@ impl Workbench {
                 format!("Messages ({})", self.messages.len()),
             ),
         ];
+        if self.dryrun_tab() == Some(tab.id) {
+            sections.push((ResultsTab::DryRun, "Dry-run".to_string()));
+        }
         if !tab.statement_results.is_empty() {
             sections.insert(1, (ResultsTab::Info, "Info".into()));
             if tab.statement_results.len() > 1 {
@@ -825,7 +828,10 @@ impl Workbench {
                     }
                 }))
                 .into_any_element(),
-            ResultsTab::Messages => {
+            ResultsTab::DryRun if self.dryrun_tab() == Some(tab.id) => {
+                self.render_dryrun(theme, cx).into_any_element()
+            }
+            ResultsTab::Messages | ResultsTab::DryRun => {
                 if self.messages.is_empty() {
                     div()
                         .flex_1()
