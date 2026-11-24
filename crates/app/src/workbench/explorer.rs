@@ -1091,9 +1091,18 @@ impl Workbench {
             // Only tables have a stable ROWID to find a row by.
             if editable {
                 let paste_view = edit_view.clone();
+                let inline_view = edit_view.clone();
+                let key_view = edit_view.clone();
                 delegate = delegate.with_cell_edit(Rc::new(move |request, window, cx| {
                     let _ =
                         edit_view.update(cx, |this, cx| this.open_cell_editor(request, window, cx));
+                }));
+                delegate = delegate.with_inline_edit(Rc::new(move |request, window, cx| {
+                    let _ = inline_view
+                        .update(cx, |this, cx| this.open_inline_editor(request, window, cx));
+                }));
+                delegate = delegate.with_cell_key(Rc::new(move |key, window, cx| {
+                    let _ = key_view.update(cx, |this, cx| this.handle_cell_key(key, window, cx));
                 }));
                 let delete_view = paste_view.clone();
                 delegate = delegate.with_cell_paste(Rc::new(move |_, cx| {

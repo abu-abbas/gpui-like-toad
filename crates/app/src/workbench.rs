@@ -93,7 +93,7 @@ mod transfer;
 mod transfer_ui;
 mod ui_helpers;
 mod updates;
-use cell_edit::CellEditor;
+use cell_edit::{CellEditor, InlineEdit};
 use data_tab::{DataTab, DataView};
 use object_ops::ObjectDialog;
 use profiles::{ConnectionForm, FORM_INCOMPLETE};
@@ -497,6 +497,10 @@ pub struct Workbench {
     quick_open: Option<QuickOpen>,
     /// The cell edit dialog, while it is showing.
     cell_editor: Option<CellEditor>,
+    /// The cell being edited in place in the grid.
+    inline_edit: Option<InlineEdit>,
+    /// Auto-save: reload the grid once the automatic commit is done.
+    reload_after_commit: bool,
     object_dialog: Option<ObjectDialog>,
     /// The Data Transfer wizard, while it is showing.
     transfer: Option<transfer::TransferWizard>,
@@ -616,6 +620,8 @@ impl Workbench {
             collapsed_schemas: HashSet::new(),
             quick_open: None,
             cell_editor: None,
+            inline_edit: None,
+            reload_after_commit: false,
             object_dialog: None,
             transfer: None,
             dryrun: None,

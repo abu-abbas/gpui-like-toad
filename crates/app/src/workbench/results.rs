@@ -77,6 +77,19 @@ impl Workbench {
                 .min_w(px(0.))
                 .overflow_hidden()
                 .key_context("OraDataGrid")
+                // Enter / F2 edit the picked cell in place.
+                .on_key_down(
+                    cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                        let key = event.keystroke.key.as_str();
+                        let plain = !event.keystroke.modifiers.modified();
+                        if plain
+                            && matches!(key, "enter" | "f2")
+                            && this.edit_picked_cell(window, cx)
+                        {
+                            cx.stop_propagation();
+                        }
+                    }),
+                )
                 .on_action(
                     cx.listener(|this, _: &gpui_kit::component::input::Copy, _, cx| {
                         let state = this.active_tab().table_state.read(cx);

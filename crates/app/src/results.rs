@@ -78,6 +78,12 @@ pub struct ResultsDelegate {
     on_quick_filter: Option<QuickFilterHandler>,
     /// Set on editable data tabs: called for double click / "Edit nilai".
     on_edit: Option<EditHandler>,
+    /// Set on editable data tabs: double click edits the cell in place.
+    on_inline_edit: Option<EditHandler>,
+    /// Set on editable data tabs: Tab / Enter / Escape in a cell editor.
+    on_cell_key: Option<CellKeyHandler>,
+    /// The cell edited in place right now, if any.
+    inline: Option<InlineCell>,
     /// Set on editable data tabs: the context menu's "Paste" into the
     /// picked cells.
     on_cell_paste: Option<PasteHandler>,
@@ -110,6 +116,8 @@ pub type QuickFilterHandler = Rc<dyn Fn(FilterCondition, &mut Window, &mut App)>
 /// A request to edit one cell: its row, column and current value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CellEditRequest {
+    /// Grid row (sorted order) and result column of the cell.
+    pub pos: (usize, usize),
     pub rowid: String,
     pub column: String,
     pub value: Value,
@@ -118,6 +126,31 @@ pub struct CellEditRequest {
 pub type EditHandler = Rc<dyn Fn(CellEditRequest, &mut Window, &mut App)>;
 
 pub type PasteHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// A key pressed inside a cell editor (an insert-row field or the inline
+/// editor of an existing cell), already mapped to what the grid does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellKey {
+    /// Tab: the next cell (wraps to the next row).
+    Next,
+    /// Shift+Tab: the previous cell.
+    Prev,
+    /// Enter: finish this cell (the workbench decides where to go next).
+    Done,
+    /// Shift+Enter: finish and go to the cell above.
+    Up,
+    /// Escape: drop the edit.
+    Cancel,
+}
+
+pub type CellKeyHandler = Rc<dyn Fn(CellKey, &mut Window, &mut App)>;
+
+/// The cell being edited in place: its text box replaces the cell text.
+pub struct InlineCell {
+    pub rowid: String,
+    pub column: String,
+    pub input: gpui_kit::Entity<InputState>,
+}
 
 /// "Load full value": called with the row's ROWID and the column name.
 pub type LoadCellHandler = Rc<dyn Fn(String, String, &mut Window, &mut App)>;
@@ -256,6 +289,9 @@ impl ResultsDelegate {
             right_col: None,
             on_quick_filter: None,
             on_edit: None,
+            on_inline_edit: None,
+            on_cell_key: None,
+            inline: None,
             on_delete_rows: None,
             on_duplicate_rows: None,
             on_load_cell: None,
@@ -292,6 +328,128 @@ impl ResultsDelegate {
     pub fn with_cell_edit(mut self, handler: EditHandler) -> Self {
         self.on_edit = Some(handler);
         self
+    }
+
+    /// Double click edits a cell in place instead of in the dialog.
+    pub fn with_inline_edit(mut self, handler: EditHandler) -> Self {
+        self.on_inline_edit = Some(handler);
+        self
+    }
+
+    /// Tab / Enter / Escape in a cell editor.
+    pub fn with_cell_key(mut self, handler: CellKeyHandler) -> Self {
+        self.on_cell_key = Some(handler);
+        self
+    }
+
+    /// Show (or remove) the in-place editor of one cell.
+    pub fn set_inline(&mut self, inline: Option<InlineCell>) {
+        self.inline = inline;
+    }
+
+    /// The edit request for the focused picked cell, for Enter / F2.
+    pub fn picked_edit_request(&self) -> Option<CellEditRequest> {
+        let (row, vis) = self.cell_focus.or(self.cell_anchor)?;
+        self.edit_request(row, *self.visible.get(vis)?)
+    }
+
+    /// Pick the cell of `request` and return its table row and column
+    /// index, so the caller can scroll to it.
+    pub fn pick_request(&mut self, request: &CellEditRequest) -> Option<(usize, usize)> {
+        let vis = self.visible.iter().position(|&c| c == request.pos.1)?;
+        self.pick_cell((request.pos.0, vis), false);
+        let row_ix = request.pos.0.checked_sub(self.page * self.page_size)?;
+        Some((row_ix, vis + usize::from(self.row_numbers)))
+    }
+
+    /// The editable cell reached from `from` by `key` on the current page,
+    /// skipping cells that cannot be edited (clipped values).
+    pub fn neighbor_request(&self, from: (usize, usize), key: CellKey) -> Option<CellEditRequest> {
+        let n = self.visible.len();
+        let mut col = self.visible.iter().position(|&c| c == from.1)?;
+        let mut row = from.0;
+        let first = self.page * self.page_size;
+        let end = first + self.page_rows();
+        loop {
+            match key {
+                CellKey::Next => {
+                    col += 1;
+                    if col >= n {
+                        col = 0;
+                        row += 1;
+                    }
+                }
+                CellKey::Prev => {
+                    if col == 0 {
+                        if row <= first {
+                            return None;
+                        }
+                        col = n - 1;
+                        row -= 1;
+                    } else {
+                        col -= 1;
+                    }
+                }
+                CellKey::Done => row += 1,
+                CellKey::Up => {
+                    if row <= first {
+                        return None;
+                    }
+                    row -= 1;
+                }
+                CellKey::Cancel => return None,
+            }
+            if row >= end || row < first {
+                return None;
+            }
+            if let Some(request) = self.edit_request(row, self.visible[col]) {
+                return Some(request);
+            }
+        }
+    }
+
+    /// A text box that reports Tab / Enter / Escape to the grid.
+    fn editor_box(&self, input: &gpui_kit::Entity<InputState>, disabled: bool) -> impl IntoElement {
+        use gpui_kit::component::input::{Enter, Escape, IndentInline, OutdentInline};
+        let key = |key: CellKey| {
+            let handler = self.on_cell_key.clone();
+            move |window: &mut Window, cx: &mut App| {
+                if let Some(handler) = &handler {
+                    cx.stop_propagation();
+                    handler(key, window, cx);
+                }
+            }
+        };
+        // Tab, Enter and Escape are actions of the text box: catch them on
+        // the way down, before the box handles them.
+        let (next, prev, done, up, cancel) = (
+            key(CellKey::Next),
+            key(CellKey::Prev),
+            key(CellKey::Done),
+            key(CellKey::Up),
+            key(CellKey::Cancel),
+        );
+        div()
+            .w_full()
+            .capture_action(move |_: &IndentInline, window, cx| next(window, cx))
+            .capture_action(move |_: &OutdentInline, window, cx| prev(window, cx))
+            .capture_action(move |action: &Enter, window, cx| {
+                if action.secondary {
+                    return;
+                }
+                if action.shift {
+                    up(window, cx)
+                } else {
+                    done(window, cx)
+                }
+            })
+            .capture_action(move |_: &Escape, window, cx| cancel(window, cx))
+            .child(
+                Input::new(input)
+                    .xsmall()
+                    .bordered(false)
+                    .disabled(disabled),
+            )
     }
 
     /// Offer "Paste" (into the picked cells) in the cell context menu.
@@ -632,6 +790,7 @@ impl ResultsDelegate {
             return None;
         }
         Some(CellEditRequest {
+            pos: (abs_row, data_col),
             rowid,
             column: self.result.columns.get(data_col)?.name.clone(),
             value: value.clone(),
@@ -1074,16 +1233,12 @@ impl TableDelegate for ResultsDelegate {
                 return cell.text_right().text_color(theme.primary).child("+");
             };
             let name = &self.result.columns[column].name;
-            return cell.children(
+            // A row that is not in the database yet: tinted purple.
+            return cell.bg(gpui_kit::rgba(0x8b5cf62e)).children(
                 self.insert_rows[row_ix - self.page_rows()]
                     .iter()
                     .find(|(key, _)| key == name)
-                    .map(|(_, field)| {
-                        Input::new(field)
-                            .xsmall()
-                            .bordered(false)
-                            .disabled(self.insert_disabled)
-                    }),
+                    .map(|(_, field)| self.editor_box(field, self.insert_disabled)),
             );
         }
         let Some(data_col) = self.data_col(col_ix) else {
@@ -1093,6 +1248,13 @@ impl TableDelegate for ResultsDelegate {
                 .child((abs_row + 1).to_string());
         };
         let request = self.edit_request(abs_row, data_col);
+        if let (Some(inline), Some(request)) = (&self.inline, &request) {
+            if inline.rowid == request.rowid && inline.column == request.column {
+                return cell
+                    .bg(theme.warning.opacity(0.28))
+                    .child(self.editor_box(&inline.input, false));
+            }
+        }
         // Edited cells are tinted: amber until sent, blue once sent but
         // not yet committed.
         let mark = request
@@ -1110,12 +1272,18 @@ impl TableDelegate for ResultsDelegate {
             (false, Some(CellMark::Applied)) => cell.bg(theme.primary.opacity(0.22)),
             (false, None) => cell,
         };
-        let cell = match (self.on_edit.clone(), request) {
+        let cell = match (
+            self.on_inline_edit.clone().or(self.on_edit.clone()),
+            request,
+        ) {
             (Some(handler), Some(request)) => cell.on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |_, event: &gpui_kit::MouseDownEvent, window, cx| {
                     if event.click_count >= 2 {
-                        handler(request.clone(), window, cx);
+                        // The table is being updated right now: the handler
+                        // changes it, so it runs after this event.
+                        let (handler, request) = (handler.clone(), request.clone());
+                        window.defer(cx, move |window, cx| handler(request, window, cx));
                     }
                 }),
             ),
