@@ -16,6 +16,7 @@ use crate::theme::{FONT_GRID, LEADING_GRID};
 /// Rows shown at once in the Structure / Index grids (no paging there).
 const INFO_GRID_ROWS: usize = 1000;
 
+use super::row_count::{group_digits, RowCount};
 use super::*;
 
 /// One editable condition in the filter bar.
@@ -95,6 +96,8 @@ pub(super) struct DataTab {
     next_row_id: u64,
     /// The page the grid currently reflects (what Refresh re-runs).
     pub(super) page: TablePage,
+    /// Total rows under the applied filter, once asked for.
+    pub(super) count: super::row_count::CountState,
     limit_input: Entity<InputState>,
     offset_input: Entity<InputState>,
     /// Columns hidden by the Columns picker; survive refetches.
@@ -182,6 +185,7 @@ impl DataTab {
             _grid_observe: None,
             next_row_id: 0,
             page,
+            count: Default::default(),
             limit_input,
             offset_input,
             hidden: HashSet::new(),
@@ -428,6 +432,7 @@ impl Workbench {
         };
         if let Some(data) = self.data_mut() {
             data.applied = filter;
+            data.count.reset();
         }
         // A new filter starts at the first page.
         self.show_page(0, window, cx);
@@ -497,6 +502,7 @@ impl Workbench {
         };
         data.rows.clear();
         data.applied = TableFilter::default();
+        data.count.reset();
         self.add_filter_row(None, None, window, cx);
         self.show_page(0, window, cx);
     }
@@ -1287,6 +1293,10 @@ impl Workbench {
         let current = tab.data.as_ref().map_or(DataView::Data, |d| d.view);
         let on_data = current == DataView::Data;
         let page = tab.data.as_ref().map(|d| d.page).unwrap_or_default();
+        let total = tab
+            .data
+            .as_ref()
+            .map_or(RowCount::Unknown, |d| d.count.value);
         let mut text = match &tab.last_result {
             Some(result) => {
                 let rows = result.row_count();
@@ -1295,8 +1305,12 @@ impl Workbench {
                 } else {
                     format!("Rows {}–{}", page.offset + 1, page.offset + rows)
                 };
-                if result.truncated {
-                    text.push('+');
+                match total {
+                    RowCount::Known(n) => {
+                        text.push_str(&format!(" of {}", group_digits(n)));
+                    }
+                    _ if result.truncated => text.push('+'),
+                    _ => {}
                 }
                 text
             }
@@ -1305,7 +1319,9 @@ impl Workbench {
         if let Some(ms) = tab.elapsed_ms {
             text.push_str(&format!(" · {ms} ms"));
         }
-        let more = tab.last_result.as_ref().is_some_and(|r| r.truncated);
+        let shown = tab.last_result.as_ref().map_or(0, |r| r.row_count());
+        let more = tab.last_result.as_ref().is_some_and(|r| r.truncated)
+            && !matches!(total, RowCount::Known(n) if (page.offset + shown) as u64 >= n);
         let filters = tab.data.as_ref().map_or(0, |d| d.applied.active().count());
         let busy = self.conn.busy;
         // Wraps onto a second line in a narrow window instead of clipping
@@ -1420,14 +1436,32 @@ impl Workbench {
                             })),
                     )
                     .child(self.render_columns_button(data, theme, cx));
-                footer = footer.child(pager).child(
-                    div()
-                        .flex_none()
-                        .w(px(130.))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .child(caption_text(text, theme)),
-                );
+                footer = footer
+                    .child(pager)
+                    .child(
+                        div()
+                            .flex_none()
+                            .min_w(px(130.))
+                            .whitespace_nowrap()
+                            .child(caption_text(text, theme)),
+                    )
+                    .when(!matches!(total, RowCount::Known(_)), |this| {
+                        this.child(
+                            Button::new("count-rows")
+                                .small()
+                                .ghost()
+                                .label(if total == RowCount::Counting {
+                                    "Counting…"
+                                } else {
+                                    "Count"
+                                })
+                                .tooltip(
+                                    "Count all rows under the filter (can be slow on a big table)",
+                                )
+                                .disabled(busy || total == RowCount::Counting)
+                                .on_click(cx.listener(|this, _, _, cx| this.count_rows(cx))),
+                        )
+                    });
             }
         }
         footer

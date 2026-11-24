@@ -281,6 +281,16 @@ impl DbClient for DemoClient {
 
     /// The demo has no SQL engine, so the filter runs in memory over the
     /// whole demo table, then the page window applies.
+    fn count_table(
+        &mut self,
+        owner: &str,
+        table: &str,
+        filter: &TableFilter,
+    ) -> Result<u64, DbError> {
+        let page = TablePage::new(0, crate::MAX_PAGE_LIMIT);
+        Ok(self.query_table(owner, table, filter, page)?.row_count() as u64)
+    }
+
     fn query_table(
         &mut self,
         owner: &str,
