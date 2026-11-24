@@ -70,7 +70,9 @@ mod data_tab;
 mod db_events;
 mod db_icon;
 mod explorer;
+mod extension_panel;
 mod grid_clipboard;
+mod mailhog_pilot;
 mod object_ops;
 mod profiles;
 mod query;
@@ -243,6 +245,9 @@ struct ConnState {
     /// complete; the response itself is ignored.
     abandoned: bool,
     connect_error: Option<String>,
+    /// "SQLite extension v1.0.0" while connected through a downloaded
+    /// extension; shown in the status bar.
+    extension_label: Option<String>,
     connection_lost: bool,
     last_connection: Option<LastConnection>,
     /// Tab (by id) that the in-flight operation writes its result into, so
@@ -283,6 +288,7 @@ impl ConnState {
             op_generation: 0,
             abandoned: false,
             connect_error: None,
+            extension_label: None,
             connection_lost: false,
             last_connection: None,
             pending_tab: None,
@@ -514,8 +520,7 @@ impl Workbench {
         let scratch_tab = QueryTab::new(0, String::new(), "", &completion, window, cx);
 
         // Follow OS appearance changes while the preference is System.
-        let appearance_sub = window
-            .observe_window_appearance(|window, cx| theme::sync_system_appearance(window, cx));
+        let appearance_sub = window.observe_window_appearance(theme::sync_system_appearance);
 
         let settings = settings::SettingsState::new(window, cx);
         let settings_search_sub = cx.subscribe(&settings.search, |_, _, event: &InputEvent, cx| {
@@ -541,6 +546,7 @@ impl Workbench {
         // Servers Kilat started ("Start server from Kilat") follow Kilat:
         // stop them on quit, and stop leftovers of a run that crashed.
         devtools::server::stop_leftovers(&store::config_dir());
+        devtools::server::stop_mailhog_leftovers(&store::config_dir());
         let quit_sub = cx.on_app_quit(|this: &mut Workbench, _| {
             this.stop_all_servers_now();
             async {}

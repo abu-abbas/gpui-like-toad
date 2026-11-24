@@ -262,7 +262,7 @@ impl Workbench {
     /// or `host:port/service` built from the Basic fields. Empty when the
     /// required field (TNS text or host) is blank.
     pub(super) fn form_connect_string(&self, cx: &App) -> String {
-        if self.connection_form.kind == DbKind::Sqlite {
+        if !self.connection_form.kind.capabilities().network {
             return Self::input_text(&self.connection_form.file_input, cx);
         }
         if self.connection_form.use_tns {
@@ -304,17 +304,19 @@ impl Workbench {
             window,
             cx,
         );
-        let file = if profile.kind == DbKind::Sqlite {
-            profile.connect_string.clone()
-        } else {
+        let network = profile.kind.capabilities().network;
+        let file = if network {
             String::new()
+        } else {
+            profile.connect_string.clone()
         };
         Self::set_input(&self.connection_form.file_input.clone(), file, window, cx);
         // Easy Connect strings split into the Basic fields; descriptors and
         // TNS aliases open in TNS mode unchanged. A SQLite path fills none.
-        let oracle_target = match profile.kind {
-            DbKind::Oracle => profile.connect_string.as_str(),
-            DbKind::Sqlite => "",
+        let oracle_target = if network {
+            profile.connect_string.as_str()
+        } else {
+            ""
         };
         match parse_easy_connect(oracle_target) {
             Some((host, port, service)) => {
@@ -335,7 +337,9 @@ impl Workbench {
                 );
             }
             None => {
-                self.connection_form.use_tns = true;
+                // Only Oracle has a TNS form; another server engine with an
+                // unreadable target opens the Basic fields, empty.
+                self.connection_form.use_tns = profile.kind == DbKind::Oracle;
                 Self::set_input(
                     &self.connection_form.host_input.clone(),
                     String::new(),

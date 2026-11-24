@@ -28,60 +28,16 @@ pub fn convert_name(name: &str, case: Option<NameCase>) -> String {
     case.map_or_else(|| name.to_string(), |c| c.apply(name))
 }
 
-fn base_type(data_type: &str) -> String {
-    data_type
-        .split('(')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_uppercase()
-}
-
-/// Column type for the target engine. The same engine keeps the type text.
+/// Column type for the target engine. The same engine keeps the type text;
+/// different engines go through the neutral
+/// [`crate::dialect::CanonType`].
 pub fn map_type(source: DbKind, target: DbKind, data_type: &str) -> String {
-    match (source, target) {
-        (a, b) if a == b => data_type.trim().to_string(),
-        (DbKind::Oracle, DbKind::Sqlite) => {
-            let base = base_type(data_type);
-            let scale_zero = {
-                let inner = data_type
-                    .split_once('(')
-                    .map(|(_, r)| r.trim_end_matches(')').replace(' ', ""))
-                    .unwrap_or_default();
-                !inner.is_empty() && (!inner.contains(',') || inner.ends_with(",0"))
-            };
-            match base.as_str() {
-                "NUMBER" | "DECIMAL" | "NUMERIC" if scale_zero => "INTEGER",
-                "INTEGER" | "INT" | "SMALLINT" => "INTEGER",
-                "NUMBER" | "DECIMAL" | "NUMERIC" => "NUMERIC",
-                "FLOAT" | "BINARY_FLOAT" | "BINARY_DOUBLE" | "REAL" | "DOUBLE PRECISION" => "REAL",
-                "BLOB" | "RAW" | "LONG RAW" => "BLOB",
-                _ => "TEXT",
-            }
-            .to_string()
-        }
-        (DbKind::Sqlite, DbKind::Oracle) => {
-            let t = data_type.trim().to_uppercase();
-            let has = |s: &str| t.contains(s);
-            if has("DATE") || has("TIME") {
-                "VARCHAR2(64)"
-            } else if has("BOOL") {
-                "NUMBER(1)"
-            } else if has("INT") {
-                "NUMBER(19)"
-            } else if has("CHAR") || has("CLOB") || has("TEXT") || t.is_empty() {
-                "VARCHAR2(4000)"
-            } else if has("BLOB") {
-                "BLOB"
-            } else if has("REAL") || has("FLOA") || has("DOUB") {
-                "BINARY_DOUBLE"
-            } else {
-                "NUMBER"
-            }
-            .to_string()
-        }
-        _ => data_type.trim().to_string(),
+    if source == target {
+        return data_type.trim().to_string();
     }
+    target
+        .dialect()
+        .native_type(&source.dialect().canonical_type(data_type))
 }
 
 /// Resolve the fields to copy and their target names and types.
@@ -134,6 +90,8 @@ fn default_for(source: DbKind, target: DbKind, col: &ColumnDef) -> Option<String
         || upper == "NULL"
         || upper.contains("NEXTVAL")
         || upper.contains("CURRVAL")
+        || upper.contains("IDENTITY")
+        || upper == "AUTO_INCREMENT"
         || text.contains("\".\"")
         || super::spec::check_condition(text).is_err()
     {
@@ -166,11 +124,11 @@ pub fn create_table_sql_with(
     let mut lines = Vec::new();
     for c in columns {
         let ty = check_data_type(&c.target_type)?;
-        let default = match (&c.default, dialect.kind()) {
-            (Some(d), DbKind::Sqlite) => format!(" DEFAULT ({d})"),
-            (Some(d), DbKind::Oracle) => format!(" DEFAULT {d}"),
-            (None, _) => String::new(),
-        };
+        let default = c
+            .default
+            .as_deref()
+            .map(|d| dialect.default_clause(d))
+            .unwrap_or_default();
         lines.push(format!(
             "{} {ty}{default}{}",
             dialect.quote_ident(&c.target),
@@ -285,10 +243,7 @@ pub fn plan_constraints(
                     skip("the referenced table is not part of this transfer");
                     continue;
                 };
-                let parent_ref = match target {
-                    DbKind::Oracle => dialect.table_ref(schema, &parent),
-                    DbKind::Sqlite => dialect.quote_ident(&parent),
-                };
+                let parent_ref = dialect.foreign_key_parent(schema, &parent);
                 let ref_cols: Vec<String> = c
                     .ref_columns
                     .iter()
@@ -309,9 +264,10 @@ pub fn plan_constraints(
                     "FOREIGN KEY ({}) REFERENCES {parent_ref}{ref_part}{rule}",
                     list.join(", ")
                 );
-                match target {
-                    DbKind::Sqlite => out.inline.push(clause),
-                    DbKind::Oracle => out.after.push(clause),
+                if dialect.foreign_keys_inline() {
+                    out.inline.push(clause);
+                } else {
+                    out.after.push(clause);
                 }
             }
         }
@@ -348,26 +304,11 @@ pub fn create_index_sql(
         .collect();
     let name = convert_name(&index.name, case);
     let unique = if index.unique { "UNIQUE " } else { "" };
-    let (index_ref, table_ref) = match dialect.kind() {
-        DbKind::Oracle => (
-            dialect.table_ref(schema, &name),
-            dialect.table_ref(schema, table),
-        ),
-        DbKind::Sqlite => (dialect.table_ref(schema, &name), dialect.quote_ident(table)),
-    };
+    let (index_ref, table_ref) = dialect.index_refs(schema, &name, table);
     Some(format!(
         "CREATE {unique}INDEX {index_ref} ON {table_ref} ({})",
         cols?.join(", ")
     ))
-}
-
-/// Characters a ROWID may hold; checked before it is written into SQL.
-fn valid_oracle_rowid(text: &str) -> bool {
-    !text.is_empty()
-        && text.len() <= 4000
-        && text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '*' | '.' | '-' | '_'))
 }
 
 /// Where the next page of rows starts: after the key of the last row.
@@ -389,18 +330,13 @@ pub fn keyset_select_sql(
     limit: usize,
 ) -> Result<String, String> {
     let key = dialect.row_id_expr();
+    let sort_key = dialect.row_id_sort_expr();
     let mut conds = Vec::new();
     if let Some(c) = condition {
         conds.push(format!("({c})"));
     }
     if let Resume::After(value) = resume {
-        conds.push(match (dialect.kind(), value) {
-            (DbKind::Sqlite, Value::Integer(n)) => format!("{key} > {n}"),
-            (DbKind::Oracle, Value::Text(t)) if valid_oracle_rowid(t) => {
-                format!("{key} > CHARTOROWID('{t}')")
-            }
-            _ => return Err("The row key of the source is not usable for paging.".to_string()),
-        });
+        conds.push(dialect.keyset_after(sort_key, value)?);
     }
     let list: Vec<String> = columns
         .iter()
@@ -414,7 +350,7 @@ pub fn keyset_select_sql(
     if !conds.is_empty() {
         sql.push_str(&format!(" WHERE {}", conds.join(" AND ")));
     }
-    sql.push_str(&format!(" ORDER BY {key}"));
+    sql.push_str(&format!(" ORDER BY {sort_key}"));
     dialect.push_page(&mut sql, crate::filter::TablePage::new(0, limit));
     Ok(sql)
 }
@@ -448,59 +384,10 @@ pub fn offset_select_sql(
     sql
 }
 
-fn looks_numeric(text: &str) -> bool {
-    let t = text.trim();
-    !t.is_empty()
-        && t.parse::<f64>().is_ok_and(f64::is_finite)
-        && t.chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))
-}
-
-fn quote_text(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "''"))
-}
-
-/// A date or timestamp written as `YYYY-MM-DD[ T]HH:MM:SS[.fraction]`.
-fn split_timestamp(text: &str) -> Option<(&str, Option<&str>)> {
-    let t = text.trim();
-    let b = t.as_bytes();
-    let digits =
-        |r: std::ops::Range<usize>| b.get(r).is_some_and(|s| s.iter().all(u8::is_ascii_digit));
-    if !(b.len() >= 10
-        && digits(0..4)
-        && b[4] == b'-'
-        && digits(5..7)
-        && b[7] == b'-'
-        && digits(8..10))
-    {
-        return None;
-    }
-    if b.len() == 10 {
-        return Some((t, None));
-    }
-    if !(b.len() >= 19
-        && matches!(b[10], b' ' | b'T')
-        && digits(11..13)
-        && b[13] == b':'
-        && digits(14..16)
-        && b[16] == b':'
-        && digits(17..19))
-    {
-        return None;
-    }
-    match b.len() {
-        19 => Some((t, None)),
-        n if n > 20 && b[19] == b'.' && digits(20..n.min(29)) && n <= 29 => {
-            Some((&t[..19], Some(&t[20..])))
-        }
-        _ => None,
-    }
-}
-
 /// One value as a literal of the `target` database, for a column of
 /// `column_type`. Errors name the problem, never the value.
 pub fn literal(target: DbKind, column_type: &str, value: &Value) -> Result<String, String> {
-    let base = base_type(column_type);
+    let dialect = target.dialect();
     match value {
         Value::Null => Ok("NULL".to_string()),
         Value::Clipped(c) => Err(format!(
@@ -510,88 +397,9 @@ pub fn literal(target: DbKind, column_type: &str, value: &Value) -> Result<Strin
         Value::Integer(n) => Ok(n.to_string()),
         Value::Float(f) if f.is_finite() => Ok(format!("{f}")),
         Value::Float(_) => Err("a NaN or infinite number cannot be copied".to_string()),
-        Value::Bytes(b) => {
-            let hex: String = b.iter().map(|x| format!("{x:02X}")).collect();
-            match target {
-                DbKind::Sqlite => Ok(format!("X'{hex}'")),
-                DbKind::Oracle if b.len() <= 2000 => Ok(format!("HEXTORAW('{hex}')")),
-                DbKind::Oracle => {
-                    Err("a binary value over 2000 bytes cannot be sent to Oracle".to_string())
-                }
-            }
-        }
-        Value::Text(s) => match target {
-            DbKind::Sqlite => {
-                if s.contains('\0') {
-                    return Err("a text value with a NUL character cannot be copied".to_string());
-                }
-                let numeric_col = ["INT", "NUM", "REAL", "FLOA", "DOUB", "DEC"]
-                    .iter()
-                    .any(|k| base.contains(k));
-                if numeric_col && looks_numeric(s) {
-                    Ok(s.trim().to_string())
-                } else {
-                    Ok(quote_text(s))
-                }
-            }
-            DbKind::Oracle => oracle_text(&base, s),
-        },
+        Value::Bytes(b) => dialect.bytes_literal(b),
+        Value::Text(s) => dialect.text_literal(column_type, s),
     }
-}
-
-fn oracle_text(base: &str, s: &str) -> Result<String, String> {
-    if s.contains('\0') {
-        return Err("a text value with a NUL character cannot be copied".to_string());
-    }
-    let numeric = matches!(
-        base,
-        "NUMBER"
-            | "FLOAT"
-            | "BINARY_FLOAT"
-            | "BINARY_DOUBLE"
-            | "INTEGER"
-            | "INT"
-            | "SMALLINT"
-            | "DECIMAL"
-            | "NUMERIC"
-            | "REAL"
-    );
-    if numeric && looks_numeric(s) {
-        return Ok(s.trim().to_string());
-    }
-    if base == "DATE" || (base.starts_with("TIMESTAMP") && !base.contains("TIME ZONE")) {
-        if let Some((main, frac)) = split_timestamp(s) {
-            let date_only = main.len() == 10;
-            let text = main.replacen('T', " ", 1);
-            return Ok(match (base == "DATE", date_only, frac) {
-                (true, true, _) => format!("TO_DATE('{text}', 'YYYY-MM-DD')"),
-                (true, false, _) => format!("TO_DATE('{text}', 'YYYY-MM-DD HH24:MI:SS')"),
-                (false, true, _) => format!("TO_TIMESTAMP('{text}', 'YYYY-MM-DD')"),
-                (false, false, None) => {
-                    format!("TO_TIMESTAMP('{text}', 'YYYY-MM-DD HH24:MI:SS')")
-                }
-                (false, false, Some(f)) => {
-                    format!("TO_TIMESTAMP('{text}.{f}', 'YYYY-MM-DD HH24:MI:SS.FF')")
-                }
-            });
-        }
-    }
-    // A plain literal is limited to 4000 bytes: longer text goes in as
-    // TO_CLOB pieces.
-    if s.len() <= 4000 {
-        return Ok(quote_text(s));
-    }
-    let mut parts = Vec::new();
-    let mut piece = String::new();
-    for c in s.chars() {
-        if piece.len() + c.len_utf8() > 2000 {
-            parts.push(format!("TO_CLOB({})", quote_text(&piece)));
-            piece.clear();
-        }
-        piece.push(c);
-    }
-    parts.push(format!("TO_CLOB({})", quote_text(&piece)));
-    Ok(parts.join(" || "))
 }
 
 /// One `INSERT` per row. `rows` hold the key first when `skip_key` is

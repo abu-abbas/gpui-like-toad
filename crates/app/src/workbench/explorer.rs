@@ -5,7 +5,10 @@ use super::*;
 
 pub(super) const EXPLORER_CONTROL_HEIGHT: f32 = 30.;
 
-pub(super) fn control(id: &'static str, theme: &gpui_kit::component::Theme) -> Button {
+pub(super) fn control(
+    id: impl Into<gpui_kit::ElementId>,
+    theme: &gpui_kit::component::Theme,
+) -> Button {
     Button::new(id)
         .ghost()
         .bg(theme.background)
@@ -340,8 +343,8 @@ fn render_object_row(
         .h(px(TREE_ROW_HEIGHT))
         .px(px(SPACE_2))
         .rounded(px(RADIUS_SM))
-        .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-        .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
+        .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+        .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
         .on_click(cx.listener(move |this, event, window, cx| {
             this.on_object_click(click_object.clone(), event, window, cx);
         }));
@@ -368,7 +371,7 @@ fn render_object_row(
                 .min_w(px(0.))
                 .truncate()
                 .text_color(theme.muted_foreground)
-                .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
+                .text_size(crate::theme::ui_size(theme, FONT_CAPTION))
                 .children(match (&object.parent, &object.detail) {
                     _ if object.kind == ObjectKind::RecycleBin => object
                         .detail
@@ -633,8 +636,14 @@ fn object_menu(
         })
         .when(
             !is_table
-                && ddl::drop_object_sql(&ora_core::dialect::OracleDialect, "O", "N", &object.kind)
-                    .is_some(),
+                && ddl::drop_object_sql(
+                    &ora_core::dialect::OracleDialect,
+                    "O",
+                    "N",
+                    &object.kind,
+                    Some("T"),
+                )
+                .is_some(),
             |menu| {
                 menu.separator().item(item(
                     &format!("Delete {}…", ddl::kind_noun(&object.kind)),
@@ -826,12 +835,17 @@ impl Workbench {
             .map_or(ObjectKind::Table, |o| o.kind.clone());
         self.add_tab(window, cx);
         let view = cx.entity().downgrade();
-        let editable = kind == ObjectKind::Table;
+        let editable = kind == ObjectKind::Table && self.active_kind().capabilities().row_edit;
         let table_name = self.active_dialect().table_ref(owner, name);
         let data = DataTab::new(owner, name, kind, window, cx);
         let table_state = self.active_tab().table_state.clone();
         let observe = cx.observe(&table_state, |_, _, cx| cx.notify());
         let mut data = data;
+        // An engine without a physical row id selects none, so cells cannot
+        // be edited by it.
+        if !self.active_kind().capabilities().row_edit {
+            data.page = data.page.with_rowid(false);
+        }
         data._grid_observe = Some(observe);
         let tab = self.active_tab_mut();
         tab.title = format!("{owner}.{name}");

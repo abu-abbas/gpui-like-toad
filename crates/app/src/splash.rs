@@ -116,7 +116,7 @@ pub(crate) fn show_then(cx: &mut App, open_main: fn(&mut App)) {
         .detach();
     cx.spawn(async move |cx| {
         cx.background_executor().timer(SPLASH_TIME).await;
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             // Open the main window first so the app never has zero windows.
             open_main(cx);
             let _ = handle.update(cx, |_, window, _| window.remove_window());

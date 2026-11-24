@@ -418,6 +418,20 @@ fn copy_table(
             return Err("the target table does not exist and Create tables is off".to_string());
         }
         let cplan = plan_table_constraints(src, dk, spec, table, &plan, cx);
+        // Columns that a key or an index will use may need another type.
+        let mut keyed: Vec<String> = cplan.key_columns.iter().flatten().cloned().collect();
+        if o.include_indexes {
+            if let Ok(indexes) = src.indexes(&spec.source_schema, &table.source) {
+                keyed.extend(indexes.into_iter().flat_map(|i| i.columns));
+            }
+        }
+        for p in &mut plan {
+            if keyed.contains(&p.source) {
+                if let Some(ty) = dd.key_type(&p.target_type) {
+                    p.target_type = ty;
+                }
+            }
+        }
         let sql = sqlgen::create_table_sql_with(
             dd,
             &spec.target_schema,
@@ -657,7 +671,12 @@ fn copy_rows(
                     ),
                 );
             }
-            let mut paging = Paging::Keyset(Resume::Start);
+            // An engine without a row id has no key to page by.
+            let mut paging = if sd.capabilities().row_id {
+                Paging::Keyset(Resume::Start)
+            } else {
+                Paging::Offset(0)
+            };
             let mut first = true;
             loop {
                 if cx.cancelled() {

@@ -118,7 +118,13 @@ impl SettingsState {
             expanded_entry: None,
             log_tab: logs::LogTab::Errors,
             ext_filter: extensions::ExtFilter::All,
-            ext_online: extensions::OnlineState::default(),
+            ext_online: {
+                // So rows that need a downloaded extension know at once
+                // whether it is there.
+                let mut online = extensions::OnlineState::default();
+                online.refresh_installed();
+                online
+            },
             dev_logs: Vec::new(),
             dev_log: None,
             dev_log_text: String::new(),
@@ -137,6 +143,7 @@ impl Workbench {
         self.settings.previous_focus = window.focused(cx);
         self.settings.open = true;
         self.settings.log_tab = logs::LogTab::Errors;
+        self.settings.ext_online.refresh_installed();
         self.reload_settings_log();
         Self::set_input(&self.settings.search, String::new(), window, cx);
         self.settings

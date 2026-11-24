@@ -372,8 +372,8 @@ impl Workbench {
                 div()
                     .min_w(px(0.))
                     .truncate()
-                    .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
+                    .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                    .line_height(crate::theme::ui_size(theme, LEADING_LABEL))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.foreground)
                     .child(pill_label),
@@ -386,8 +386,8 @@ impl Workbench {
                     .px(px(SPACE_1))
                     .rounded(px(RADIUS_SM))
                     .bg(theme.secondary)
-                    .text_size(crate::theme::ui_size(&theme, FONT_CAPTION))
-                    .line_height(crate::theme::ui_size(&theme, LEADING_CAPTION))
+                    .text_size(crate::theme::ui_size(theme, FONT_CAPTION))
+                    .line_height(crate::theme::ui_size(theme, LEADING_CAPTION))
                     .text_color(theme.muted_foreground)
                     .child(format!("+{others}")),
             );
@@ -613,16 +613,16 @@ impl Workbench {
                     .p(px(SPACE_4))
                     .child(
                         div()
-                            .text_size(crate::theme::ui_size(&theme, FONT_HEADING_MD))
-                            .line_height(crate::theme::ui_size(&theme, LEADING_HEADING_MD))
+                            .text_size(crate::theme::ui_size(theme, FONT_HEADING_MD))
+                            .line_height(crate::theme::ui_size(theme, LEADING_HEADING_MD))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
                             .child(prompt.heading()),
                     )
                     .child(
                         div()
-                            .text_size(crate::theme::ui_size(&theme, FONT_BODY))
-                            .line_height(crate::theme::ui_size(&theme, LEADING_BODY))
+                            .text_size(crate::theme::ui_size(theme, FONT_BODY))
+                            .line_height(crate::theme::ui_size(theme, LEADING_BODY))
                             .text_color(theme.muted_foreground)
                             .child(text),
                     ),
@@ -708,18 +708,6 @@ pub(super) fn script_filename(title: &str) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::script_filename;
-
-    #[test]
-    fn script_filename_adds_sql_once_and_strips_separators() {
-        assert_eq!(script_filename("Query 2"), "Query 2.sql");
-        assert_eq!(script_filename("EMPLOYEES.sql"), "EMPLOYEES.sql");
-        assert_eq!(script_filename("HR/EMP:x"), "HR_EMP_x.sql");
-    }
-}
-
 impl Workbench {
     pub(super) fn connect(&mut self, demo: bool, window: &mut Window, cx: &mut Context<Self>) {
         if demo {
@@ -788,6 +776,7 @@ impl Workbench {
             } else {
                 self.connection_form.editing_profile
             },
+            window,
             cx,
         );
     }
@@ -823,7 +812,7 @@ impl Workbench {
         } else {
             Password::Typed(SecretString::from(String::new()))
         };
-        self.start_connect(profile, password, false, Some(ix), cx);
+        self.start_connect(profile, password, false, Some(ix), window, cx);
     }
 
     fn start_connect(
@@ -832,14 +821,17 @@ impl Workbench {
         password: Password,
         demo: bool,
         profile_ix: Option<usize>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !demo && !self.extensions.db_enabled(profile.kind) {
+        if !demo && !self.extension_ready(profile.kind.extension_id()) {
+            // Say it where it can be seen: the Info panel is hidden when
+            // nothing is connected, so open the page that fixes it.
             let name = extension_name(profile.kind.extension_id());
             self.push_message(format!(
                 "Install {name} in Settings > Extensions to open this connection."
             ));
-            cx.notify();
+            self.show_extension_needed(profile.kind.extension_id(), window, cx);
             return;
         }
         let resume = std::iter::once(&self.conn)
@@ -874,6 +866,16 @@ impl Workbench {
         }
         self.conn.demo_mode = demo;
         self.conn.connect_error = None;
+        self.conn.extension_label = (!demo && profile.kind != DbKind::Oracle)
+            .then(|| store::remote_install(profile.kind.extension_id()))
+            .flatten()
+            .map(|install| {
+                format!(
+                    "{} extension v{}",
+                    extension_name(profile.kind.extension_id()),
+                    install.version
+                )
+            });
         self.conn.last_connection = Some(LastConnection {
             profile: profile.clone(),
             demo,
@@ -1002,4 +1004,16 @@ impl Workbench {
 /// Display name of an extension, for messages.
 fn extension_name(id: &str) -> &'static str {
     store::extension_info(id).map_or("the extension", |e| e.name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::script_filename;
+
+    #[test]
+    fn script_filename_adds_sql_once_and_strips_separators() {
+        assert_eq!(script_filename("Query 2"), "Query 2.sql");
+        assert_eq!(script_filename("EMPLOYEES.sql"), "EMPLOYEES.sql");
+        assert_eq!(script_filename("HR/EMP:x"), "HR_EMP_x.sql");
+    }
 }

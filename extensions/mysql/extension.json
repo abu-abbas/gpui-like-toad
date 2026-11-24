@@ -1,0 +1,8 @@
+{
+  "id": "mysql",
+  "name": "MySQL",
+  "description": "Connect to MySQL and MariaDB servers.",
+  "kind": "database",
+  "crate": "kilat-ext-mysql",
+  "min_app": "0.1.55"
+}

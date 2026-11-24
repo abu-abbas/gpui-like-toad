@@ -221,11 +221,7 @@ pub fn rename_table_sql(
     if new == old {
         return Err("The new name is the same as the old one.".to_string());
     }
-    Ok(format!(
-        "ALTER TABLE {} RENAME TO {}",
-        dialect.table_ref(owner, old),
-        dialect.quote_ident(new)
-    ))
+    Ok(dialect.rename_table(owner, old, new))
 }
 
 /// `CREATE TABLE ... AS SELECT`. Copies columns and rows only: indexes,
@@ -293,6 +289,7 @@ pub fn drop_object_sql(
     owner: &str,
     name: &str,
     kind: &ObjectKind,
+    parent: Option<&str>,
 ) -> Option<String> {
     let noun = match kind {
         ObjectKind::Table
@@ -308,7 +305,7 @@ pub fn drop_object_sql(
         | ObjectKind::Type => kind_noun(kind).to_ascii_uppercase(),
         _ => return None,
     };
-    Some(format!("DROP {noun} {}", dialect.table_ref(owner, name)))
+    dialect.drop_object(&noun, owner, name, parent)
 }
 
 /// `ALTER TABLE ... ENABLE|DISABLE CONSTRAINT`.
@@ -815,10 +812,10 @@ mod tests {
     fn drop_and_constraint_statements() {
         let o = &OracleDialect;
         assert_eq!(
-            drop_object_sql(o, "HR", "V", &ObjectKind::MaterializedView).unwrap(),
+            drop_object_sql(o, "HR", "V", &ObjectKind::MaterializedView, None).unwrap(),
             "DROP MATERIALIZED VIEW \"HR\".\"V\""
         );
-        assert!(drop_object_sql(o, "HR", "L", &ObjectKind::DbLink).is_none());
+        assert!(drop_object_sql(o, "HR", "L", &ObjectKind::DbLink, None).is_none());
         assert_eq!(
             constraint_state_sql(o, "HR", "T", "C\"1", false),
             "ALTER TABLE \"HR\".\"T\" DISABLE CONSTRAINT \"C\"\"1\""
