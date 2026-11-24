@@ -170,7 +170,8 @@ fn main() {
 /// Windows GPUI ignores `set_menus`, but the actions and key bindings still
 /// work there.
 fn install_menus(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    // Asks first when a connection holds uncommitted changes.
+    cx.on_action(|_: &Quit, cx| workbench::request_quit(cx));
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
@@ -275,6 +276,7 @@ fn open_main_window(cx: &mut App) {
         theme::remember_ui_font(window.text_style().font_family);
         theme::apply_preference(pref, window, cx);
         let view = cx.new(|cx| workbench::Workbench::new(window, cx));
+        view.update(cx, |this, cx| this.watch_window_close(window, cx));
         // Background, rate-limited, silent on failure.
         view.update(cx, |this, cx| this.auto_check_updates(cx));
         if let Some(panic) = crash_log::take_previous() {

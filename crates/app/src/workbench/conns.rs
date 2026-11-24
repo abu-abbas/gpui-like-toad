@@ -338,8 +338,8 @@ impl Workbench {
         } else {
             "Connection".to_string()
         };
-        // (id, name, user@db, active, uncommitted)
-        let mut entries: Vec<(u64, String, String, bool, bool)> = Vec::new();
+        // (id, name, user@db, active, uncommitted changes)
+        let mut entries: Vec<(u64, String, String, bool, u32)> = Vec::new();
         for conn in std::iter::once(&self.conn).chain(self.parked.iter()) {
             if !conn.is_open() {
                 continue;
@@ -355,7 +355,11 @@ impl Workbench {
                 conn.label(),
                 detail,
                 conn.id == self.conn.id,
-                conn.uncommitted,
+                if conn.uncommitted {
+                    conn.uncommitted_changes.max(1)
+                } else {
+                    0
+                },
             ));
         }
         let connected = self.conn.session.is_some();
@@ -399,10 +403,10 @@ impl Workbench {
             }
             for (id, name, detail, active, uncommitted) in entries.clone() {
                 let switch_view = view.clone();
-                let mark = if uncommitted {
-                    " • uncommitted changes"
+                let mark = if uncommitted > 0 {
+                    format!(" • {uncommitted} uncommitted")
                 } else {
-                    ""
+                    String::new()
                 };
                 menu = menu.item(
                     PopupMenuItem::new(format!("{name}  ({detail}){mark}"))
@@ -479,6 +483,17 @@ impl Workbench {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Uncommitted changes first (Commit / Rollback / Cancel), then
+        // the unsaved scripts.
+        if self.guard_tx(transaction::TxAfter::Disconnect(id), cx) {
+            return;
+        }
+        self.disconnect_after_tx(id, cx);
+    }
+
+    /// Disconnect once no transaction is open: the unsaved-scripts
+    /// dialog, or straight away.
+    pub(super) fn disconnect_after_tx(&mut self, id: u64, cx: &mut Context<Self>) {
         let scripts: Vec<(u64, String)> = self
             .tabs
             .iter()
@@ -946,7 +961,7 @@ impl Workbench {
         self.conn.session = None;
         self.reset_catalog(None);
         self.conn.demo_mode = false;
-        self.conn.uncommitted = false;
+        self.conn.clear_uncommitted();
         self.connection_form.show_connection_form = false;
         self.connection_form.scrub_password = true;
         self.conn.objects.clear();

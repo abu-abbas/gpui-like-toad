@@ -3,12 +3,13 @@
 use super::*;
 
 impl Workbench {
-    pub(super) fn on_committed(&mut self, cid: u64, cx: &mut Context<Self>) {
+    pub(in crate::workbench) fn on_committed(&mut self, cid: u64, cx: &mut Context<Self>) {
         self.set_conn_state(cid, |c| {
-            c.uncommitted = false;
+            c.clear_uncommitted();
             c.status = "Commit succeeded.".to_string();
         });
         self.push_message_for(cid, "Commit succeeded.".to_string());
+        self.tx_step_done(cid, true, cx);
         // Auto-saved edits are committed while the next cell may already
         // be staged: keep what was not sent yet.
         self.clear_edit_marks_for(cid, true, cx);
@@ -28,10 +29,11 @@ impl Workbench {
 
     pub(super) fn on_rolled_back(&mut self, cid: u64, cx: &mut Context<Self>) {
         self.set_conn_state(cid, |c| {
-            c.uncommitted = false;
+            c.clear_uncommitted();
             c.status = "Rollback succeeded.".to_string();
         });
         self.push_message_for(cid, "Rollback succeeded.".to_string());
+        self.tx_step_done(cid, true, cx);
         self.clear_edit_marks_for(cid, false, cx);
         // The grid still shows the rolled-back values. Only the tab the
         // user is looking at reloads; others refresh when opened.

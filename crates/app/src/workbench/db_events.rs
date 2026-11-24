@@ -301,7 +301,7 @@ impl Workbench {
         conn.pending_tab = None;
         conn.pending_sql = None;
         conn.op_generation += 1;
-        conn.uncommitted = false;
+        conn.clear_uncommitted();
         conn.current_schema = None;
         conn.selected_object = None;
         conn.objects.clear();
@@ -326,6 +326,7 @@ impl Workbench {
                     .into(),
             );
         }
+        self.tx_step_done(cid, false, cx);
         cx.notify();
     }
 
@@ -344,21 +345,11 @@ impl Workbench {
         }
         self.set_conn_state(cid, |conn| {
             let pending = conn.pending_op.take();
-            conn.pending_tab = None;
+            let tab = conn.pending_tab.take();
+            let sql = conn.pending_sql.take();
             conn.busy = false;
-            if matches!(
-                (&pending, &resp),
-                (Some(PendingOp::Run), Ok(Response::Executed(_)))
-                    | (Some(PendingOp::ImportCsv { .. }), Ok(Response::Imported(_)))
-                    | (
-                        Some(PendingOp::ObjectOp {
-                            uncommitted: true,
-                            ..
-                        }),
-                        Ok(Response::ObjectOp(_))
-                    )
-            ) {
-                conn.uncommitted = true;
+            if let Ok(resp) = &resp {
+                conn.note_response(pending.as_ref(), resp, sql.as_deref(), tab);
             }
             conn.status = "The stopped operation finished; its result was ignored.".to_string();
         });
@@ -406,20 +397,8 @@ impl Workbench {
                 return;
             }
         };
-        if matches!(
-            (&pending, &resp),
-            (Some(PendingOp::Run), Response::Executed(_))
-                | (Some(PendingOp::ImportCsv { .. }), Response::Imported(_))
-                | (
-                    Some(PendingOp::ObjectOp {
-                        uncommitted: true,
-                        ..
-                    }),
-                    Response::ObjectOp(_)
-                )
-        ) {
-            conn.uncommitted = true;
-        }
+        let tab = conn.pending_tab;
+        conn.note_response(pending.as_ref(), &resp, pending_sql.as_deref(), tab);
         if let Response::Failed(message) = resp {
             self.on_db_failed(cid, pending, message, window, cx);
             return;
@@ -543,9 +522,13 @@ impl Workbench {
             }
             self.set_conn_state(cid, |c| c.connect_error = Some(message.clone()));
         }
+        let ended_tx = matches!(pending, Some(PendingOp::Commit | PendingOp::Rollback));
         self.push_message_for(cid, message);
         self.set_status_for(cid, "Error (see Messages).".to_string());
         self.target_tab_for_mut(cid).results_tab = ResultsTab::Messages;
+        if ended_tx {
+            self.tx_step_done(cid, false, cx);
+        }
         cx.notify();
     }
 }

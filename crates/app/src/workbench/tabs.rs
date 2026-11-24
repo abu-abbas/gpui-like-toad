@@ -256,6 +256,9 @@ impl Workbench {
                             .and_then(|id| self.conn_by_id(id))
                             .and_then(|conn| ui_helpers::environment_badge(conn.access(), theme)),
                     )
+                    .when(self.tab_has_open_tx(tab), |this| {
+                        this.child(transaction::tx_dot(("tab-tx", tab.id), theme))
+                    })
                     // Which connection the tab runs on, once more than one
                     // is open (or "closed" when its connection is gone).
                     .when_some(self.tab_conn_label(tab), |this, (label, closed)| {

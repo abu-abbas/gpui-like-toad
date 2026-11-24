@@ -317,16 +317,22 @@ impl Workbench {
                     .bg(theme.border)
             };
             return bar
-                .child(
-                    action("table-commit", IconName::Check, theme.success, "Commit")
-                        .disabled(unavailable)
-                        .on_click(cx.listener(|this, _, _, cx| this.commit(cx))),
-                )
-                .child(
-                    action("table-rollback", IconName::Undo2, theme.danger, "Rollback")
-                        .disabled(unavailable)
-                        .on_click(cx.listener(|this, _, _, cx| this.rollback(cx))),
-                )
+                .child(self.tx_button(
+                    Button::new("table-commit").ghost().size(px(28.)),
+                    true,
+                    unavailable,
+                    16.,
+                    theme,
+                    cx,
+                ))
+                .child(self.tx_button(
+                    Button::new("table-rollback").ghost().size(px(28.)),
+                    false,
+                    unavailable,
+                    16.,
+                    theme,
+                    cx,
+                ))
                 .child(divider())
                 .child(
                     action(
@@ -559,27 +565,89 @@ impl Workbench {
                 .flex_none()
                 .bg(theme.border),
         )
-        .child(
-            Button::new("commit")
-                .small()
-                .ghost()
-                .icon(Icon::new(IconName::Check).text_color(theme.success))
-                .disabled(busy)
-                .tooltip("Commit")
-                .on_click(cx.listener(|this, _, _, cx| this.commit(cx))),
-        )
-        .child(
-            Button::new("rollback")
-                .small()
-                .ghost()
-                .icon(Icon::new(IconName::Undo2).text_color(theme.danger))
-                .disabled(busy)
-                .tooltip("Rollback")
-                .on_click(cx.listener(|this, _, _, cx| this.rollback(cx))),
-        )
+        .child(self.tx_button(
+            Button::new("commit").small().ghost(),
+            true,
+            busy,
+            14.,
+            theme,
+            cx,
+        ))
+        .child(self.tx_button(
+            Button::new("rollback").small().ghost(),
+            false,
+            busy,
+            14.,
+            theme,
+            cx,
+        ))
     }
 
-    pub(super) fn render_status_bar(&self, theme: &gpui_kit::component::Theme) -> impl IntoElement {
+    /// Toolbar Commit (`commit`) or Rollback. In colour with a yellow dot
+    /// while the connection holds uncommitted changes; dimmed otherwise
+    /// but still clickable, since tracking is best effort (a procedure
+    /// call that writes is not always recognised).
+    fn tx_button(
+        &self,
+        button: Button,
+        commit: bool,
+        disabled: bool,
+        size: f32,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let changes = self.conn.pending_changes();
+        let open = changes > 0 && self.conn.session.is_some();
+        let (symbol, color, verb) = if commit {
+            (IconName::Check, theme.success, "Commit")
+        } else {
+            (IconName::Undo2, theme.danger, "Rollback")
+        };
+        let tip = if open {
+            let noun = if changes == 1 { "change" } else { "changes" };
+            format!("{verb} ({changes} uncommitted {noun})")
+        } else {
+            format!("{verb} (no uncommitted changes)")
+        };
+        let color = if open {
+            color
+        } else {
+            theme.muted_foreground.opacity(0.6)
+        };
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                button
+                    .icon(icon(symbol, size, color))
+                    .disabled(disabled)
+                    .tooltip(tip)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if commit {
+                            this.commit(cx)
+                        } else {
+                            this.rollback(cx)
+                        }
+                    })),
+            )
+            .when(open, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .right(px(2.))
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(theme.warning),
+                )
+            })
+    }
+
+    pub(super) fn render_status_bar(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let (dot_color, conn_label, conn_detail) = self.conn_status(theme);
         // Connected: say which connection this is; the login, default
         // database and extension go in the tooltip, because the explorer
@@ -632,7 +700,8 @@ impl Workbench {
                             })
                         })
                         .child(conn_text),
-                ),
+                )
+                .children(self.render_uncommitted_badge(theme, cx)),
         );
         if let Some(elapsed) = self.active_tab().elapsed_ms {
             bar = bar.child(

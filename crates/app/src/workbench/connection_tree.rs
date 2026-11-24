@@ -772,6 +772,9 @@ impl Workbench {
         tree = tree.child(branches);
         if self.show_demo {
             let active = self.conn.session.is_some() && self.conn.demo_mode;
+            let open_tx = self
+                .find_open_conn(None, true)
+                .is_some_and(|id| self.conn_has_open_tx(id));
             tree = tree.child(
                 sidebar::tree_button(Button::new("demo"), keyboard, cx)
                     .small()
@@ -781,6 +784,9 @@ impl Workbench {
                     .on_click(cx.listener(|this, _, window, cx| this.connect(true, window, cx)))
                     .child(
                         connection_tree_label(IconName::Database, "Demo".into(), None, theme)
+                            .when(open_tx, |row| {
+                                row.child(transaction::tx_dot("demo-tx", theme))
+                            })
                             .when(active, |row| row.child(status_dot(theme.success))),
                     ),
             );
@@ -807,6 +813,9 @@ impl Workbench {
             .find_open_conn(Some(ix), false)
             .and_then(|id| self.conn_by_id(id))
             .is_some_and(|c| c.session.is_some());
+        let open_tx = self
+            .find_open_conn(Some(ix), false)
+            .is_some_and(|id| self.conn_has_open_tx(id));
         let environment = profile.access.environment;
         let environment_color = match environment {
             ConnectionEnvironment::Development => theme.success,
@@ -955,6 +964,9 @@ impl Workbench {
                         })
                         .when(active || focused, |row| {
                             row.font_weight(FontWeight::SEMIBOLD)
+                        })
+                        .when(open_tx, |row| {
+                            row.child(transaction::tx_dot(("profile-tx", ix), theme))
                         })
                         .when(environment != ConnectionEnvironment::None, |row| {
                             row.child(
