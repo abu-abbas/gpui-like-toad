@@ -2,7 +2,7 @@
 
 ## 1.0.0 · Unreleased
 
-Minimum Kilat version `0.1.63`.
+Minimum Kilat version `0.1.64`.
 
 - First signed SQL Server package for installation from Settings → Extensions.
 - Connect with a SQL Server login (user and password). The connection is encrypted and the server's certificate is checked; tick "Trust server certificate" in the connection form only for a server you know, such as a development server with a self-signed certificate.
