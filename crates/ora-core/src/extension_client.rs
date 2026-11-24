@@ -375,6 +375,22 @@ impl DbClient for RemoteClient {
         self.decode(&reply, wire::strings_from_json)
     }
 
+    fn explain_analyze(&mut self, sql: &str) -> Result<Vec<String>, DbError> {
+        let reply = self
+            .call("explain_analyze", params(vec![("sql", s(sql))]))
+            .map_err(|e| {
+                if e.to_string().contains("unknown method") {
+                    DbError::new(
+                        "This extension is too old for EXPLAIN ANALYZE. \
+                         Update it in Settings > Extensions.",
+                    )
+                } else {
+                    e
+                }
+            })?;
+        self.decode(&reply, wire::strings_from_json)
+    }
+
     fn explain_plan_nodes(&mut self, sql: &str) -> Result<Vec<PlanNode>, DbError> {
         let reply = self.call("explain_plan_nodes", params(vec![("sql", s(sql))]))?;
         self.decode(&reply, wire::plan_nodes_from_json)

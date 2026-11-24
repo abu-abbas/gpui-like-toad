@@ -289,3 +289,61 @@ fn bad_logins_and_targets_are_readable() {
     assert!(db.connect(&profile(""), "x").is_err());
     assert!(db.connect(&profile("127.0.0.1:notaport/db"), "x").is_err());
 }
+
+#[test]
+fn explain_analyze_runs_and_always_rolls_back() {
+    let Some(mut db) = connect() else {
+        return;
+    };
+    for sql in [
+        "DROP TABLE IF EXISTS kt_ea",
+        "CREATE TABLE kt_ea (id int PRIMARY KEY, v text)",
+        "INSERT INTO kt_ea VALUES (1, 'a'), (2, 'b')",
+    ] {
+        db.execute(sql).unwrap();
+    }
+    db.commit().unwrap();
+    let count = |db: &mut PostgresClient| {
+        db.query("SELECT count(*) FROM kt_ea", FetchLimits::rows(5))
+            .unwrap()
+            .rows[0][0]
+            .display()
+    };
+
+    // A read shows measured times.
+    let plan = db.explain_analyze("SELECT * FROM kt_ea;").unwrap();
+    assert!(plan.iter().any(|l| l.contains("actual time")), "{plan:?}");
+
+    // A DELETE executes (the plan reports its rows) and is undone.
+    let plan = db.explain_analyze("DELETE FROM kt_ea").unwrap();
+    assert!(plan.iter().any(|l| l.contains("Delete")), "{plan:?}");
+    assert_eq!(count(&mut db), "2");
+
+    // Inside the caller's transaction: its own changes survive.
+    db.execute("INSERT INTO kt_ea VALUES (3, 'c')").unwrap();
+    db.explain_analyze("DELETE FROM kt_ea").unwrap();
+    assert_eq!(count(&mut db), "3");
+    db.rollback().unwrap();
+    assert_eq!(count(&mut db), "2");
+
+    // Refused: scripts, DDL, other commands. Nothing ran.
+    for sql in [
+        "SELECT 1; DELETE FROM kt_ea",
+        "DROP TABLE kt_ea",
+        "TRUNCATE kt_ea",
+        "",
+    ] {
+        assert!(db.explain_analyze(sql).is_err(), "{sql}");
+    }
+    assert_eq!(count(&mut db), "2");
+
+    // A failing statement leaves the session usable, in and out of a tx.
+    assert!(db.explain_analyze("SELECT * FROM missing_table").is_err());
+    db.execute("INSERT INTO kt_ea VALUES (4, 'd')").unwrap();
+    assert!(db.explain_analyze("SELECT * FROM missing_table").is_err());
+    assert_eq!(count(&mut db), "3");
+    db.rollback().unwrap();
+
+    db.execute("DROP TABLE kt_ea").unwrap();
+    db.commit().unwrap();
+}

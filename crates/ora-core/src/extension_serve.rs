@@ -241,6 +241,10 @@ fn handle(client: &mut dyn DbClient, method: &str, p: &Json, emit: Emit) -> Resu
             .explain_plan(&text(p, "sql")?)
             .map(|v| wire::strings_to_json(&v))
             .map_err(db),
+        "explain_analyze" => client
+            .explain_analyze(&text(p, "sql")?)
+            .map(|v| wire::strings_to_json(&v))
+            .map_err(db),
         "explain_plan_nodes" => client
             .explain_plan_nodes(&text(p, "sql")?)
             .map(|v| wire::plan_nodes_to_json(&v))

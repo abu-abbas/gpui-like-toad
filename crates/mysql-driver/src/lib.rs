@@ -504,30 +504,92 @@ impl DbClient for MysqlClient {
     fn explain_plan(&mut self, sql: &str) -> Result<Vec<String>, DbError> {
         let sql = clean_statement(sql);
         let conn = self.conn()?;
-        let mut res = conn.query_iter(format!("EXPLAIN {sql}")).map_err(db_err)?;
-        let mut lines = Vec::new();
-        if let Some(set) = res.iter() {
-            let names: Vec<String> = set
-                .columns()
-                .as_ref()
-                .iter()
-                .map(|c| c.name_str().into_owned())
-                .collect();
+        explain_lines(conn, &format!("EXPLAIN {sql}"))
+    }
+
+    fn explain_analyze(&mut self, sql: &str) -> Result<Vec<String>, DbError> {
+        let sql = clean_statement(sql);
+        if !ora_core::sql::is_single_statement(sql) {
+            return Err(DbError::new("EXPLAIN ANALYZE runs one statement at a time"));
+        }
+        // No DDL: MySQL commits it at once, so a rollback could not undo it.
+        if !matches!(
+            first_word(sql).as_str(),
+            "select" | "with" | "values" | "table" | "insert" | "update" | "delete" | "replace"
+        ) {
+            return Err(DbError::new(
+                "EXPLAIN ANALYZE works on SELECT, INSERT, UPDATE, DELETE and REPLACE only",
+            ));
+        }
+        let statement = if self.mariadb {
+            format!("ANALYZE {sql}")
+        } else {
+            format!("EXPLAIN ANALYZE {sql}")
+        };
+        let in_tx = self.in_tx;
+        let conn = self.conn()?;
+        // A savepoint inside the caller's open transaction, else a
+        // transaction of its own; rolled back whether the statement worked
+        // or not. Tables on a non-transactional engine (MyISAM) keep changes.
+        let (open, undo) = if in_tx {
+            (
+                "SAVEPOINT kilat_explain",
+                "ROLLBACK TO SAVEPOINT kilat_explain",
+            )
+        } else {
+            ("START TRANSACTION", "ROLLBACK")
+        };
+        conn.query_drop(open).map_err(db_err)?;
+        let result = explain_lines(conn, &statement);
+        let undone = conn.query_drop(undo);
+        if in_tx {
+            let _ = conn.query_drop("RELEASE SAVEPOINT kilat_explain");
+        }
+        let lines = result?;
+        undone.map_err(|e| {
+            DbError::new(format!(
+                "The plan ran but the rollback failed, check your data: {}",
+                db_err(e)
+            ))
+        })?;
+        Ok(lines)
+    }
+}
+
+/// Run an EXPLAIN-like statement. A one-column answer (EXPLAIN ANALYZE) is
+/// already text, split into lines; a table (EXPLAIN, MariaDB ANALYZE) is a
+/// header and one `a | b | c` line per row.
+fn explain_lines(conn: &mut Conn, sql: &str) -> Result<Vec<String>, DbError> {
+    let mut res = conn.query_iter(sql).map_err(db_err)?;
+    let mut lines = Vec::new();
+    if let Some(set) = res.iter() {
+        let names: Vec<String> = set
+            .columns()
+            .as_ref()
+            .iter()
+            .map(|c| c.name_str().into_owned())
+            .collect();
+        let single = names.len() == 1;
+        if !single {
             lines.push(names.join(" | "));
-            for row in set {
-                let cells: Vec<String> = row
-                    .map_err(db_err)?
-                    .unwrap()
-                    .into_iter()
-                    .map(|v| match v {
-                        My::NULL => "NULL".to_string(),
-                        My::Bytes(b) => String::from_utf8_lossy(&b).into_owned(),
-                        other => other.as_sql(true).trim_matches('\'').to_string(),
-                    })
-                    .collect();
+        }
+        for row in set {
+            let cells: Vec<String> = row
+                .map_err(db_err)?
+                .unwrap()
+                .into_iter()
+                .map(|v| match v {
+                    My::NULL => "NULL".to_string(),
+                    My::Bytes(b) => String::from_utf8_lossy(&b).into_owned(),
+                    other => other.as_sql(true).trim_matches('\'').to_string(),
+                })
+                .collect();
+            if single {
+                lines.extend(cells[0].lines().map(str::to_string));
+            } else {
                 lines.push(cells.join(" | "));
             }
         }
-        Ok(lines)
     }
+    Ok(lines)
 }

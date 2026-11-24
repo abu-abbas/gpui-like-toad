@@ -498,6 +498,20 @@ impl Workbench {
                         .tooltip("Explain plan")
                         .on_click(cx.listener(|this, _, _, cx| this.explain(cx))),
                 )
+                .children(
+                    self.active_dialect()
+                        .capabilities()
+                        .explain_analyze
+                        .then(|| {
+                            Button::new("explain-analyze")
+                                .small()
+                                .ghost()
+                                .icon(IconName::Activity)
+                                .disabled(busy)
+                                .tooltip("Explain analyze (runs the statement, then rolls it back)")
+                                .on_click(cx.listener(|this, _, _, cx| this.explain_analyze(cx)))
+                        }),
+                )
                 .child(
                     Button::new("run-current")
                         .small()

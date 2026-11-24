@@ -798,6 +798,17 @@ pub fn select_script(sql: &str) -> Option<Vec<String>> {
     .then(|| parts.into_iter().map(str::to_owned).collect())
 }
 
+/// True when `sql` holds exactly one statement (a trailing `;` and comments
+/// do not count). Drivers refuse EXPLAIN ANALYZE of anything else, so a
+/// script cannot run a second statement unnoticed.
+pub fn is_single_statement(sql: &str) -> bool {
+    statement_spans(sql)
+        .into_iter()
+        .filter(|(a, b)| !skip_leading_comments(clean_statement(sql[*a..*b].trim())).is_empty())
+        .count()
+        == 1
+}
+
 fn statement_spans(sql: &str) -> Vec<(usize, usize)> {
     let bytes = sql.as_bytes();
     let mut spans: Vec<(usize, usize)> = Vec::new();
@@ -874,6 +885,15 @@ pub fn statement_at(sql: &str, cursor: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn single_statement_detection() {
+        assert!(is_single_statement("SELECT 1"));
+        assert!(is_single_statement("  select ';' from t; -- done\n"));
+        assert!(!is_single_statement("SELECT 1; DELETE FROM t"));
+        assert!(!is_single_statement(""));
+        assert!(!is_single_statement("-- only a comment"));
+    }
+
     use super::*;
 
     #[test]
