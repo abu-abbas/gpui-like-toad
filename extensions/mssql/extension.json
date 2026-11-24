@@ -4,5 +4,5 @@
   "description": "Connect to Microsoft SQL Server (SQL login, TLS).",
   "kind": "database",
   "crate": "kilat-ext-mssql",
-  "min_app": "0.1.63"
+  "min_app": "0.1.64"
 }
