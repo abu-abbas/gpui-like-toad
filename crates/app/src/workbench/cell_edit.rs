@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use ora_core::Value;
 
 use super::*;
-use crate::results::{CellEditRequest, CellMark};
+use crate::results::{CellEditRequest, CellKey, CellMark, InlineCell};
 use crate::worker::CellUpdate;
 
 /// One edited cell of a data tab.
@@ -34,6 +34,13 @@ impl CellEdit {
             CellMark::Staged
         }
     }
+}
+
+/// The in-place editor of one grid cell.
+pub(super) struct InlineEdit {
+    request: CellEditRequest,
+    input: Entity<InputState>,
+    _blur: Subscription,
 }
 
 /// The edit dialog.
@@ -258,6 +265,202 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Connections where edits are sent and committed right away, as in
+    /// Navicat: everything but Oracle (whose transactions are explicit,
+    /// as in Toad) and Production-flagged connections.
+    pub(super) fn auto_save(&self) -> bool {
+        self.active_kind() != DbKind::Oracle
+            && self.conn.access().environment != ConnectionEnvironment::Production
+    }
+
+    /// Send what is staged when the connection saves by itself.
+    pub(super) fn auto_apply(&mut self, cx: &mut Context<Self>) {
+        if self.auto_save() && !self.conn.busy && self.has_staged_edits() {
+            self.apply_edits(cx);
+        }
+    }
+
+    /// Edit one cell where it is (double click, Enter, F2, Tab).
+    pub(super) fn open_inline_editor(
+        &mut self,
+        request: CellEditRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.blocked_by_read_only("cannot edit cells", cx) {
+            return;
+        }
+        // The previous cell keeps what was typed.
+        self.close_inline(true, cx);
+        let initial = if request.value.is_null() {
+            String::new()
+        } else {
+            request.value.display()
+        };
+        let input = cx.new(|cx| {
+            InputState::new(&mut *window, cx)
+                .placeholder("NULL")
+                .default_value(initial)
+        });
+        // Clicking elsewhere ends the edit and keeps the value.
+        let blur = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::Blur) && this.close_inline(true, cx).is_some() {
+                this.auto_apply(cx);
+            }
+        });
+        let table = self.active_tab().table_state.clone();
+        let shown = InlineCell {
+            rowid: request.rowid.clone(),
+            column: request.column.clone(),
+            input: input.clone(),
+        };
+        table.update(cx, |state, cx| {
+            state.delegate_mut().set_inline(Some(shown));
+            cx.notify();
+        });
+        self.inline_edit = Some(InlineEdit {
+            request,
+            input: input.clone(),
+            _blur: blur,
+        });
+        // The table takes focus while the click is handled: focus the box
+        // after that.
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |state, cx| state.focus(window, cx));
+        });
+        cx.notify();
+    }
+
+    /// Close the in-place editor; `save` stages what was typed. Returns the
+    /// cell it was editing.
+    fn close_inline(&mut self, save: bool, cx: &mut Context<Self>) -> Option<CellEditRequest> {
+        let edit = self.inline_edit.take()?;
+        let typed = edit.input.read(cx).value().to_string();
+        let table = self.active_tab().table_state.clone();
+        table.update(cx, |state, cx| {
+            state.delegate_mut().set_inline(None);
+            cx.notify();
+        });
+        if save {
+            // Oracle stores an empty string as NULL, so an empty box is NULL.
+            let new = (!typed.is_empty()).then_some(typed);
+            self.stage_edit(edit.request.clone(), new, cx);
+        }
+        Some(edit.request)
+    }
+
+    /// Tab / Shift+Tab / Enter / Escape in an insert-row field or the
+    /// in-place editor.
+    pub(super) fn handle_cell_key(
+        &mut self,
+        key: CellKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(from) = self.inline_edit.as_ref().map(|e| e.request.pos) else {
+            return self.insert_key(key, window, cx);
+        };
+        if key == CellKey::Cancel {
+            self.close_inline(false, cx);
+            cx.notify();
+            return;
+        }
+        self.close_inline(true, cx);
+        let table = self.active_tab().table_state.clone();
+        let target = table.read(cx).delegate().neighbor_request(from, key);
+        // Leaving the row sends the change when the connection saves by itself.
+        if target.as_ref().is_none_or(|t| t.pos.0 != from.0) {
+            self.auto_apply(cx);
+        }
+        let Some(target) = target else {
+            cx.notify();
+            return;
+        };
+        let at = table.update(cx, |state, cx| {
+            let at = state.delegate_mut().pick_request(&target);
+            if let Some((row, col)) = at {
+                state.scroll_to_row(row, cx);
+                state.scroll_to_col(col, cx);
+            }
+            at
+        });
+        if at.is_some() {
+            self.open_inline_editor(target, window, cx);
+        }
+    }
+
+    /// Enter / F2 on the picked cell: edit it in place.
+    pub(super) fn edit_picked_cell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.inline_edit.is_some() || self.focused_insert_cell(window, cx).is_some() {
+            return false;
+        }
+        let tab = self.active_tab();
+        if tab.conn != Some(self.conn.id)
+            || tab.data.as_ref().is_none_or(|d| d.view != DataView::Data)
+        {
+            return false;
+        }
+        let Some(request) = tab.table_state.read(cx).delegate().picked_edit_request() else {
+            return false;
+        };
+        self.open_inline_editor(request, window, cx);
+        true
+    }
+
+    /// Tab / Enter between the fields of the rows being added.
+    fn insert_key(&mut self, key: CellKey, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((row, name)) = self.focused_insert_cell(window, cx) else {
+            return;
+        };
+        let Some(data) = self.data_mut() else {
+            return;
+        };
+        let shown: Vec<usize> = data
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !data.hidden.contains(*c))
+            .map(|(ix, _)| ix)
+            .collect();
+        let Some(pos) = shown.iter().position(|&ix| data.columns[ix] == name) else {
+            return;
+        };
+        let (mut r, mut c) = (row, pos as isize);
+        match key {
+            CellKey::Cancel => return,
+            CellKey::Next | CellKey::Done => c += 1,
+            CellKey::Prev | CellKey::Up => c -= 1,
+        }
+        if c < 0 {
+            if r == 0 {
+                return;
+            }
+            r -= 1;
+            c = shown.len() as isize - 1;
+        } else if c as usize >= shown.len() {
+            r += 1;
+            c = 0;
+        }
+        let Some(field) = data
+            .insert_rows
+            .get(r)
+            .map(|fields| fields[shown[c as usize]].1.clone())
+        else {
+            // Past the last field of the last new row: send it.
+            self.auto_apply(cx);
+            return;
+        };
+        let table = self.active_tab().table_state.clone();
+        table.update(cx, |state, cx| {
+            let index = state.delegate().page_rows() + r;
+            state.scroll_to_row(index, cx);
+            state.scroll_to_col(1 + c as usize, cx);
+        });
+        window.defer(cx, move |window, cx| {
+            field.update(cx, |state, cx| state.focus(window, cx));
+        });
+    }
+
     /// Send every staged edit of the active data tab as UPDATEs. They stay
     /// uncommitted until the toolbar's Commit.
     pub(super) fn apply_edits(&mut self, cx: &mut Context<Self>) {
@@ -351,24 +554,36 @@ impl Workbench {
                 std::rc::Rc::make_mut(&mut data.insert_rows).drain(..remaining - removed);
             }
         }
+        let auto = error.is_none() && done > 0 && cid == self.conn.id && self.auto_save();
         if changed_rows
             && error.is_none()
             && tab_ix == self.active_tab
             && cid == self.conn.id
             && self.tabs[tab_ix].conn == Some(cid)
         {
-            self.reload_data(cx);
+            if auto {
+                self.reload_after_commit = true;
+            } else {
+                self.reload_data(cx);
+            }
         }
         self.sync_pending(tab_ix, cx);
         match error {
             None => {
                 self.push_message_for(
                     cid,
-                    format!(
-                        "Applied changes: {done}. Use Commit to keep them or Rollback to undo them."
-                    ),
+                    if auto {
+                        format!("Applied changes: {done}. Committing…")
+                    } else {
+                        format!(
+                            "Applied changes: {done}. Use Commit to keep them or Rollback to undo them."
+                        )
+                    },
                 );
                 self.set_status_for(cid, format!("Applied changes: {done} (uncommitted)."));
+                if auto {
+                    self.spawn_db(Job::Commit, PendingOp::Commit, cx);
+                }
             }
             Some(err) => {
                 self.push_message_for(
@@ -406,17 +621,30 @@ impl Workbench {
     }
 
     /// After Commit or Rollback: the tints go away in every data tab.
-    pub(super) fn clear_edit_marks_for(&mut self, conn_id: u64, cx: &mut Context<Self>) {
+    pub(super) fn clear_edit_marks_for(
+        &mut self,
+        conn_id: u64,
+        keep_staged: bool,
+        cx: &mut Context<Self>,
+    ) {
         let conn = Some(conn_id);
         for ix in 0..self.tabs.len() {
             if self.tabs[ix].conn != conn {
                 continue;
             }
             if let Some(data) = self.tabs[ix].data.as_mut() {
-                data.deletes.clear();
-                data.insert_rows = Default::default();
-                if !data.edits.is_empty() {
+                let before = data.edits.len();
+                if keep_staged {
+                    data.edits.retain(|e| !e.applied);
+                    for edit in &mut data.edits {
+                        edit.was_applied = false;
+                    }
+                } else {
+                    data.deletes.clear();
+                    data.insert_rows = Default::default();
                     data.edits.clear();
+                }
+                if before > 0 {
                     self.sync_pending(ix, cx);
                 }
             }

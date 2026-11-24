@@ -150,7 +150,12 @@ impl Workbench {
                 drafts.push(
                     data.columns
                         .iter()
-                        .map(|name| (name.clone(), cx.new(|cx| InputState::new(window, cx))))
+                        .map(|name| {
+                            (
+                                name.clone(),
+                                cx.new(|cx| InputState::new(window, cx).placeholder("(Default)")),
+                            )
+                        })
                         .collect(),
                 );
             }
