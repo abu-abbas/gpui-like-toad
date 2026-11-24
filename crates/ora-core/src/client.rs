@@ -459,4 +459,15 @@ pub trait DbClient: Send {
     fn explain_plan_nodes(&mut self, _sql: &str) -> Result<Vec<PlanNode>, DbError> {
         Err(DbError::new("plan nodes are not supported by this backend"))
     }
+
+    /// `EXPLAIN ANALYZE`: the plan with measured timings and row counts, as
+    /// text lines. This EXECUTES the statement, so a driver that supports it
+    /// must run it inside a transaction (or savepoint) that is always rolled
+    /// back, refuse scripts and DDL, and leave the caller's open transaction
+    /// as it was.
+    fn explain_analyze(&mut self, _sql: &str) -> Result<Vec<String>, DbError> {
+        Err(DbError::new(
+            "EXPLAIN ANALYZE is not supported by this backend",
+        ))
+    }
 }

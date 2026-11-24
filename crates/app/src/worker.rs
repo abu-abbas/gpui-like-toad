@@ -242,6 +242,10 @@ pub enum Job {
     Explain {
         sql: String,
     },
+    /// EXPLAIN ANALYZE: runs the statement, always rolled back.
+    ExplainAnalyze {
+        sql: String,
+    },
     /// Objects and columns of one schema, for the editor's autocomplete.
     Catalog {
         owner: String,
@@ -267,6 +271,8 @@ impl Job {
             Self::ImportCsv { .. } => Some("Import CSV rows"),
             Self::TransferExec { .. } => Some("Data Transfer"),
             Self::Explain { .. } => Some("Write to the Oracle plan table"),
+            // It runs the statement; only a plain SELECT is harmless enough.
+            Self::ExplainAnalyze { sql } if !is_read_query(sql) => Some("EXPLAIN ANALYZE"),
             Self::RefreshMaterializedView { .. } => Some("Refresh materialized view"),
             // Calling a function can write too, so it counts as a change.
             Self::ObjectOp(op) => Some(match op {
@@ -1006,6 +1012,21 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
             },
             None => Response::Failed("not connected".to_string()),
         },
+        Job::ExplainAnalyze { sql } => match client.as_mut() {
+            Some(client) => match client.explain_analyze(&sql) {
+                Ok(mut lines) => {
+                    lines.insert(
+                        0,
+                        "EXPLAIN ANALYZE: the statement was executed, then rolled back."
+                            .to_string(),
+                    );
+                    lines.insert(1, String::new());
+                    Response::Plan(lines)
+                }
+                Err(err) => Response::Failed(err.to_string()),
+            },
+            None => Response::Failed("not connected".to_string()),
+        },
         Job::Explain { sql } => match client.as_mut() {
             Some(client) => {
                 // Prefer structured plan nodes (tree view) with the
@@ -1301,6 +1322,31 @@ mod tests {
             handle_guarded_job(job, false, &mut client, &mut access),
             Response::Failed(message) if message.contains("Read Only")
         ));
+    }
+
+    #[test]
+    fn explain_analyze_is_guarded_unless_the_statement_is_a_plain_select() {
+        let plain = Job::ExplainAnalyze {
+            sql: "SELECT * FROM t".into(),
+        };
+        assert_eq!(plain.protected_operation(), None);
+        for sql in [
+            "DELETE FROM t",
+            "WITH x AS (SELECT 1) DELETE FROM t",
+            "SELECT f(1); DROP TABLE t",
+        ] {
+            let job = Job::ExplainAnalyze { sql: sql.into() };
+            assert_eq!(job.protected_operation(), Some("EXPLAIN ANALYZE"), "{sql}");
+            let mut client: Option<Box<dyn DbClient>> = None;
+            let mut access = ConnectionAccess {
+                read_only: true,
+                ..ConnectionAccess::default()
+            };
+            assert!(matches!(
+                handle_guarded_job(job, true, &mut client, &mut access),
+                Response::Failed(message) if message.contains("Read Only")
+            ));
+        }
     }
 
     use super::*;

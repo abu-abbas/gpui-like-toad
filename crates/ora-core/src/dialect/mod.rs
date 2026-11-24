@@ -142,6 +142,9 @@ pub struct Capabilities {
     pub row_edit: bool,
     /// Explain Plan as formatted text (DBMS_XPLAN), next to the plan tree.
     pub explain_text: bool,
+    /// EXPLAIN ANALYZE: the plan with real timings and row counts. It runs
+    /// the statement, so the app asks first and the driver rolls it back.
+    pub explain_analyze: bool,
     /// `TRUNCATE TABLE`.
     pub truncate: bool,
     /// External and index-organized tables (New Table types).

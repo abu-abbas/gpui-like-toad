@@ -25,6 +25,7 @@ impl Dialect for MysqlDialect {
             transactional_ddl: false,
             row_edit: true,
             explain_text: true,
+            explain_analyze: true,
             truncate: true,
             special_tables: false,
             programs: false,

@@ -485,6 +485,8 @@ pub struct Workbench {
     parked: Vec<ConnState>,
     next_conn_id: u64,
     window_handle: AnyWindowHandle,
+    /// The EXPLAIN ANALYZE hint for plain SELECTs was shown this session.
+    explain_analyze_hinted: bool,
     category: ObjectCategory,
     object_scroll: UniformListScrollHandle,
     /// Schema groups of the explorer the user folded (SQL Server lists a
@@ -608,6 +610,7 @@ impl Workbench {
             parked: Vec::new(),
             next_conn_id: 1,
             window_handle: window.window_handle(),
+            explain_analyze_hinted: false,
             category: ObjectCategory::Tables,
             object_scroll: UniformListScrollHandle::new(),
             collapsed_schemas: HashSet::new(),
