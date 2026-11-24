@@ -1,6 +1,6 @@
 # Dry-run extension release notes
 
-## [1.0.1](https://github.com/abu-abbas/kilat/releases/tag/ext-dryrun-1.0.1) · 2026-11-24
+## [1.0.1](https://github.com/abu-abbas/kilat/releases/tag/ext-dryrun-1.0.1) · 2026-11-25
 
 Minimum Kilat version `0.1.65`.
 
