@@ -504,8 +504,7 @@ impl View {
             meta.push(format!("{} in memory", human_bytes(memory)));
         }
         let mut children = vec![
-            json!({"type": "text", "text": clip(&display(&detail.key), 400), "style": "heading",
-                   "selectable": true}),
+            json!({"type": "text", "text": clip(&display(&detail.key), 400), "style": "heading"}),
             json!({"type": "text", "text": meta.join("  ·  "), "style": "caption", "tone": "muted"}),
             json!({"type": "row", "children": [
                 {"type": "button", "id": "copy-value", "label": "Copy value", "variant": "ghost"},
@@ -597,11 +596,13 @@ impl View {
             "text": format!("Commands run on db{}. Switch databases with the dropdown. {rule} Type clear to empty the log.", self.db)
         })];
         if !self.console.is_empty() {
-            children.push(json!({"type": "code", "text": self.console_text(), "copy": true}));
+            children.push(json!({"type": "code", "text": self.console_text()}));
         }
-        children.push(json!({"type": "input", "id": "console", "value": "",
-                             "placeholder": format!("db{}> command, e.g. HGETALL user:1", self.db),
-                             "clear_on_submit": true}));
+        children.push(json!({"type": "row", "children": [
+            {"type": "text", "text": format!("db{}>", self.db), "style": "mono", "tone": "primary"},
+            {"type": "input", "id": "console", "value": "",
+             "placeholder": "Command, e.g. HGETALL user:1", "clear_on_submit": true}
+        ]}));
         json!({"type": "column", "children": children})
     }
 

@@ -78,6 +78,23 @@ Limits for Kilat: the handshake must finish within 10 seconds, other calls
 may be silent for up to 10 minutes. A call that times out kills the program;
 the next `connect` starts a new one.
 
+## Redis methods
+The Redis extension (`crates/ext-redis`, id `redis`) draws its screens with
+the declarative UI of `docs/extension-ui.md`; it has no data methods of its
+own. Kilat only sends:
+
+| method | params | result |
+|---|---|---|
+| `connect` | `target` `{host, port, username, password, tls}`, `database`, `read_only`, `allow_dangerous`, optional `start_server`, `server_command`, `name`, `instance_id` | `{version, databases, managed_server}`. Fails when Redis does not answer. |
+| `disconnect` | none | `{}`. Stops a local server started by this extension process. |
+| `server.stop` | none | Stops a server owned by the extension and returns the stopped view (a `start-server` button). |
+| `ui.open`, `ui.event`, `ui.tick` | as in `docs/extension-ui.md` | a view update |
+
+The local server's output goes to
+`server-logs/developer-tools/<instance name>.log` and its working folder is
+`server-data/developer-tools/<instance name>/` (so `dump.rdb` stays where
+earlier Kilat versions put it).
+
 ## MailHog methods
 An extension of kind `tool` has its own methods. The MailHog extension
 (`crates/ext-mailhog`, id `mailhog`) wraps the MailHog HTTP API client of
