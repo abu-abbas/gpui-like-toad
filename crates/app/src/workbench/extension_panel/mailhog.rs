@@ -21,14 +21,7 @@ impl ExtensionPanel {
                     text,
                     style: Some(TextStyle::Heading),
                     ..
-                }, select @ Node::Select { .. }, search @ Node::Input { .. }, Node::Button {
-                    id,
-                    label,
-                    disabled,
-                    writes,
-                    confirm,
-                    ..
-                }, list @ Node::List { .. }],
+                }, controls @ ..],
             ) => {
                 let tool_icon = tools::tool_icon(store::ToolKind::MailHog, true, theme);
                 let header = div()
@@ -42,6 +35,39 @@ impl ExtensionPanel {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(tool_icon)
                     .child(text.as_str().to_owned());
+                let panel = div()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .min_h(px(0.))
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .bg(theme.sidebar)
+                    .px(px(SPACE_2))
+                    .py(px(6.))
+                    .gap(px(6.))
+                    .child(header);
+                let [select @ Node::Select { .. }, search @ Node::Input { .. }, Node::Button {
+                    id,
+                    label,
+                    disabled,
+                    writes,
+                    confirm,
+                    ..
+                }, list @ Node::List { .. }] = controls
+                else {
+                    return Some(
+                        panel
+                            .id("mailhog-explorer")
+                            .overflow_y_scroll()
+                            .children(
+                                controls
+                                    .iter()
+                                    .map(|node| self.render_node(node, theme, cx)),
+                            )
+                            .into_any_element(),
+                    );
+                };
                 let refresh = self.action(
                     Action {
                         id,
@@ -58,18 +84,7 @@ impl ExtensionPanel {
                     cx,
                 );
                 Some(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .size_full()
-                        .min_h(px(0.))
-                        .min_w(px(0.))
-                        .overflow_hidden()
-                        .bg(theme.sidebar)
-                        .px(px(SPACE_2))
-                        .py(px(6.))
-                        .gap(px(6.))
-                        .child(header)
+                    panel
                         .child(
                             div()
                                 .flex()
