@@ -1,6 +1,7 @@
 //! Native renderer for the bounded extension UI protocol.
 
 mod mailhog;
+mod redis;
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -13,6 +14,7 @@ use super::*;
 
 struct Field {
     input: Entity<InputState>,
+    clear_on_submit: bool,
     _subscription: Subscription,
     change: Option<gpui_kit::Task<()>>,
 }
@@ -34,7 +36,7 @@ pub(super) struct ExtensionPanel {
     read_only: bool,
     production: bool,
     fields: HashMap<Text, Field>,
-    mailhog: bool,
+    layout: Option<store::ToolKind>,
 }
 
 impl gpui_kit::EventEmitter<Event> for ExtensionPanel {}
@@ -48,12 +50,13 @@ impl ExtensionPanel {
             read_only,
             production,
             fields: HashMap::new(),
-            mailhog: false,
+            layout: None,
         }
     }
 
-    pub fn mailhog(mut self) -> Self {
-        self.mailhog = true;
+    /// Present this tool's trees in its own native layout.
+    pub fn layout(mut self, kind: store::ToolKind) -> Self {
+        self.layout = Some(kind);
         self
     }
 
@@ -75,13 +78,15 @@ impl ExtensionPanel {
     }
 
     fn init_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        fn collect<'a>(tree: &'a Node, fields: &mut Vec<(&'a Text, &'a Text, Option<&'a Text>)>) {
+        type Entry<'a> = (&'a Text, &'a Text, Option<&'a Text>, bool);
+        fn collect<'a>(tree: &'a Node, fields: &mut Vec<Entry<'a>>) {
             match tree {
                 Node::Input {
                     id,
                     value,
                     placeholder,
-                } => fields.push((id, value, placeholder.as_ref())),
+                    clear_on_submit,
+                } => fields.push((id, value, placeholder.as_ref(), *clear_on_submit)),
                 Node::Column { children } | Node::Row { children } => {
                     for child in children {
                         collect(child, fields);
@@ -101,8 +106,8 @@ impl ExtensionPanel {
             collect(tree, &mut entries);
         }
         self.fields
-            .retain(|id, _| entries.iter().any(|(key, _, _)| *key == id));
-        for (id, value, placeholder) in entries {
+            .retain(|id, _| entries.iter().any(|(key, ..)| *key == id));
+        for (id, value, placeholder, clear_on_submit) in entries {
             if self.fields.contains_key(id) {
                 continue;
             }
@@ -112,44 +117,50 @@ impl ExtensionPanel {
                     .default_value(value.as_str().to_owned())
             });
             let key = id.clone();
-            let subscription = cx.subscribe_in(&input, window, move |this, input, event, _, cx| {
-                let Ok(value) = Text::new(input.read(cx).value().to_string()) else {
-                    return;
-                };
-                let Some(field) = this.fields.get_mut(&key) else {
-                    return;
-                };
-                match event {
-                    InputEvent::PressEnter { .. } => {
-                        field.change = None;
-                        this.send(key.clone(), EventKind::Submit { value }, cx);
+            let subscription =
+                cx.subscribe_in(&input, window, move |this, input, event, window, cx| {
+                    let Ok(value) = Text::new(input.read(cx).value().to_string()) else {
+                        return;
+                    };
+                    let Some(field) = this.fields.get_mut(&key) else {
+                        return;
+                    };
+                    match event {
+                        InputEvent::PressEnter { .. } => {
+                            field.change = None;
+                            let clear = field.clear_on_submit;
+                            this.send(key.clone(), EventKind::Submit { value }, cx);
+                            if clear {
+                                input.update(cx, |state, cx| state.set_value("", window, cx));
+                            }
+                        }
+                        InputEvent::Change => {
+                            let key = key.clone();
+                            field.change = Some(cx.spawn(async move |view, cx| {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(250))
+                                    .await;
+                                let _ = view.update(cx, |this, cx| {
+                                    if this.fields.contains_key(&key) {
+                                        this.send(
+                                            key,
+                                            EventKind::Change {
+                                                value: InputValue::Text(value),
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                });
+                            }));
+                        }
+                        _ => {}
                     }
-                    InputEvent::Change => {
-                        let key = key.clone();
-                        field.change = Some(cx.spawn(async move |view, cx| {
-                            cx.background_executor()
-                                .timer(Duration::from_millis(250))
-                                .await;
-                            let _ = view.update(cx, |this, cx| {
-                                if this.fields.contains_key(&key) {
-                                    this.send(
-                                        key,
-                                        EventKind::Change {
-                                            value: InputValue::Text(value),
-                                        },
-                                        cx,
-                                    );
-                                }
-                            });
-                        }));
-                    }
-                    _ => {}
-                }
-            });
+                });
             self.fields.insert(
                 id.clone(),
                 Field {
                     input,
+                    clear_on_submit,
                     _subscription: subscription,
                     change: None,
                 },
@@ -301,7 +312,14 @@ impl ExtensionPanel {
                     }))
                     .child(
                         div()
+                            .p(px(SPACE_3))
+                            .rounded(px(RADIUS_MD))
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.secondary.opacity(0.4))
                             .font_family(theme.mono_font_family.clone())
+                            .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                            .whitespace_normal()
                             .child(content),
                     )
                     .into_any_element()
@@ -448,9 +466,16 @@ impl ExtensionPanel {
                             row.title.as_str().to_owned(),
                             row.subtitle.as_ref().map(|s| s.as_str().to_owned()),
                             row.selected,
+                            row.icon.as_ref().and_then(interface_icon),
+                            row.trailing
+                                .as_ref()
+                                .map(|t| t.as_str().to_owned())
+                                .filter(|t| !t.is_empty()),
                         )
                     })
                     .collect();
+                // Rows without a second line (Redis keys) are one line high.
+                let compact = rows.iter().all(|row| row.2.is_none());
                 let count = rows.len();
                 let theme = theme.clone();
                 let list = uniform_list(
@@ -459,7 +484,8 @@ impl ExtensionPanel {
                     cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
                         range
                             .map(|index| {
-                                let (key, title, subtitle, selected) = &rows[index];
+                                let (key, title, subtitle, selected, glyph, trailing) =
+                                    &rows[index];
                                 let node = node.clone();
                                 let item = key.clone();
                                 let label = if title.is_empty() {
@@ -470,25 +496,55 @@ impl ExtensionPanel {
                                 let row = div()
                                     .id(item.as_str().to_owned())
                                     .flex()
-                                    .flex_col()
                                     .w_full()
-                                    .justify_center()
-                                    .h(px(48.))
                                     .px(px(SPACE_2))
                                     .rounded(px(RADIUS_SM))
                                     .text_size(crate::theme::ui_size(&theme, FONT_LABEL))
-                                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL))
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(subtitle.as_deref().unwrap_or(label).to_owned()),
-                                    )
-                                    .children(
-                                        subtitle
-                                            .as_ref()
-                                            .map(|_| div().truncate().child(label.to_owned())),
-                                    );
+                                    .line_height(crate::theme::ui_size(&theme, LEADING_LABEL));
+                                let row = if compact {
+                                    row.items_center()
+                                        .gap(px(SPACE_2))
+                                        .h(px(28.))
+                                        .children(
+                                            glyph.map(|name| {
+                                                icon(name, 14., theme.muted_foreground)
+                                            }),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w(px(0.))
+                                                .truncate()
+                                                .child(label.to_owned()),
+                                        )
+                                        .children(trailing.as_ref().map(|text| {
+                                            div()
+                                                .flex_none()
+                                                .text_size(crate::theme::ui_size(
+                                                    &theme,
+                                                    FONT_CAPTION,
+                                                ))
+                                                .text_color(theme.muted_foreground)
+                                                .child(text.clone())
+                                        }))
+                                } else {
+                                    row.flex_col()
+                                        .justify_center()
+                                        .h(px(48.))
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(
+                                                    subtitle.as_deref().unwrap_or(label).to_owned(),
+                                                ),
+                                        )
+                                        .children(
+                                            subtitle
+                                                .as_ref()
+                                                .map(|_| div().truncate().child(label.to_owned())),
+                                        )
+                                };
                                 let row = if *selected {
                                     row.bg(theme.accent).text_color(theme.accent_foreground)
                                 } else {
@@ -530,7 +586,16 @@ impl ExtensionPanel {
                 .flex()
                 .flex_col()
                 .gap(px(SPACE_1))
-                .child(text_row(columns.iter()))
+                .font_family(theme.mono_font_family.clone())
+                .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                .child(
+                    text_row(columns.iter())
+                        .pb(px(SPACE_1))
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.muted_foreground),
+                )
                 .children(rows.iter().map(|row| text_row(row.iter())))
                 .into_any_element(),
             Node::Kv { rows } => div()
@@ -602,6 +667,13 @@ fn interface_icon(name: &Text) -> Option<IconName> {
         "search" => Some(IconName::Search),
         "trash" => Some(IconName::Trash),
         "refresh" => Some(IconName::RefreshCw),
+        "key" => Some(IconName::Key),
+        "type-string" => Some(IconName::CaseSensitive),
+        "type-hash" => Some(IconName::Hash),
+        "type-list" => Some(IconName::ListOrdered),
+        "type-set" => Some(IconName::Braces),
+        "type-zset" => Some(IconName::ChartColumn),
+        "type-stream" => Some(IconName::Activity),
         _ => None,
     }
 }
@@ -620,11 +692,20 @@ impl Render for ExtensionPanel {
                 )
                 .into_any_element();
         }
-        if self.mailhog {
+        if self.layout == Some(store::ToolKind::MailHog) {
             if let Some(view) = self
                 .tree
                 .as_ref()
                 .and_then(|tree| self.mailhog_layout(tree, &theme, cx))
+            {
+                return view;
+            }
+        }
+        if self.layout == Some(store::ToolKind::Redis) {
+            if let Some(view) = self
+                .tree
+                .as_ref()
+                .and_then(|tree| self.redis_layout(tree, &theme, cx))
             {
                 return view;
             }
@@ -664,6 +745,7 @@ mod tests {
                     id: id.clone(),
                     value: Text::new("server value".into()).unwrap(),
                     placeholder: None,
+                    clear_on_submit: false,
                 };
                 panel.update(1, Some(Some(tree())), cx);
                 panel.init_fields(window, cx);

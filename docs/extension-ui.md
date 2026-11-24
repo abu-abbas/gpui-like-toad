@@ -1,6 +1,6 @@
 # Extension UI (design, not built yet)
 
-Status: decided in review (2026-11-23), not built yet. Nothing in this document exists in the code.
+Status: decided in review (2026-11-23). Built and used by the MailHog and Redis extensions.
 
 ## Why
 Today SQLite is an extension (a separate program, `docs/extension-protocol.md`)
@@ -44,7 +44,7 @@ copy button), `badge`, `icon` (a name from Kilat's icon set), `link`
 (http and https only; Kilat opens the browser).
 Input: `button` (`variant`, `disabled`, optional `confirm` text that makes
 Kilat ask first), `input` (`placeholder`, `value`, debounced `change`,
-`submit`), `select` (`options`), `checkbox`, `menu` (a dropdown of actions).
+`submit`; `clear_on_submit` empties the box after Enter, for a console line), `select` (`options`), `checkbox`, `menu` (a dropdown of actions).
 Structure: `tabs` (`items`, `active`, one child per tab), `list`, `table`,
 `kv` (key and value rows), `empty` (message in the middle).
 
@@ -126,8 +126,13 @@ Detail (column 3), after the row `a1` was selected:
     ]}
 
 Redis maps the same way: explorer = `select` (database), `select` (type),
-`input` (SCAN pattern), `list` of keys; detail = `tabs` of Value (`code`
-or `table`) and Console (`input` plus `code` for the log).
+`input` (SCAN pattern), `list` of keys (one line per row: `icon`, `title`
+and `trailing` TTL); detail = `tabs` of Value (`code` or `table`) and
+Console (`code` for the log, then a `row` with the prompt `text` and an
+`input` with `clear_on_submit`). A key is a row id, as `k:<text>` or
+`x:<hex>` for bytes that are not text. Strings longer than about 48 KiB are
+cut in the tree and Copy value copies at most 60 KiB, because every string
+on the wire is limited to 64 KiB.
 
 ## What stays in Kilat
 The window, columns, tabs, theme, shortcuts, the keychain, Read Only and
@@ -146,7 +151,7 @@ downloads.
 4. MailHog on this protocol (`kilat-ext-mailhog` already wraps the client;
    its methods become `ui.*`), release workflow option, `min_app`. The built-in
    Inbox stays until the pilot is stable, then is removed like SQLite.
-5. Redis the same way, then the Developer Tools code leaves the app.
+5. Redis the same way (`kilat-ext-redis`), then the bundled Redis code leaves the app. The bundled MailHog stays until its pilot is stable.
 
 ## Decisions (John, 2026-11-23)
 1. **Local server start**: the extension does it itself (option A). It
