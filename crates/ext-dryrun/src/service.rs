@@ -25,6 +25,9 @@ struct Inner {
     phase: Phase,
     report: Option<Report>,
     deadline: Option<Instant>,
+    /// When the statement ran: the rows are locked since then.
+    started: Option<Instant>,
+    hold: Duration,
     revision: u32,
     tab: String,
 }
@@ -40,10 +43,27 @@ impl Inner {
             return Ok(false);
         }
         self.deadline = None;
+        self.started = None;
         self.phase = Phase::RolledBack(why.to_string());
         self.bump();
         self.client.rollback().map_err(|e| e.to_string())?;
         Ok(true)
+    }
+
+    /// Commit the waiting dry run: exactly the rows shown are written.
+    fn commit(&mut self) -> Result<(), String> {
+        if self.phase != Phase::Pending {
+            return Err("There is no dry run waiting to be committed.".into());
+        }
+        self.client.commit().map_err(|e| e.to_string())?;
+        self.deadline = None;
+        self.started = None;
+        self.phase = Phase::Committed;
+        if self.report.as_ref().is_some_and(|r| r.undo.is_some()) {
+            self.tab = "undo".into();
+        }
+        self.bump();
+        Ok(())
     }
 
     fn view(&self) -> Value {
@@ -55,6 +75,8 @@ impl Inner {
             remaining: self
                 .deadline
                 .map(|d| d.saturating_duration_since(Instant::now())),
+            hold: self.hold,
+            locked: self.started.map(|t| t.elapsed()),
         })
     }
 }
@@ -94,6 +116,8 @@ impl Service {
             phase: Phase::Idle,
             report: None,
             deadline: None,
+            started: None,
+            hold,
             revision: 1,
             tab: "changes".into(),
         }));
@@ -157,6 +181,7 @@ impl Service {
                         });
                         inner.phase = Phase::Pending;
                         inner.deadline = Some(Instant::now() + self.hold);
+                        inner.started = Some(Instant::now());
                         inner.report = Some(report);
                         inner.tab = "changes".into();
                         inner.bump();
@@ -202,9 +227,14 @@ impl Service {
                         inner.tab = item.as_str().to_string();
                         inner.bump();
                     }
-                    // The host runs the statement for real; the extension
-                    // has nothing to do.
-                    ("run-for-real", EventKind::Click { .. }) => {}
+                    ("commit", EventKind::Click { .. }) => {
+                        inner.commit()?;
+                        let rows = inner.report.as_ref().map_or(0, |r| r.affected);
+                        effects.push(Effect::Toast {
+                            text: Text::new(format!("Dry-run committed: {rows} row(s)."))
+                                .map_err(str::to_owned)?,
+                        });
+                    }
                     _ => return Err("Unknown Dry-run event.".into()),
                 }
                 let mut view = inner.view();
@@ -264,6 +294,39 @@ mod tests {
         assert_eq!(update.poll_ms, None);
         assert!(rolled_back(&inner));
         assert!(after.to_string().contains("Rolled back by you"));
+    }
+
+    #[test]
+    fn commit_writes_the_dry_run_and_stops_the_timer() {
+        let (mut s, inner) = service(HOLD);
+        call(
+            &mut s,
+            "dryrun.run",
+            json!({"sql": "UPDATE emp SET salary = salary + 10 WHERE dept = 10"}),
+        )
+        .unwrap();
+        let revision = lock(&inner).revision;
+        let after = call(
+            &mut s,
+            "ui.event",
+            json!({"revision": revision, "slot": "main", "node": "commit",
+                   "event": {"type": "click"}}),
+        )
+        .unwrap();
+        let update = decode_update(&after.to_string(), Origin::UserEvent).unwrap();
+        assert_eq!(update.poll_ms, None);
+        assert_eq!(lock(&inner).phase, Phase::Committed);
+        assert!(lock(&inner).deadline.is_none());
+        assert!(after.to_string().contains("Dry-run committed: 2 row(s)."));
+        // Nothing is waiting any more: a second commit is refused.
+        let revision = lock(&inner).revision;
+        call(
+            &mut s,
+            "ui.event",
+            json!({"revision": revision, "slot": "main", "node": "commit",
+                   "event": {"type": "click"}}),
+        )
+        .unwrap_err();
     }
 
     #[test]

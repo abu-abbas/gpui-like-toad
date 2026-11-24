@@ -2,10 +2,14 @@
 
 ## [1.0.1](https://github.com/abu-abbas/kilat/releases/tag/ext-dryrun-1.0.1) · 2026-11-24
 
-Minimum Kilat version `0.1.63`.
+Minimum Kilat version `0.1.65`.
 
+- New look in the Dry-run tab next to Messages: a yellow strip with the row count, how long the rows have been locked and the auto rollback countdown, with Roll back and Commit right there.
+- Commit writes exactly the rows the dry run shows (from its own session); on PROD it asks first and on Read Only connections it is disabled. After a commit the strip turns green and the undo script is one click away.
+- Changed values show the old value struck out in red next to the new value in green. Deleted rows are struck out.
+- Triggers on the table are listed as a side effect, with a note that rows they change are not shown.
 - Dry-run no longer waits forever when the rows are locked by another session that has not committed yet (often the same connection in the SQL editor or a data tab). After 10 seconds it stops and says to Commit or Roll back there first.
-- The trigger warning works again for tables without a schema prefix (the trigger count query had a typo and was skipped).
+- The trigger warning works again for tables without a schema prefix.
 
 ## [1.0.0](https://github.com/abu-abbas/kilat/releases/tag/ext-dryrun-1.0.0) · 2026-11-24
 

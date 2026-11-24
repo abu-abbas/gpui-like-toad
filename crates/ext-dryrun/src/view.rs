@@ -24,6 +24,8 @@ pub enum Phase {
     Pending,
     /// Rolled back; the text says why ("by you", "after 5 minutes").
     RolledBack(String),
+    /// Committed from the Dry-run tab.
+    Committed,
 }
 
 pub struct State<'a> {
@@ -33,6 +35,10 @@ pub struct State<'a> {
     pub tab: &'a str,
     /// Time left before the automatic rollback, while pending.
     pub remaining: Option<Duration>,
+    /// How long the automatic rollback waits in all.
+    pub hold: Duration,
+    /// How long the rows have been locked, while pending.
+    pub locked: Option<Duration>,
 }
 
 fn short(value: &Value) -> String {
@@ -98,16 +104,19 @@ fn changes_table(report: &Report) -> Json {
         .iter()
         .take(rows_shown)
         .map(|change| {
-            let mut row = vec![json!(change.rowid)];
+            let mut row = vec![json!({"text": change.rowid})];
             for &i in &columns {
                 let old = change.old.get(i).map(short).unwrap_or_default();
                 let cell = match (&change.new, change.changed.contains(&i)) {
-                    (Some(new), true) => {
-                        format!("{old} → {}", new.get(i).map(short).unwrap_or_default())
-                    }
-                    _ => old,
+                    (Some(new), true) => json!({
+                        "text": new.get(i).map(short).unwrap_or_default(),
+                        "old": old,
+                    }),
+                    // A deleted row, or an updated row that moved.
+                    (None, _) => json!({"text": old, "removed": true}),
+                    _ => json!({"text": old}),
                 };
-                row.push(json!(cell));
+                row.push(cell);
             }
             Json::Array(row)
         })
@@ -121,8 +130,7 @@ fn changes_table(report: &Report) -> Json {
         children.push(json!({"type": "text", "style": "caption", "tone": "muted",
             "text": format!("Showing {} of {} columns.", columns.len(), report.columns.len())}));
     }
-    children
-        .push(json!({"type": "scroll", "child": {"type": "table", "columns": head, "rows": rows}}));
+    children.push(json!({"type": "diff", "columns": head, "rows": rows}));
     json!({"type": "column", "children": children})
 }
 
@@ -130,61 +138,99 @@ fn text(style: &str, tone: &str, text: &str) -> Json {
     json!({"type": "text", "style": style, "tone": tone, "text": text})
 }
 
+fn rows(n: impl std::fmt::Display) -> String {
+    format!("{n} row(s)")
+}
+
+/// The strip above the result: state, counts, timers and the two actions.
+fn banner(state: &State, report: &Report) -> Json {
+    let mut facts = vec![format!("{} in {}", rows(report.changed_rows), report.table)];
+    if report.affected as usize != report.changed_rows {
+        facts.push(format!("{} affected", report.affected));
+    }
+    if let Some(n) = report.triggers.filter(|n| *n > 0) {
+        facts.push(format!("{n} enabled trigger(s)"));
+    }
+    match state.phase {
+        Phase::Pending => {
+            facts.push("own session, rows are locked".into());
+            let mut children = Vec::new();
+            if let Some(locked) = state.locked {
+                children.push(json!({"type": "badge", "tone": "warning",
+                    "text": format!("Lock {}", countdown(locked))}));
+            }
+            if let Some(left) = state.remaining {
+                let total = state.hold.as_secs_f32().max(1.0);
+                let value = (left.as_secs_f32() / total).clamp(0.0, 1.0);
+                children.push(
+                    json!({"type": "progress", "tone": "warning", "value": value,
+                    "label": "Auto rollback", "trailing": countdown(left)}),
+                );
+            }
+            children.push(
+                json!({"type": "button", "id": "rollback", "label": "Roll back",
+                "variant": "danger", "icon": "undo"}),
+            );
+            children.push(json!({"type": "button", "id": "commit", "label": "Commit",
+            "variant": "success", "icon": "check", "writes": true,
+            "confirm": format!(
+                "Commit this dry run? {} in {} are written for good.",
+                rows(report.affected), report.table
+            )}));
+            json!({"type": "banner", "tone": "warning", "icon": "flask",
+                "title": "Dry-run is waiting · not committed",
+                "text": facts.join(" · "), "children": children})
+        }
+        Phase::Committed => {
+            let mut children = Vec::new();
+            if report.undo.is_some() {
+                children.push(json!({"type": "button", "id": "copy-undo",
+                    "label": "Copy undo script", "icon": "copy", "variant": "secondary"}));
+            }
+            json!({"type": "banner", "tone": "success", "icon": "check",
+                "title": "Committed",
+                "text": facts.join(" · "), "children": children})
+        }
+        Phase::RolledBack(why) => json!({"type": "banner", "tone": "muted", "icon": "undo",
+            "title": format!("Rolled back {why}"),
+            "text": "The database is unchanged. Run Dry-run again to see fresh values."}),
+        Phase::Idle => json!({"type": "banner", "tone": "muted", "icon": "flask",
+            "title": "Dry-run", "text": "Nothing has run yet."}),
+    }
+}
+
 pub fn build(state: &State) -> Json {
     let mut main = Vec::new();
     match state.report {
         None => main.push(json!({"type": "empty", "text": "Nothing has run yet."})),
         Some(report) => {
-            main.push(text(
-                "heading",
-                "normal",
-                &format!("Dry-run: {} {}", report.kind.label(), report.table),
-            ));
-            match state.phase {
-                Phase::Pending => {
-                    let left = state
-                        .remaining
-                        .map(|d| format!(" Rolls back by itself in {}.", countdown(d)))
-                        .unwrap_or_default();
-                    main.push(text(
-                        "body",
-                        "warning",
-                        &format!("Not committed.{left} Rows stay locked until then."),
-                    ));
-                }
-                Phase::RolledBack(why) => main.push(text(
-                    "body",
-                    "success",
-                    &format!("Rolled back {why}. The database is unchanged."),
-                )),
-                Phase::Idle => {}
-            }
-            let mut rows = vec![
-                json!(["Rows affected", report.affected.to_string()]),
-                json!(["Rows that change", report.changed_rows.to_string()]),
-            ];
-            if report.kind == Kind::Update {
-                rows.push(json!([
-                    "Rows left as they were",
-                    report.unchanged_rows.to_string()
-                ]));
-            }
-            main.push(json!({"type": "kv", "rows": rows}));
-            if let Some(n) = report.triggers.filter(|n| *n > 0) {
-                main.push(text(
-                    "body",
-                    "warning",
-                    &format!(
-                        "The table has {n} enabled trigger(s). Work they do outside the \
-                         transaction (autonomous transactions, mail, database links) is not rolled back."
-                    ),
-                ));
-            }
+            main.push(banner(state, report));
             for note in &report.notes {
                 main.push(text("body", "warning", note));
             }
+            let mut changes = vec![json!({
+                "type": "card", "icon": "table", "title": report.table,
+                "badge": report.kind.label(),
+                "badge_tone": match report.kind { Kind::Update => "warning", Kind::Delete => "danger" },
+                "subtitle": match report.kind {
+                    Kind::Update => format!("{} · only changed columns", rows(report.changed_rows)),
+                    Kind::Delete => format!("{} removed", rows(report.changed_rows)),
+                },
+                "child": changes_table(report),
+            })];
+            if let Some(n) = report.triggers.filter(|n| *n > 0) {
+                changes.push(text("caption", "muted", "SIDE EFFECTS · TRIGGERS"));
+                changes.push(json!({
+                    "type": "card", "icon": "zap",
+                    "title": format!("{n} enabled trigger(s) on {}", report.table),
+                    "badge": "NOT SHOWN", "badge_tone": "warning",
+                    "subtitle": "Rows they change are not listed. Work they do outside the \
+                        transaction (autonomous transactions, mail, database links) is not \
+                        rolled back.",
+                }));
+            }
             let mut items = vec![json!({"id": "changes", "label": "Changes",
-                "child": changes_table(report)})];
+                "child": {"type": "column", "children": changes}})];
             items.push(json!({"id": "undo", "label": "Undo script", "child": match &report.undo {
                 Some(script) => json!({"type": "code", "language": "sql", "text": script, "copy": true}),
                 None => json!({"type": "empty", "text": "No undo script for this statement."}),
@@ -197,13 +243,6 @@ pub fn build(state: &State) -> Json {
                 "changes"
             };
             main.push(json!({"type": "tabs", "id": "view", "active": active, "items": items}));
-            main.push(json!({"type": "row", "children": [
-                {"type": "button", "id": "rollback", "label": "Roll back now",
-                 "variant": "secondary", "disabled": *state.phase != Phase::Pending},
-                {"type": "button", "id": "run-for-real", "label": "Run for real",
-                 "variant": "primary", "writes": true,
-                 "confirm": "Run this statement for real in your editor session? It is not rolled back."},
-            ]}));
             main.push(text(
                 "caption",
                 "muted",
@@ -238,13 +277,19 @@ mod tests {
     #[test]
     fn the_view_passes_the_hosts_validator() {
         let report = report();
-        for phase in [Phase::Pending, Phase::RolledBack("by you".into())] {
+        for phase in [
+            Phase::Pending,
+            Phase::RolledBack("by you".into()),
+            Phase::Committed,
+        ] {
             let view = build(&State {
                 revision: 3,
                 phase: &phase,
                 report: Some(&report),
                 tab: "undo",
                 remaining: Some(Duration::from_secs(272)),
+                hold: Duration::from_secs(300),
+                locked: Some(Duration::from_secs(28)),
             });
             let update = decode_update(&view.to_string(), Origin::Open).unwrap();
             assert_eq!(update.revision, 3);
@@ -253,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn update_rows_show_old_arrow_new() {
+    fn update_rows_show_old_and_new_values() {
         let report = report();
         let view = build(&State {
             revision: 1,
@@ -261,10 +306,13 @@ mod tests {
             report: Some(&report),
             tab: "changes",
             remaining: Some(Duration::from_secs(300)),
+            hold: Duration::from_secs(300),
+            locked: Some(Duration::from_secs(0)),
         })
         .to_string();
-        assert!(view.contains("100 → 110"), "{view}");
+        assert!(view.contains(r#"{"old":"100","text":"110"}"#), "{view}");
         assert!(view.contains("5:00"));
+        assert!(view.contains(r#""id":"commit""#), "{view}");
         // The unchanged NAME column is not drawn, the key is.
         assert!(view.contains(r#"["ROWID","ID","SALARY"]"#), "{view}");
     }
@@ -279,6 +327,8 @@ mod tests {
             report: Some(&report),
             tab: "nope",
             remaining: None,
+            hold: Duration::from_secs(300),
+            locked: None,
         });
         decode_update(&view.to_string(), Origin::Open).unwrap();
         assert!(view.to_string().contains("No row would be deleted."));
@@ -297,6 +347,8 @@ mod tests {
             report: Some(&report),
             tab: "changes",
             remaining: None,
+            hold: Duration::from_secs(300),
+            locked: None,
         });
         decode_update(&view.to_string(), Origin::Open).unwrap();
         assert!(view

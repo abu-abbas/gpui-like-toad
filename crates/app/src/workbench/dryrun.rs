@@ -334,39 +334,12 @@ impl Workbench {
         if dry.busy {
             return;
         }
-        if event.node.as_str() == "run-for-real" && matches!(event.event, EventKind::Click { .. }) {
-            self.dryrun_run_for_real(cx);
-            return;
-        }
-        self.dryrun_request("ui.event", json!(event), Origin::UserEvent, cx);
-    }
-
-    /// Roll the dry run back first (it holds the row locks), then run the
-    /// statement through the editor's normal path.
-    fn dryrun_run_for_real(&mut self, cx: &mut Context<Self>) {
-        let Some(dry) = self.dryrun.take() else {
-            return;
-        };
-        self.leave_dryrun_tab(dry.tab_id);
-        let (sql, conn_id, process) = (dry.sql, dry.conn_id, dry.process);
-        cx.notify();
-        spawn_tool_job(
-            cx,
-            move || {
-                if let Some(process) = process {
-                    finish(process);
-                }
-            },
-            move |this, (), cx| {
-                if this.conn.id == conn_id {
-                    this.run_sql(sql, cx);
-                } else {
-                    this.push_message(
-                        "Switch back to the connection of the statement to run it.".to_string(),
-                    );
-                }
-            },
-        );
+        // Commit: the extension commits its own session. Record the
+        // statement in the history once it succeeds, as a normal run does.
+        let committed = (event.node.as_str() == "commit"
+            && matches!(event.event, EventKind::Click { .. }))
+        .then(|| (dry.conn_id, dry.sql.clone()));
+        self.dryrun_request("ui.event", json!(event), Origin::UserEvent, committed, cx);
     }
 
     fn dryrun_request(
@@ -374,6 +347,7 @@ impl Workbench {
         method: &'static str,
         params: serde_json::Value,
         origin: Origin,
+        committed: Option<(u64, String)>,
         cx: &mut Context<Self>,
     ) {
         let Some(dry) = self.dryrun.as_mut().filter(|dry| !dry.busy) else {
@@ -401,7 +375,12 @@ impl Workbench {
                 };
                 dry.busy = false;
                 match result {
-                    Ok(update) => this.apply_dryrun_update(update, cx),
+                    Ok(update) => {
+                        if let Some((conn_id, sql)) = committed {
+                            this.record_run_for(conn_id, &sql);
+                        }
+                        this.apply_dryrun_update(update, cx)
+                    }
                     Err(error) if broken || origin == Origin::Tick => {
                         let error = if stderr.is_empty() {
                             error.to_string()
@@ -473,7 +452,13 @@ impl Workbench {
                         return true;
                     }
                     let revision = dry.revision;
-                    this.dryrun_request("ui.tick", json!(Tick { revision }), Origin::Tick, cx);
+                    this.dryrun_request(
+                        "ui.tick",
+                        json!(Tick { revision }),
+                        Origin::Tick,
+                        None,
+                        cx,
+                    );
                     false
                 });
                 if !matches!(again, Ok(true)) {
@@ -571,7 +556,8 @@ impl Workbench {
             .border_b_1()
             .border_color(theme.border)
             .child(caption_text(
-                "Runs in its own session and never commits. Close rolls it back.".to_string(),
+                "Runs in its own Oracle session. Closing rolls back anything not committed."
+                    .to_string(),
                 theme,
             ))
             .child(
@@ -579,7 +565,7 @@ impl Workbench {
                     .small()
                     .ghost()
                     .icon(IconName::X)
-                    .label("Close and roll back")
+                    .label("Close")
                     .on_click(cx.listener(|this, _, _, cx| this.close_dryrun(cx))),
             );
         div()

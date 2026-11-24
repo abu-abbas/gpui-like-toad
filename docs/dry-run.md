@@ -1,7 +1,7 @@
 # Dry-run (design and phase 1)
 
-Dry-run runs an `UPDATE` or `DELETE` inside a transaction that is never
-committed, shows which rows would change (old value and new value), rolls
+Dry-run runs an `UPDATE` or `DELETE` inside a transaction that is not
+committed unless you press Commit, shows which rows would change (old value and new value), rolls
 the transaction back (by hand, or by itself after 5 minutes) and writes an
 undo script for the statement. It ships as the extension `dryrun`.
 
@@ -25,9 +25,11 @@ So it becomes a third kind, `action`:
   the editor's result pane that draws the extension's declarative view (the protocol of
   `extension-ui-protocol.md`, slot `main`). The diff, the warnings and the
   undo script are all view trees; the app has no Dry-run drawing code.
-- "Run for real" in the Dry-run tab closes it and runs the statement through the
-  editor's normal path, so Read Only, PROD confirmation and history keep
-  working. The extension never commits.
+- **Commit** in the Dry-run tab (from extension 1.0.1, Kilat 0.1.65) commits
+  the dry run's own session, so exactly the rows shown are written. It is a
+  `writes` button: disabled on Read Only connections, confirmed on PROD, and
+  Kilat records the statement in the history. (1.0.0 had "Run for real",
+  which re-ran the statement in the editor instead.)
 
 Why a separate session instead of the editor's session:
 
@@ -106,14 +108,14 @@ Extension methods (after `hello`):
 | `dryrun.run` | `sql` | `{affected, state}` and the view is ready for `ui.open` |
 | `dryrun.rollback` | none | `{}` |
 | `ui.open` | `slot: "main"` | view |
-| `ui.event` | button ids `rollback`, `copy-undo`, `run-for-real` | view and effects |
+| `ui.event` | button ids `rollback`, `commit`, `copy-undo`; tabs `view` | view and effects |
 | `ui.tick` | none | view (countdown, expired) |
 
-`run-for-real` is not executed by the extension: it is a `button` the app
-treats specially (the extension declares it with `writes: true`), so the
-app's Read Only and PROD guards apply.
+`commit` is declared with `writes: true`, so the app's Read Only and PROD
+guards apply before the event reaches the extension; the extension also
+refuses it unless a dry run is waiting.
 
 ## Release
-Needs an app release (new kind `action`, toolbar button, Dry-run tab) **and** an
+1.0.1 needs Kilat 0.1.65 (new view components, Commit, Dry-run tab). 1.0.0 needed an app release (new kind `action`, toolbar button, Dry-run tab) **and** an
 extension release (`dryrun` 1.0.0, `min_app` the app version that ships the
 button). Order: app first, then the extension.
