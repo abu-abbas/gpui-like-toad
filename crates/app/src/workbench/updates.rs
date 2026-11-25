@@ -10,16 +10,79 @@
 //! still in a private temp directory; only a verified file is handed on.
 //! The request is one anonymous GET of the public API: no identifiers.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui_kit::component::progress::Progress;
-use gpui_kit::component::spinner::Spinner;
 use ora_core::store::{self, UpdatePrefs};
 use ora_core::update::{self, ReleaseInfo};
 
 use crate::release_fetch::{download_asset, fetch_release, install_release, set_http_proxy};
 
 use super::*;
+
+#[derive(Clone, Default)]
+pub(super) struct DownloadProgress(Arc<Mutex<DownloadProgressState>>);
+
+#[derive(Default)]
+struct DownloadProgressState {
+    percent: Option<f32>,
+    package: Option<String>,
+}
+
+impl DownloadProgress {
+    pub(super) fn record(&self, received: u64, total: Option<u64>) {
+        if let Ok(mut state) = self.0.lock() {
+            state.percent = total
+                .filter(|total| *total > 0)
+                .map(|total| received.min(total) as f32 * 100. / total as f32);
+        }
+    }
+
+    pub(super) fn package(&self, name: String) {
+        if let Ok(mut state) = self.0.lock() {
+            state.package = Some(name);
+            state.percent = None;
+        }
+    }
+
+    pub(super) fn watch(&self, cx: &mut Context<Workbench>) {
+        let progress = Arc::downgrade(&self.0);
+        cx.spawn(async move |view, cx| {
+            while progress.strong_count() > 0 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                if view.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn render(
+        &self,
+        id: &'static str,
+        theme: &gpui_kit::component::Theme,
+    ) -> impl IntoElement {
+        let state = self.0.lock().ok();
+        let percent = state.as_ref().and_then(|state| state.percent);
+        let package = state.as_ref().and_then(|state| state.package.clone());
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_1))
+            .children(package.map(|text| caption_text(text, theme)))
+            .child(
+                Progress::new(id)
+                    .small()
+                    .loading(percent.is_none())
+                    .value(percent.unwrap_or_default())
+                    .accessibility_label("Download progress"),
+            )
+    }
+}
 
 enum CheckDialog {
     Checking,
@@ -49,6 +112,7 @@ pub(super) struct UpdateState {
     /// Download of the release file in progress / its outcome.
     downloading: bool,
     download_note: Option<(bool, String)>,
+    progress: Option<DownloadProgress>,
     /// In-app update running (download, verify, install).
     installing: bool,
     /// Update installed; relaunch path (None = relaunch the same path).
@@ -83,6 +147,7 @@ impl UpdateState {
             status: None,
             downloading: false,
             download_note: None,
+            progress: None,
             installing: false,
             staged: None,
         }
@@ -100,7 +165,7 @@ impl Workbench {
     /// Download the file for this OS, then show it in the file manager.
     fn download_update(&mut self, cx: &mut Context<Self>) {
         let u = &mut self.updates;
-        if u.downloading {
+        if u.downloading || u.installing {
             return;
         }
         let Some((info, asset)) = u.available.as_ref().and_then(|r| {
@@ -115,13 +180,19 @@ impl Workbench {
         };
         u.downloading = true;
         u.download_note = Some((false, format!("Downloading and verifying {}…", asset.name)));
-        let task = cx
-            .background_executor()
-            .spawn(async move { download_asset(&info, &asset) });
+        let progress = DownloadProgress::default();
+        u.progress = Some(progress.clone());
+        progress.watch(cx);
+        let task = cx.background_executor().spawn(async move {
+            download_asset(&info, &asset, |received, total| {
+                progress.record(received, total)
+            })
+        });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |this, cx| {
                 this.updates.downloading = false;
+                this.updates.progress = None;
                 this.updates.download_note = Some(match result {
                     Ok(path) => {
                         cx.reveal_path(&path);
@@ -150,13 +221,17 @@ impl Workbench {
             false,
             format!("Downloading and installing {}…", info.version),
         ));
-        let task = cx
-            .background_executor()
-            .spawn(async move { install_release(&info) });
+        let progress = DownloadProgress::default();
+        u.progress = Some(progress.clone());
+        progress.watch(cx);
+        let task = cx.background_executor().spawn(async move {
+            install_release(&info, |received, total| progress.record(received, total))
+        });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |this, cx| {
                 this.updates.installing = false;
+                this.updates.progress = None;
                 this.updates.download_note = Some(match result {
                     Ok(path) => {
                         this.updates.staged = Some(path);
@@ -891,7 +966,7 @@ impl Workbench {
                             let b = Button::new("update-download")
                                 .label("Download")
                                 .icon(IconName::Download)
-                                .disabled(downloading)
+                                .disabled(downloading || installing)
                                 .on_click(cx.listener(|this, _, _, cx| this.download_update(cx)));
                             if can_install {
                                 b
@@ -916,18 +991,10 @@ impl Workbench {
             } else {
                 caption_text(text, theme)
             };
-            // A spinner next to the note while the update downloads/installs.
-            page = page.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(SPACE_2))
-                    .when(downloading, |row| {
-                        row.child(Spinner::new().small().color(theme.primary))
-                    })
-                    .child(line),
-            );
+            page = page.child(line);
+        }
+        if let Some(progress) = &self.updates.progress {
+            page = page.child(progress.render("kilat-download-progress", theme));
         }
         let notes = release.notes.trim();
         if notes.is_empty() {

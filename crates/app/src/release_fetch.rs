@@ -242,6 +242,7 @@ fn fetch_proof_from(
 /// verifies it, then the directory is dropped).
 fn download_to_staging(
     asset: &update::Asset,
+    progress: &mut impl FnMut(u64, Option<u64>),
 ) -> Result<(tempfile::TempDir, std::path::PathBuf), String> {
     use std::io::Write as _;
     if asset.size > MAX_DOWNLOAD_BYTES {
@@ -261,6 +262,17 @@ fn download_to_staging(
         let mut resp = download_agent()?.get(&asset.url).call().map_err(net_err)?;
         let mut file = std::fs::File::create(&temp).map_err(net_err)?;
         let mut reader = resp.body_mut().with_config().limit(limit).reader();
+        let total = (asset.size > 0).then_some(asset.size);
+        let mut received = 0;
+        progress(0, total);
+        // Keep std::io::copy's handling of interrupted reads and writes.
+        let mut reader = DownloadReader {
+            reader: &mut reader,
+            on_read: |count| {
+                received += count;
+                progress(received, total);
+            },
+        };
         let copied = std::io::copy(&mut reader, &mut file).map_err(net_err)?;
         file.flush().map_err(net_err)?;
         if asset.size > 0 && copied != asset.size {
@@ -270,7 +282,21 @@ fn download_to_staging(
             ));
         }
     }
+    progress(0, None);
     Ok((staging, temp))
+}
+
+struct DownloadReader<R, F> {
+    reader: R,
+    on_read: F,
+}
+
+impl<R: std::io::Read, F: FnMut(u64)> std::io::Read for DownloadReader<R, F> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.reader.read(buf)?;
+        (self.on_read)(count as u64);
+        Ok(count)
+    }
 }
 
 /// Blocking: download `asset` into a fresh owner-only temp directory,
@@ -280,9 +306,10 @@ fn download_to_staging(
 pub(crate) fn download_asset(
     info: &ReleaseInfo,
     asset: &update::Asset,
+    mut progress: impl FnMut(u64, Option<u64>),
 ) -> Result<std::path::PathBuf, String> {
     let proof = fetch_proof(info, asset)?;
-    let (_staging, temp) = download_to_staging(asset)?;
+    let (_staging, temp) = download_to_staging(asset, &mut progress)?;
     proof.verify_and_deliver(&temp, &download_dir(), release_verify::release_public_key())
 }
 
@@ -334,8 +361,11 @@ pub(crate) fn fetch_extension_index() -> Result<ExtensionIndex, String> {
 /// Blocking: download one extension for this machine, verify checksum
 /// and signature (signed for exactly `entry.version`), and put it under
 /// the config folder. Refuses a build for another app version or platform.
-pub(crate) fn install_extension(entry: &IndexEntry) -> Result<store::RemoteInstall, String> {
-    install_extension_inner(entry).inspect_err(|err| {
+pub(crate) fn install_extension(
+    entry: &IndexEntry,
+    mut progress: impl FnMut(u64, Option<u64>),
+) -> Result<store::RemoteInstall, String> {
+    install_extension_inner(entry, &mut progress).inspect_err(|err| {
         crate::error_log::append(&format!(
             "Extension install failed: {} {} (tag {}, {}): {err}",
             entry.id,
@@ -346,7 +376,10 @@ pub(crate) fn install_extension(entry: &IndexEntry) -> Result<store::RemoteInsta
     })
 }
 
-fn install_extension_inner(entry: &IndexEntry) -> Result<store::RemoteInstall, String> {
+fn install_extension_inner(
+    entry: &IndexEntry,
+    progress: &mut impl FnMut(u64, Option<u64>),
+) -> Result<store::RemoteInstall, String> {
     let app = update::Version::parse(env!("CARGO_PKG_VERSION"))
         .ok_or_else(|| "Unknown app version.".to_string())?;
     if !entry.compatible_with(app) {
@@ -370,8 +403,8 @@ fn install_extension_inner(entry: &IndexEntry) -> Result<store::RemoteInstall, S
         .ok_or_else(|| format!("{file} is missing from release {}.", entry.tag))?;
     let proof = fetch_proof_from(&assets, &entry.version.to_string(), &asset)
         .map_err(|e| format!("checksum/signature: {e}"))?;
-    let (_staging, temp) =
-        download_to_staging(&asset).map_err(|e| format!("downloading {}: {e}", asset.name))?;
+    let (_staging, temp) = download_to_staging(&asset, progress)
+        .map_err(|e| format!("downloading {}: {e}", asset.name))?;
     proof
         .verify_file(&temp, release_verify::release_public_key())
         .map_err(|e| format!("verifying {}: {e}", asset.name))?;
@@ -407,7 +440,10 @@ impl gpui_updater_core::UpdateSource for ReleaseSource {
 /// The engine checks the file under `Strict` (checksum and signature both
 /// required), then the same [`ReleaseProof::verify_file`] as the Download
 /// button runs on it before it is installed.
-pub(crate) fn install_release(info: &ReleaseInfo) -> Result<Option<std::path::PathBuf>, String> {
+pub(crate) fn install_release(
+    info: &ReleaseInfo,
+    mut progress: impl FnMut(u64, Option<u64>),
+) -> Result<Option<std::path::PathBuf>, String> {
     use gpui_updater_core as up;
     let asset = update::pick_installable(&info.assets, std::env::consts::OS)
         .cloned()
@@ -431,7 +467,8 @@ pub(crate) fn install_release(info: &ReleaseInfo) -> Result<Option<std::path::Pa
         .check()
         .map_err(net_err)?
         .ok_or_else(|| "You're up to date.".to_string())?;
-    let artifact = engine.download(&release, |_, _| {}).map_err(net_err)?;
+    let artifact = engine.download(&release, &mut progress).map_err(net_err)?;
+    progress(0, None);
     proof.verify_file(artifact.path(), release_verify::release_public_key())?;
     let installed = engine.install(&artifact).map_err(net_err)?;
     Ok(installed.restart_path)

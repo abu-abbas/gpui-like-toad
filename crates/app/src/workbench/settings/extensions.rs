@@ -8,9 +8,11 @@
 //! only while its program is on disk. Saved connections, tools and
 //! passwords are never deleted.
 
+use super::super::updates::DownloadProgress;
 use super::appearance::setting_group;
 use super::setting_row_owned;
 use super::*;
+use gpui_kit::component::progress::Progress;
 use ora_core::extension_index::{self, IndexEntry};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,7 @@ pub(super) struct OnlineState {
     /// The index is being fetched (Check for updates).
     checking: bool,
     download: Option<ExtensionDownload>,
+    progress: Option<DownloadProgress>,
     /// (is_error, text) of the last action.
     note: Option<(bool, String)>,
 }
@@ -198,11 +201,18 @@ impl Workbench {
             false,
             format!("Downloading and verifying {} updates…", updates.len()),
         ));
+        let progress = DownloadProgress::default();
+        online.progress = Some(progress.clone());
+        progress.watch(cx);
         let task = cx.background_executor().spawn(async move {
             let mut updated = Vec::new();
             let mut failed = Vec::new();
-            for (name, entry) in updates {
-                match crate::release_fetch::install_extension(&entry) {
+            let count = updates.len();
+            for (index, (name, entry)) in updates.into_iter().enumerate() {
+                progress.package(format!("{} of {count} · {name}", index + 1));
+                match crate::release_fetch::install_extension(&entry, |received, total| {
+                    progress.record(received, total)
+                }) {
                     Ok(installed) => updated.push(format!("{name} {}", installed.version)),
                     Err(error) => failed.push(format!("{name} ({error})")),
                 }
@@ -214,6 +224,7 @@ impl Workbench {
             let _ = view.update(cx, |this, cx| {
                 let online = &mut this.settings.ext_online;
                 online.download = None;
+                online.progress = None;
                 online.refresh_installed();
                 let mut summary = Vec::new();
                 if !updated.is_empty() {
@@ -248,6 +259,9 @@ impl Workbench {
         let online = &mut self.settings.ext_online;
         online.download = Some(ExtensionDownload::Single(id));
         online.note = Some((false, format!("Downloading and verifying {name}…")));
+        let progress = DownloadProgress::default();
+        online.progress = Some(progress.clone());
+        progress.watch(cx);
         let task = cx.background_executor().spawn(async move {
             let index = crate::release_fetch::fetch_extension_index().inspect_err(|e| {
                 crate::error_log::append(&format!(
@@ -258,7 +272,9 @@ impl Workbench {
                 .get(id)
                 .cloned()
                 .ok_or_else(|| format!("{name} is not in the online index."))?;
-            let installed = crate::release_fetch::install_extension(&entry)?;
+            let installed = crate::release_fetch::install_extension(&entry, |received, total| {
+                progress.record(received, total)
+            })?;
             Ok::<_, String>((index, installed))
         });
         cx.spawn(async move |view, cx| {
@@ -266,6 +282,7 @@ impl Workbench {
             let _ = view.update(cx, |this, cx| {
                 let online = &mut this.settings.ext_online;
                 online.download = None;
+                online.progress = None;
                 let ok = result.is_ok();
                 online.note = Some(match result {
                     Ok((index, installed)) => {
@@ -503,6 +520,19 @@ impl Workbench {
             .children(status.map(|(error, text)| {
                 caption_text(text, theme).when(error, |t| t.text_color(theme.danger))
             }))
+            .when(online.checking, |panel| {
+                panel.child(
+                    Progress::new("extension-check-progress")
+                        .small()
+                        .loading(true)
+                        .accessibility_label("Checking for extension updates"),
+                )
+            })
+            .children(
+                online.progress.as_ref().map(|progress| {
+                    progress.render("extension-download-progress", theme)
+                }),
+            )
             .child(
                 div()
                     .flex()
