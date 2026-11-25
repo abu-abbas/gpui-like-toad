@@ -102,7 +102,7 @@ pub fn new_tool_id() -> String {
     format!("t{}", &id[1..])
 }
 
-fn tool_to_json(t: &ToolInstance) -> Json {
+pub(super) fn tool_to_json(t: &ToolInstance) -> Json {
     Json::Obj(vec![
         ("id".into(), Json::Str(t.id.clone())),
         ("kind".into(), Json::Str(t.kind.key().into())),
@@ -123,7 +123,7 @@ fn tool_to_json(t: &ToolInstance) -> Json {
     ])
 }
 
-fn tool_from_json(v: &Json) -> Option<ToolInstance> {
+pub(super) fn tool_from_json(v: &Json) -> Option<ToolInstance> {
     let kind = ToolKind::from_key(v.get("kind")?.as_str()?)?;
     let s = |k: &str| {
         v.get(k)

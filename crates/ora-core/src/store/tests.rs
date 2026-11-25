@@ -769,3 +769,46 @@ fn kilat_file_export_and_import_never_delete() {
     fs::write(a.join("bad.kilat"), "{}").unwrap();
     assert!(read_sync_file(&a.join("bad.kilat")).is_err());
 }
+
+#[test]
+fn tools_and_grid_sync_but_never_the_start_command() {
+    let (a, b, shared) = (sync_dir("ta"), sync_dir("tb"), sync_dir("tshared"));
+    let mut redis = ToolInstance::new(ToolKind::Redis);
+    redis.name = "Cache".into();
+    redis.start_server = true;
+    redis.server_command = "redis-server --port 1".into();
+    let mut prod = ToolInstance::new(ToolKind::Redis);
+    prod.name = "Prod cache".into();
+    prod.environment = ConnectionEnvironment::Production;
+    save_tools_in(&a, &[redis.clone(), prod]).unwrap();
+    save_auto_count_in(&a, true).unwrap();
+    enable_sync(&a, &shared, "A");
+    enable_sync(&b, &shared, "B");
+    sync_with(&a, &BTreeMap::new()).unwrap();
+
+    let text = fs::read_to_string(shared.join(SYNC_FILE)).unwrap();
+    assert!(text.contains("Cache") && !text.contains("Prod cache"));
+    assert!(!text.contains("server_command") && !text.contains("redis-server"));
+
+    sync_with(&b, &BTreeMap::new()).unwrap();
+    let on_b = load_tools_in(&b);
+    assert_eq!(on_b.len(), 1);
+    assert_eq!(on_b[0].name, "Cache");
+    assert!(!on_b[0].start_server && on_b[0].server_command.is_empty());
+    assert!(load_auto_count_in(&b));
+
+    // A hand-edited file cannot plant a start command either.
+    let mut v = read_sync_file(&shared.join(SYNC_FILE)).unwrap().unwrap().0;
+    let key = v.keys().find(|k| k.starts_with("tool:")).unwrap().clone();
+    if let Some(Json::Obj(pairs)) = v.get_mut(&key) {
+        pairs.push(("server_command".into(), Json::Str("rm -rf /".into())));
+        pairs.push(("start_server".into(), Json::Bool(true)));
+    }
+    let file = a.join("planted.kilat");
+    fs::write(&file, to_json(&sync_file_json(&v, "x"))).unwrap();
+    import_kilat_file(&b, &file, SyncCategories::default(), &BTreeMap::new()).unwrap();
+    let on_b = load_tools_in(&b);
+    assert!(on_b
+        .iter()
+        .all(|t| !t.start_server && t.server_command.is_empty()));
+}

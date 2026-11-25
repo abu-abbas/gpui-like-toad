@@ -6,7 +6,8 @@
 //!
 //! What is never written to the file: passwords (they stay in the OS
 //! keychain), query history (only the statements the user starred), and
-//! connections flagged PROD unless the user approved that connection.
+//! connections and tools flagged PROD unless the user approved that one.
+//! The command that starts a Developer Tools server is never synced.
 //!
 //! Merging is three-way. `base` is what both sides looked like after the
 //! last successful sync, so "changed on this computer", "changed on the
@@ -32,6 +33,11 @@ pub struct SyncCategories {
     pub connections: bool,
     pub favorites: bool,
     pub appearance: bool,
+    /// Developer Tools entries (Redis, MailHog). Never the command that
+    /// starts a server: a shared file must not decide what runs here.
+    pub tools: bool,
+    /// Data grid preferences (auto count).
+    pub grid: bool,
 }
 
 impl Default for SyncCategories {
@@ -40,6 +46,8 @@ impl Default for SyncCategories {
             connections: true,
             favorites: true,
             appearance: true,
+            tools: true,
+            grid: true,
         }
     }
 }
@@ -50,6 +58,8 @@ impl SyncCategories {
             "conn" | "folder-color" => self.connections,
             "fav" => self.favorites,
             "appearance" => self.appearance,
+            "tool" => self.tools,
+            "grid" => self.grid,
             _ => false,
         }
     }
@@ -119,6 +129,8 @@ pub fn load_sync_config_in(dir: &Path) -> SyncConfig {
             connections: flag("connections", true),
             favorites: flag("favorites", true),
             appearance: flag("appearance", true),
+            tools: flag("tools", true),
+            grid: flag("grid", true),
         };
         config.prod_approved = v
             .get("prod_approved")
@@ -278,6 +290,15 @@ fn apply_appearance(dir: &Path, v: &Json) -> std::io::Result<()> {
     )
 }
 
+/// A tool as synced: without `start_server` and `server_command`.
+fn tool_item(t: &ToolInstance) -> Json {
+    let mut v = tool_to_json(t);
+    if let Json::Obj(pairs) = &mut v {
+        pairs.retain(|(k, _)| k != "start_server" && k != "server_command");
+    }
+    v
+}
+
 fn load_folder_colors(dir: &Path) -> BTreeMap<String, String> {
     match read_json_file(&dir.join("connection-folder-colors.json")) {
         Some(Json::Obj(entries)) => entries
@@ -316,6 +337,22 @@ pub fn collect_items(dir: &Path, categories: SyncCategories, prod_ok: &BTreeSet<
     }
     if categories.appearance {
         items.insert("appearance".into(), appearance_item(dir));
+    }
+    if categories.tools {
+        for t in load_tools_in(dir).iter().filter(|t| {
+            t.environment != ConnectionEnvironment::Production || prod_ok.contains(&t.id)
+        }) {
+            items.insert(format!("tool:{}", t.id), tool_item(t));
+        }
+    }
+    if categories.grid {
+        items.insert(
+            "grid".into(),
+            Json::Obj(vec![(
+                "auto_count".into(),
+                Json::Bool(load_auto_count_in(dir)),
+            )]),
+        );
     }
     items
 }
@@ -399,6 +436,43 @@ pub fn apply_items(
     if categories.appearance {
         if let Some(v) = items.get("appearance") {
             apply_appearance(dir, v)?;
+        }
+    }
+    if categories.tools {
+        let local = load_tools_in(dir);
+        let mut wanted: BTreeMap<&str, ToolInstance> = items
+            .iter()
+            .filter_map(|(key, v)| {
+                let id = key.strip_prefix("tool:")?;
+                let mut t = tool_from_json(v)?;
+                t.id = id.to_string();
+                // Whatever a file says, it never decides what runs here.
+                t.start_server = false;
+                t.server_command.clear();
+                Some((id, t))
+            })
+            .collect();
+        let mut next = Vec::new();
+        for t in local {
+            if t.environment == ConnectionEnvironment::Production && !prod_ok.contains(&t.id) {
+                next.push(t);
+            } else if let Some(mut updated) = wanted.remove(t.id.as_str()) {
+                // What starts a program is decided on this computer only.
+                updated.start_server = t.start_server;
+                updated.server_command = t.server_command;
+                next.push(updated);
+            }
+        }
+        next.extend(wanted.into_values());
+        save_tools_in(dir, &next)?;
+    }
+    if categories.grid {
+        if let Some(on) = items
+            .get("grid")
+            .and_then(|v| v.get("auto_count"))
+            .and_then(Json::as_bool)
+        {
+            save_auto_count_in(dir, on)?;
         }
     }
     Ok(())
@@ -493,7 +567,7 @@ pub struct SyncFileInfo {
     pub saved_at: u64,
 }
 
-fn sync_file_json(items: &Items, device: &str) -> Json {
+pub(super) fn sync_file_json(items: &Items, device: &str) -> Json {
     Json::Obj(vec![
         ("format".into(), Json::Str(FORMAT.into())),
         ("version".into(), Json::Num(VERSION as f64)),

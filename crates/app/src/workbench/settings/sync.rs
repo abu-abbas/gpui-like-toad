@@ -275,6 +275,8 @@ impl Workbench {
         self.profiles = store::load_profiles();
         self.connection_folder_colors = store::load_connection_folder_colors();
         self.history = store::load_history();
+        self.tools.instances = store::load_tools();
+        self.auto_count = store::load_auto_count();
         let handle = self.window_handle;
         let _ = cx.update_window(handle, |_, window, cx| {
             theme::set_appearance(store::load_appearance(), cx);
@@ -575,6 +577,22 @@ impl Workbench {
                             cx,
                         ),
                         toggle(
+                            "sync-tools",
+                            "Developer Tools",
+                            "Redis and MailHog entries. The command that starts a server is never synced.",
+                            cats.tools,
+                            |c, v| c.tools = v,
+                            cx,
+                        ),
+                        toggle(
+                            "sync-grid",
+                            "Data grid preferences",
+                            "Automatic row count.",
+                            cats.grid,
+                            |c, v| c.grid = v,
+                            cx,
+                        ),
+                        toggle(
                             "sync-appearance",
                             "Appearance",
                             "Light and dark theme, accent, fonts, app icon.",
@@ -585,19 +603,46 @@ impl Workbench {
                     ],
                 ));
 
-            let prod: Vec<&SavedProfile> = self
-                .profiles
-                .iter()
-                .filter(|p| p.access.environment == ora_core::ConnectionEnvironment::Production)
-                .collect();
-            if cats.connections && !prod.is_empty() {
-                let rows = prod.into_iter().map(|p| {
-                    let id = p.id.clone();
-                    let checked = sync.config.prod_approved.contains(&p.id);
+            let mut prod: Vec<(String, String, String)> = Vec::new();
+            if cats.connections {
+                prod.extend(
+                    self.profiles
+                        .iter()
+                        .filter(|p| {
+                            p.access.environment == ora_core::ConnectionEnvironment::Production
+                        })
+                        .map(|p| {
+                            (
+                                p.id.clone(),
+                                p.name.clone(),
+                                format!("PROD · {}@{}", p.username, p.connect_string),
+                            )
+                        }),
+                );
+            }
+            if cats.tools {
+                prod.extend(
+                    self.tools
+                        .instances
+                        .iter()
+                        .filter(|t| t.environment == ora_core::ConnectionEnvironment::Production)
+                        .map(|t| {
+                            (
+                                t.id.clone(),
+                                t.name.clone(),
+                                format!("PROD · {} {}", t.kind.label(), t.address()),
+                            )
+                        }),
+                );
+            }
+            if !prod.is_empty() {
+                let rows = prod.into_iter().map(|(pid, pname, desc)| {
+                    let id = pid.clone();
+                    let checked = sync.config.prod_approved.contains(&pid);
                     setting_row_owned(
-                        p.name.clone(),
-                        format!("PROD · {}@{}", p.username, p.connect_string),
-                        Checkbox::new(format!("sync-prod-{}", p.id))
+                        pname,
+                        desc,
+                        Checkbox::new(format!("sync-prod-{pid}"))
                             .small()
                             .label("Sync")
                             .checked(checked)
@@ -613,9 +658,9 @@ impl Workbench {
                     )
                 });
                 page = page
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("PROD connections"))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("PROD connections and tools"))
                     .child(caption_text(
-                        "PROD connections stay on this computer unless you tick them here. Ticked ones are uploaded to the folder (without password).".into(),
+                        "PROD connections and tools stay on this computer unless you tick them here. Ticked ones are uploaded to the folder (without password).".into(),
                         theme,
                     ))
                     .child(setting_group(theme, rows.collect::<Vec<_>>()));
