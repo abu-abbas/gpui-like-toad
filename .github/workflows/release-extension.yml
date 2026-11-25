@@ -126,6 +126,12 @@ jobs:
               out.append(line)
           assert done, f"{crate} not found in Cargo.lock"
           lock.write_text("".join(out))
+      - if: runner.os == 'Windows'
+        name: Pakai Perl lengkap (Strawberry) untuk OpenSSL vendored
+        # Perl bawaan Git for Windows tidak punya semua modul yang dibutuhkan
+        # Configure OpenSSL, sehingga build openssl-src gagal.
+        shell: bash
+        run: echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" >> "$GITHUB_ENV"
       - name: Build
         shell: bash
         run: |
