@@ -1,6 +1,6 @@
 # MySQL extension release notes
 
-## 1.0.3 · Unreleased
+## [1.0.3](https://github.com/abu-abbas/kilat/releases/tag/ext-mysql-1.0.3) · 2026-11-25
 
 Minimum Kilat version `0.1.55`.
 
