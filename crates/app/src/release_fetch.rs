@@ -58,7 +58,7 @@ pub(crate) fn ensure_proxy_resolved() -> Option<String> {
 
 /// An error as text that is safe to show and log: a proxy URL inside it
 /// loses its password.
-fn net_err(err: impl std::fmt::Display) -> String {
+pub(crate) fn net_err(err: impl std::fmt::Display) -> String {
     let text = err.to_string();
     let secret = HTTP_PROXY
         .lock()
@@ -90,12 +90,23 @@ fn configured_proxy() -> Result<Option<ureq::Proxy>, String> {
 }
 
 fn http_agent() -> Result<ureq::Agent, String> {
+    http_agent_with(true)
+}
+
+/// Agent for JSON APIs: a 4xx/5xx answer is returned (with its body)
+/// instead of becoming an error, so the caller can show Google's reason.
+pub(crate) fn api_agent() -> Result<ureq::Agent, String> {
+    http_agent_with(false)
+}
+
+fn http_agent_with(status_as_error: bool) -> Result<ureq::Agent, String> {
     let proxy = configured_proxy()?;
     let mut builder = ureq::Agent::config_builder();
     if proxy.is_some() {
         builder = builder.proxy(proxy);
     }
     Ok(builder
+        .http_status_as_error(status_as_error)
         // 10 s was too tight on slow or proxied networks (Redis install
         // failed with "timeout: global"); small requests also retry.
         .timeout_global(Some(Duration::from_secs(30)))

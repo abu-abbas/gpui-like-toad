@@ -141,6 +141,13 @@ jobs:
         shell: bash
         run: echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" >> "$GITHUB_ENV"
       - name: Build biner rilis
+        # Login Google Drive untuk Settings Sync. Nilai ini ditanam saat
+        # build (aplikasi desktop tidak bisa menyimpan rahasia sungguhan;
+        # Google menganggap client secret desktop tidak rahasia). Kalau
+        # secret kosong, tombol Google Drive nonaktif.
+        env:
+          KILAT_GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          KILAT_GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         run: cargo build --locked --release -p kilat
       - name: Smoke test --version dan siapkan artifact
         shell: bash

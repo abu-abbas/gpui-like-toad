@@ -10,7 +10,10 @@
 use super::appearance::setting_group;
 use super::setting_row_owned;
 use super::*;
-use ora_core::store::{Choice, Conflict, Json, SyncCategories, SyncConfig, SyncOutcome};
+use ora_core::credentials::{CredentialStore as _, ExposeSecret as _, SecretString};
+use ora_core::store::{
+    Choice, Conflict, Json, SyncCategories, SyncConfig, SyncOutcome, SyncSecrets,
+};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -34,7 +37,26 @@ pub(super) struct SyncUi {
     /// Set while the open conflicts come from an import, not from the folder.
     import_file: Option<PathBuf>,
     detected: Vec<(String, PathBuf)>,
+    /// "Other computers have extensions you don't": (computer, names).
+    suggestions: Vec<(String, Vec<&'static str>)>,
+    /// The passphrase form, while it is open.
+    pass_form: Option<PassForm>,
+    /// Set while the browser sign-in for Google Drive is open; setting it
+    /// to true cancels the wait.
+    drive_login: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
+
+struct PassForm {
+    first: Entity<InputState>,
+    second: Entity<InputState>,
+    /// The folder's file already has a passphrase: ask for it, once.
+    existing: bool,
+    error: Option<String>,
+    working: bool,
+}
+
+/// Keychain account of the sync passphrase on this computer.
+const PASSPHRASE_ACCOUNT: &str = "kilat-sync-passphrase";
 
 impl SyncUi {
     pub(super) fn load() -> Self {
@@ -52,6 +74,9 @@ impl SyncUi {
             choices: BTreeMap::new(),
             import_file: None,
             detected: Vec::new(),
+            suggestions: Vec::new(),
+            pass_form: None,
+            drive_login: None,
         }
     }
 }
@@ -103,7 +128,16 @@ fn conflict_title(c: &Conflict) -> String {
             .and_then(Json::as_str)
             .map(str::to_string)
     };
-    if c.key.starts_with("conn:") {
+    if c.key.starts_with("secret:") {
+        "Saved password".into()
+    } else if c.key.starts_with("tool:") {
+        format!(
+            "Developer Tool: {}",
+            name(&c.local).or(name(&c.remote)).unwrap_or_default()
+        )
+    } else if c.key == "grid" {
+        "Data grid preferences".into()
+    } else if c.key.starts_with("conn:") {
         format!(
             "Connection: {}",
             name(&c.local).or(name(&c.remote)).unwrap_or_default()
@@ -169,8 +203,85 @@ impl Workbench {
         .detach();
     }
 
+    fn sync_drive_cancel(&mut self, cx: &mut Context<Self>) {
+        if let Some(flag) = self.settings.sync.drive_login.take() {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        cx.notify();
+    }
+
+    /// Open Google's sign-in page, wait for the browser in the background,
+    /// then turn Drive sync on.
+    fn sync_drive_connect(&mut self, cx: &mut Context<Self>) {
+        let pending = match crate::gdrive::begin() {
+            Ok(p) => p,
+            Err(err) => {
+                self.settings.sync.note = Some((true, err));
+                cx.notify();
+                return;
+            }
+        };
+        cx.open_url(&pending.url);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.settings.sync.drive_login = Some(cancel.clone());
+        self.settings.sync.note = None;
+        let task = cx.background_executor().spawn(async move {
+            crate::gdrive::finish_login(pending, crate::keychain::store(), || {
+                cancel.load(std::sync::atomic::Ordering::SeqCst)
+            })
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |this, cx| {
+                this.settings.sync.drive_login = None;
+                match result {
+                    Ok(email) => this.sync_use_drive(email, cx),
+                    Err(err) => {
+                        if !err.contains("cancelled") {
+                            this.settings.sync.note = Some((true, err));
+                        }
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn sync_use_drive(&mut self, email: String, cx: &mut Context<Self>) {
+        let cache = crate::gdrive::cache_dir();
+        if let Err(err) = std::fs::create_dir_all(&cache) {
+            self.settings.sync.note =
+                Some((true, format!("Could not create the cache folder: {err}")));
+            cx.notify();
+            return;
+        }
+        let sync = &mut self.settings.sync;
+        sync.config.enabled = true;
+        sync.config.target = "drive".into();
+        sync.config.drive_account = email;
+        sync.config.folder = cache.to_string_lossy().into_owned();
+        sync.status = SyncStatus::Idle;
+        sync.note = None;
+        sync.conflicts.clear();
+        sync.choices.clear();
+        sync.import_file = None;
+        self.save_sync_config(cx);
+        self.run_sync(false, cx);
+    }
+
     fn sync_turn_off(&mut self, cx: &mut Context<Self>) {
         let sync = &mut self.settings.sync;
+        if sync.config.target == "drive" {
+            // The keychain can block, so not on the UI thread.
+            cx.background_executor()
+                .spawn(async {
+                    crate::gdrive::sign_out(crate::keychain::store());
+                    let _ = std::fs::remove_dir_all(crate::gdrive::cache_dir());
+                })
+                .detach();
+        }
         if let Err(err) = store::disable_sync_in(&store::config_dir()) {
             sync.note = Some((true, format!("Could not turn sync off: {err}")));
         }
@@ -197,12 +308,35 @@ impl Workbench {
         let choices = sync.choices.clone();
         let import = sync.import_file.clone();
         let cats = sync.config.categories;
+        let drive = sync.config.target == "drive" && import.is_none();
         let task = cx.background_executor().spawn(async move {
             let dir = store::config_dir();
-            match import {
-                Some(file) => store::import_kilat_file(&dir, &file, cats, &choices),
-                None => store::sync_with(&dir, &choices),
+            let keychain = crate::keychain::store();
+            if drive {
+                crate::gdrive::pull(&crate::gdrive::cache_dir(), keychain)?;
             }
+            let result = match import {
+                Some(file) => store::import_kilat_file(&dir, &file, cats, &choices),
+                None if cats.passwords => {
+                    let passphrase = keychain
+                        .get(PASSPHRASE_ACCOUNT)
+                        .map_err(|e| e.to_string())?
+                        .ok_or("The sync passphrase is not saved on this computer.")?;
+                    store::sync_with(
+                        &dir,
+                        &choices,
+                        Some(&SyncSecrets {
+                            store: keychain,
+                            passphrase: passphrase.expose_secret(),
+                        }),
+                    )
+                }
+                None => store::sync_with(&dir, &choices, None),
+            };
+            if drive && matches!(result, Ok(SyncOutcome::Synced { .. })) {
+                crate::gdrive::push(&crate::gdrive::cache_dir(), keychain)?;
+            }
+            result
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -254,6 +388,7 @@ impl Workbench {
                 if pulled > 0 {
                     self.reload_after_sync(cx);
                 }
+                self.refresh_sync_suggestions();
             }
             Ok(SyncOutcome::Conflicts(conflicts)) => {
                 sync.status = SyncStatus::Conflicts(conflicts.len());
@@ -275,6 +410,8 @@ impl Workbench {
         self.profiles = store::load_profiles();
         self.connection_folder_colors = store::load_connection_folder_colors();
         self.history = store::load_history();
+        self.tools.instances = store::load_tools();
+        self.auto_count = store::load_auto_count();
         let handle = self.window_handle;
         let _ = cx.update_window(handle, |_, window, cx| {
             theme::set_appearance(store::load_appearance(), cx);
@@ -380,7 +517,11 @@ impl Workbench {
                 IconName::Check,
                 theme.muted_foreground,
                 format!("Synced {}", ago(sync.config.last_synced)),
-                format!("Synced with {}", sync.config.folder),
+                if sync.config.target == "drive" {
+                    format!("Synced with Google Drive ({})", sync.config.drive_account)
+                } else {
+                    format!("Synced with {}", sync.config.folder)
+                },
             ),
             SyncStatus::Syncing => (
                 IconName::RefreshCw,
@@ -476,18 +617,45 @@ impl Workbench {
                     theme,
                 ));
             }
+            let waiting = sync.drive_login.is_some();
+            let (desc, label) = if !crate::gdrive::available() {
+                (
+                    "Not available in this build. Use a release build of Kilat.",
+                    "Connect…",
+                )
+            } else if waiting {
+                (
+                    "Finish signing in in your browser. Kilat waits up to 5 minutes.",
+                    "Cancel",
+                )
+            } else {
+                ("Sign in with Google, no folder needed. Kilat only sees the files it creates, in a folder named Kilat Sync.", "Connect Google Drive…")
+            };
             rows.push(setting_row_owned(
                 "Google Drive account".into(),
-                "Sign in with Google, no folder needed. Coming later.".into(),
+                desc.into(),
                 Button::new("sync-google")
                     .small()
-                    .label("Coming soon")
-                    .disabled(true),
+                    .primary()
+                    .label(label)
+                    .disabled(!crate::gdrive::available())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if waiting {
+                            this.sync_drive_cancel(cx)
+                        } else {
+                            this.sync_drive_connect(cx)
+                        }
+                    })),
                 theme,
             ));
             page = page.child(setting_group(theme, rows));
         } else {
-            let folder = sync.config.folder.clone();
+            let is_drive = sync.config.target == "drive";
+            let folder = if is_drive {
+                format!("{} (folder Kilat Sync)", sync.config.drive_account)
+            } else {
+                sync.config.folder.clone()
+            };
             let status = if running {
                 "Syncing…".to_string()
             } else {
@@ -497,7 +665,7 @@ impl Workbench {
                 theme,
                 [
                     setting_row_owned(
-                        "Folder".into(),
+                        if is_drive { "Google Drive" } else { "Folder" }.into(),
                         format!("{folder}\n{status}"),
                         div()
                             .flex()
@@ -513,9 +681,23 @@ impl Workbench {
                             .child(
                                 Button::new("sync-change")
                                     .small()
-                                    .label("Change…")
+                                    .label(if sync.drive_login.is_some() {
+                                        "Cancel"
+                                    } else if is_drive {
+                                        "Sign in again…"
+                                    } else {
+                                        "Change…"
+                                    })
                                     .disabled(running)
-                                    .on_click(cx.listener(|this, _, _, cx| this.sync_choose_folder(cx))),
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if this.settings.sync.drive_login.is_some() {
+                                            this.sync_drive_cancel(cx)
+                                        } else if is_drive {
+                                            this.sync_drive_connect(cx)
+                                        } else {
+                                            this.sync_choose_folder(cx)
+                                        }
+                                    })),
                             ),
                         theme,
                     ),
@@ -575,6 +757,30 @@ impl Workbench {
                             cx,
                         ),
                         toggle(
+                            "sync-tools",
+                            "Developer Tools",
+                            "Redis and MailHog entries. The command that starts a server is never synced.",
+                            cats.tools,
+                            |c, v| c.tools = v,
+                            cx,
+                        ),
+                        toggle(
+                            "sync-grid",
+                            "Data grid preferences",
+                            "Automatic row count.",
+                            cats.grid,
+                            |c, v| c.grid = v,
+                            cx,
+                        ),
+                        toggle(
+                            "sync-extensions",
+                            "Extensions list",
+                            "Your other computers get a suggestion to install what you use. Nothing is installed for you.",
+                            cats.extensions,
+                            |c, v| c.extensions = v,
+                            cx,
+                        ),
+                        toggle(
                             "sync-appearance",
                             "Appearance",
                             "Light and dark theme, accent, fonts, app icon.",
@@ -585,19 +791,71 @@ impl Workbench {
                     ],
                 ));
 
-            let prod: Vec<&SavedProfile> = self
-                .profiles
-                .iter()
-                .filter(|p| p.access.environment == ora_core::ConnectionEnvironment::Production)
-                .collect();
-            if cats.connections && !prod.is_empty() {
-                let rows = prod.into_iter().map(|p| {
-                    let id = p.id.clone();
-                    let checked = sync.config.prod_approved.contains(&p.id);
+            page = page
+                .child(div().font_weight(FontWeight::SEMIBOLD).child("Passwords"))
+                .child(self.render_sync_passwords(theme, cx));
+            if !sync.suggestions.is_empty() {
+                let lines: Vec<String> = sync
+                    .suggestions
+                    .iter()
+                    .map(|(computer, names)| format!("{computer}: {}", names.join(", ")))
+                    .collect();
+                page = page.child(setting_group(
+                    theme,
+                    [setting_row_owned(
+                        "Extensions on your other computers".into(),
+                        format!("Not installed here. {}", lines.join(" · ")),
+                        Button::new("sync-open-extensions")
+                            .small()
+                            .label("Open Extensions")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings.page = SettingsPage::Extensions;
+                                cx.notify();
+                            })),
+                        theme,
+                    )],
+                ));
+            }
+            let mut prod: Vec<(String, String, String)> = Vec::new();
+            if cats.connections {
+                prod.extend(
+                    self.profiles
+                        .iter()
+                        .filter(|p| {
+                            p.access.environment == ora_core::ConnectionEnvironment::Production
+                        })
+                        .map(|p| {
+                            (
+                                p.id.clone(),
+                                p.name.clone(),
+                                format!("PROD · {}@{}", p.username, p.connect_string),
+                            )
+                        }),
+                );
+            }
+            if cats.tools {
+                prod.extend(
+                    self.tools
+                        .instances
+                        .iter()
+                        .filter(|t| t.environment == ora_core::ConnectionEnvironment::Production)
+                        .map(|t| {
+                            (
+                                t.id.clone(),
+                                t.name.clone(),
+                                format!("PROD · {} {}", t.kind.label(), t.address()),
+                            )
+                        }),
+                );
+            }
+            if !prod.is_empty() {
+                let rows = prod.into_iter().map(|(pid, pname, desc)| {
+                    let id = pid.clone();
+                    let checked = sync.config.prod_approved.contains(&pid);
                     setting_row_owned(
-                        p.name.clone(),
-                        format!("PROD · {}@{}", p.username, p.connect_string),
-                        Checkbox::new(format!("sync-prod-{}", p.id))
+                        pname,
+                        desc,
+                        Checkbox::new(format!("sync-prod-{pid}"))
                             .small()
                             .label("Sync")
                             .checked(checked)
@@ -613,9 +871,9 @@ impl Workbench {
                     )
                 });
                 page = page
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("PROD connections"))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("PROD connections and tools"))
                     .child(caption_text(
-                        "PROD connections stay on this computer unless you tick them here. Ticked ones are uploaded to the folder (without password).".into(),
+                        "PROD connections and tools stay on this computer unless you tick them here. Ticked ones are uploaded to the folder; their password too, but only if you turned on encrypted passwords.".into(),
                         theme,
                     ))
                     .child(setting_group(theme, rows.collect::<Vec<_>>()));
@@ -667,6 +925,87 @@ impl Workbench {
             );
         }
         page
+    }
+
+    fn render_sync_passwords(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let sync = &self.settings.sync;
+        let on = sync.config.categories.passwords;
+        let mut group = vec![setting_row_owned(
+            "Sync saved passwords, encrypted".into(),
+            if on {
+                "On. Passwords are encrypted on this computer with your sync passphrase before they are uploaded. PROD ones only when ticked below.".into()
+            } else {
+                "Off. Each computer asks for a password once and keeps it in its own Keychain."
+                    .into()
+            },
+            if on {
+                Button::new("sync-passwords-off")
+                    .small()
+                    .label("Turn off")
+                    .on_click(cx.listener(|this, _, _, cx| this.sync_passwords_off(cx)))
+            } else {
+                Button::new("sync-passwords-on")
+                    .small()
+                    .label("Turn on…")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.sync_open_pass_form(window, cx)),
+                    )
+            },
+            theme,
+        )];
+        if let Some(form) = &sync.pass_form {
+            let mut body = div()
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_2))
+                .px(px(SPACE_4))
+                .py(px(SPACE_3))
+                .child(body_text(
+                    if form.existing {
+                        "This folder already uses a sync passphrase. Enter it once on this computer.".into()
+                    } else {
+                        "Choose a sync passphrase. If you forget it, nobody can recover the synced passwords, not even us: you would type the database passwords again on each computer.".into()
+                    },
+                    theme,
+                ))
+                .child(Input::new(&form.first).mask_toggle());
+            if !form.existing {
+                body = body.child(Input::new(&form.second).mask_toggle());
+            }
+            if let Some(err) = &form.error {
+                body = body.child(body_text(err.clone(), theme).text_color(theme.danger));
+            }
+            body = body.child(
+                div()
+                    .flex()
+                    .gap(px(SPACE_2))
+                    .child(
+                        Button::new("sync-pass-ok")
+                            .small()
+                            .primary()
+                            .label("Turn on")
+                            .disabled(form.working)
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.sync_confirm_passphrase(cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("sync-pass-cancel")
+                            .small()
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings.sync.pass_form = None;
+                                cx.notify();
+                            })),
+                    ),
+            );
+            group.push(body);
+        }
+        setting_group(theme, group)
     }
 
     fn render_sync_conflicts(
@@ -834,5 +1173,91 @@ impl Workbench {
     /// Look for cloud folders when the page opens.
     pub(super) fn detect_sync_folders(&mut self) {
         self.settings.sync.detected = store::detect_cloud_folders();
+        self.refresh_sync_suggestions();
+    }
+
+    fn refresh_sync_suggestions(&mut self) {
+        self.settings.sync.suggestions = store::extension_suggestions(&store::config_dir())
+            .into_iter()
+            .map(|(computer, missing)| (computer, missing.iter().map(|e| e.name).collect()))
+            .collect();
+    }
+
+    /// Open the passphrase form: one field if the folder already has a
+    /// passphrase (set on another computer), two if this is the first.
+    fn sync_open_pass_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let folder = PathBuf::from(&self.settings.sync.config.folder);
+        let existing = ora_core::store::sync_passphrase_set(&folder);
+        let first = cx.new(|cx| InputState::new(&mut *window, cx).masked(true));
+        let second = cx.new(|cx| InputState::new(&mut *window, cx).masked(true));
+        self.settings.sync.pass_form = Some(PassForm {
+            first,
+            second,
+            existing,
+            error: None,
+            working: false,
+        });
+        cx.notify();
+    }
+
+    fn sync_confirm_passphrase(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = &mut self.settings.sync.pass_form else {
+            return;
+        };
+        if form.working {
+            return;
+        }
+        let first = Self::input_text(&form.first, cx);
+        let second = Self::input_text(&form.second, cx);
+        let existing = form.existing;
+        if first.chars().count() < 8 {
+            form.error = Some("Use at least 8 characters.".into());
+            cx.notify();
+            return;
+        }
+        if !existing && first != second {
+            form.error = Some("The two passphrases are different.".into());
+            cx.notify();
+            return;
+        }
+        form.error = None;
+        form.working = true;
+        let folder = PathBuf::from(&self.settings.sync.config.folder);
+        let task = cx.background_executor().spawn(async move {
+            store::check_passphrase(&folder, &first)?;
+            crate::keychain::store()
+                .set(PASSPHRASE_ACCOUNT, &SecretString::from(first))
+                .map_err(|e| e.to_string())
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.settings.sync.pass_form = None;
+                        this.settings.sync.config.categories.passwords = true;
+                        this.save_sync_config(cx);
+                        this.run_sync(false, cx);
+                    }
+                    Err(err) => {
+                        if let Some(form) = &mut this.settings.sync.pass_form {
+                            form.working = false;
+                            form.error = Some(err);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn sync_passwords_off(&mut self, cx: &mut Context<Self>) {
+        self.settings.sync.config.categories.passwords = false;
+        self.save_sync_config(cx);
+        cx.background_executor()
+            .spawn(async { crate::keychain::store().delete(PASSPHRASE_ACCOUNT) })
+            .detach();
     }
 }

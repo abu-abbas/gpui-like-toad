@@ -631,22 +631,22 @@ fn sync_moves_connections_between_computers_without_prod_or_passwords() {
     enable_sync(&a, &shared, "A");
     enable_sync(&b, &shared, "B");
     assert!(matches!(
-        sync_with(&a, &BTreeMap::new()),
+        sync_with(&a, &BTreeMap::new(), None),
         Ok(SyncOutcome::Synced { pushed: 1.., .. })
     ));
     let text = fs::read_to_string(shared.join(SYNC_FILE)).unwrap();
     assert!(text.contains("\"dev\"") && !text.contains("\"prod\""));
     assert!(!text.to_lowercase().contains("password\":\""));
 
-    sync_with(&b, &BTreeMap::new()).unwrap();
+    sync_with(&b, &BTreeMap::new(), None).unwrap();
     let on_b = load_profiles_in(&b);
     assert_eq!(on_b.len(), 1);
     assert_eq!(on_b[0].name, "dev");
 
     // Deleting on B reaches A; A's local PROD connection is untouched.
     save_profiles_in(&b, &[]).unwrap();
-    sync_with(&b, &BTreeMap::new()).unwrap();
-    sync_with(&a, &BTreeMap::new()).unwrap();
+    sync_with(&b, &BTreeMap::new(), None).unwrap();
+    sync_with(&a, &BTreeMap::new(), None).unwrap();
     let on_a = load_profiles_in(&a);
     assert_eq!(on_a.len(), 1);
     assert_eq!(on_a[0].name, "prod");
@@ -665,11 +665,11 @@ fn approved_prod_connection_syncs() {
     let mut c = load_sync_config_in(&a);
     c.prod_approved = vec!["2".into()];
     save_sync_config_in(&a, &c).unwrap();
-    sync_with(&a, &BTreeMap::new()).unwrap();
-    sync_with(&b, &BTreeMap::new()).unwrap();
+    sync_with(&a, &BTreeMap::new(), None).unwrap();
+    sync_with(&b, &BTreeMap::new(), None).unwrap();
     assert_eq!(load_profiles_in(&b)[0].name, "prod");
     // Still there after another round on A (the base keeps it approved).
-    sync_with(&a, &BTreeMap::new()).unwrap();
+    sync_with(&a, &BTreeMap::new(), None).unwrap();
     assert!(read_sync_file(&shared.join(SYNC_FILE))
         .unwrap()
         .unwrap()
@@ -683,8 +683,8 @@ fn change_on_both_sides_is_a_conflict_until_chosen() {
     save_profiles_in(&a, &[sync_profile("1", "dev", ConnectionEnvironment::None)]).unwrap();
     enable_sync(&a, &shared, "A");
     enable_sync(&b, &shared, "B");
-    sync_with(&a, &BTreeMap::new()).unwrap();
-    sync_with(&b, &BTreeMap::new()).unwrap();
+    sync_with(&a, &BTreeMap::new(), None).unwrap();
+    sync_with(&b, &BTreeMap::new(), None).unwrap();
 
     save_profiles_in(
         &a,
@@ -696,9 +696,9 @@ fn change_on_both_sides_is_a_conflict_until_chosen() {
         &[sync_profile("1", "from-b", ConnectionEnvironment::None)],
     )
     .unwrap();
-    sync_with(&a, &BTreeMap::new()).unwrap();
+    sync_with(&a, &BTreeMap::new(), None).unwrap();
 
-    let Ok(SyncOutcome::Conflicts(conflicts)) = sync_with(&b, &BTreeMap::new()) else {
+    let Ok(SyncOutcome::Conflicts(conflicts)) = sync_with(&b, &BTreeMap::new(), None) else {
         panic!("expected a conflict");
     };
     assert_eq!(conflicts.len(), 1);
@@ -707,7 +707,7 @@ fn change_on_both_sides_is_a_conflict_until_chosen() {
     assert_eq!(load_profiles_in(&b)[0].name, "from-b");
 
     let choices = BTreeMap::from([("conn:1".to_string(), Choice::Remote)]);
-    sync_with(&b, &choices).unwrap();
+    sync_with(&b, &choices, None).unwrap();
     assert_eq!(load_profiles_in(&b)[0].name, "from-a");
 }
 
@@ -718,9 +718,9 @@ fn first_sync_merges_both_sides_and_keeps_old_versions() {
     save_profiles_in(&b, &[sync_profile("2", "two", ConnectionEnvironment::None)]).unwrap();
     enable_sync(&a, &shared, "A");
     enable_sync(&b, &shared, "B");
-    sync_with(&a, &BTreeMap::new()).unwrap();
-    sync_with(&b, &BTreeMap::new()).unwrap();
-    sync_with(&a, &BTreeMap::new()).unwrap();
+    sync_with(&a, &BTreeMap::new(), None).unwrap();
+    sync_with(&b, &BTreeMap::new(), None).unwrap();
+    sync_with(&a, &BTreeMap::new(), None).unwrap();
     assert_eq!(load_profiles_in(&a).len(), 2);
     assert_eq!(load_profiles_in(&b).len(), 2);
     assert!(shared.join("versions").is_dir());
@@ -744,8 +744,8 @@ fn favorites_and_appearance_sync_but_plain_history_does_not() {
     .unwrap();
     enable_sync(&a, &shared, "A");
     enable_sync(&b, &shared, "B");
-    sync_with(&a, &BTreeMap::new()).unwrap();
-    sync_with(&b, &BTreeMap::new()).unwrap();
+    sync_with(&a, &BTreeMap::new(), None).unwrap();
+    sync_with(&b, &BTreeMap::new(), None).unwrap();
     let on_b = load_history_in(&b);
     assert_eq!(on_b.len(), 1);
     assert_eq!(on_b[0].sql, "select 2 from dual");
@@ -768,4 +768,157 @@ fn kilat_file_export_and_import_never_delete() {
     assert!(read_sync_file(&a.join("nope.kilat")).unwrap().is_none());
     fs::write(a.join("bad.kilat"), "{}").unwrap();
     assert!(read_sync_file(&a.join("bad.kilat")).is_err());
+}
+
+#[test]
+fn tools_and_grid_sync_but_never_the_start_command() {
+    let (a, b, shared) = (sync_dir("ta"), sync_dir("tb"), sync_dir("tshared"));
+    let mut redis = ToolInstance::new(ToolKind::Redis);
+    redis.name = "Cache".into();
+    redis.start_server = true;
+    redis.server_command = "redis-server --port 1".into();
+    let mut prod = ToolInstance::new(ToolKind::Redis);
+    prod.name = "Prod cache".into();
+    prod.environment = ConnectionEnvironment::Production;
+    save_tools_in(&a, &[redis.clone(), prod]).unwrap();
+    save_auto_count_in(&a, true).unwrap();
+    enable_sync(&a, &shared, "A");
+    enable_sync(&b, &shared, "B");
+    sync_with(&a, &BTreeMap::new(), None).unwrap();
+
+    let text = fs::read_to_string(shared.join(SYNC_FILE)).unwrap();
+    assert!(text.contains("Cache") && !text.contains("Prod cache"));
+    assert!(!text.contains("server_command") && !text.contains("redis-server"));
+
+    sync_with(&b, &BTreeMap::new(), None).unwrap();
+    let on_b = load_tools_in(&b);
+    assert_eq!(on_b.len(), 1);
+    assert_eq!(on_b[0].name, "Cache");
+    assert!(!on_b[0].start_server && on_b[0].server_command.is_empty());
+    assert!(load_auto_count_in(&b));
+
+    // A hand-edited file cannot plant a start command either.
+    let mut v = read_sync_file(&shared.join(SYNC_FILE)).unwrap().unwrap().0;
+    let key = v.keys().find(|k| k.starts_with("tool:")).unwrap().clone();
+    if let Some(Json::Obj(pairs)) = v.get_mut(&key) {
+        pairs.push(("server_command".into(), Json::Str("rm -rf /".into())));
+        pairs.push(("start_server".into(), Json::Bool(true)));
+    }
+    let file = a.join("planted.kilat");
+    fs::write(&file, to_json(&sync_file_json(&v, "x"))).unwrap();
+    import_kilat_file(&b, &file, SyncCategories::default(), &BTreeMap::new()).unwrap();
+    let on_b = load_tools_in(&b);
+    assert!(on_b
+        .iter()
+        .all(|t| !t.start_server && t.server_command.is_empty()));
+}
+
+#[test]
+fn passwords_sync_only_encrypted_and_only_with_the_right_passphrase() {
+    use crate::credentials::{CredentialStore, MemoryCredentialStore, SecretString};
+    let (a, b, shared) = (sync_dir("sa"), sync_dir("sb"), sync_dir("sshared"));
+    let (store_a, store_b) = (
+        MemoryCredentialStore::default(),
+        MemoryCredentialStore::default(),
+    );
+    let mut p = sync_profile("1", "dev", ConnectionEnvironment::None);
+    p.save_password = true;
+    let mut prod = sync_profile("2", "prod", ConnectionEnvironment::Production);
+    prod.save_password = true;
+    save_profiles_in(&a, &[p, prod]).unwrap();
+    store_a
+        .set("1", &SecretString::from("hunter2".to_string()))
+        .unwrap();
+    store_a
+        .set("2", &SecretString::from("prod-pw".to_string()))
+        .unwrap();
+    for (dir, name) in [(&a, "A"), (&b, "B")] {
+        enable_sync(dir, &shared, name);
+        let mut c = load_sync_config_in(dir);
+        c.categories.passwords = true;
+        save_sync_config_in(dir, &c).unwrap();
+    }
+    let secrets_a = SyncSecrets {
+        store: &store_a,
+        passphrase: "correct horse",
+    };
+    let secrets_b = SyncSecrets {
+        store: &store_b,
+        passphrase: "correct horse",
+    };
+    assert_eq!(check_passphrase(&shared, "anything"), Ok(false));
+    // No passphrase on this computer: refused, nothing written.
+    assert!(sync_with(&a, &BTreeMap::new(), None).is_err());
+    sync_with(&a, &BTreeMap::new(), Some(&secrets_a)).unwrap();
+
+    let text = fs::read_to_string(shared.join(SYNC_FILE)).unwrap();
+    assert!(text.contains("secret:1") && text.contains("\"crypto\""));
+    assert!(!text.contains("hunter2") && !text.contains("prod-pw") && !text.contains("secret:2"));
+    assert_eq!(check_passphrase(&shared, "correct horse"), Ok(true));
+    assert!(check_passphrase(&shared, "wrong").is_err());
+
+    // Wrong passphrase on B: refused, B's keychain untouched.
+    let wrong = SyncSecrets {
+        store: &store_b,
+        passphrase: "wrong",
+    };
+    assert!(sync_with(&b, &BTreeMap::new(), Some(&wrong)).is_err());
+    assert!(store_b.is_empty());
+
+    sync_with(&b, &BTreeMap::new(), Some(&secrets_b)).unwrap();
+    assert_eq!(
+        store_b
+            .get("1")
+            .unwrap()
+            .map(|s| crate::credentials::ExposeSecret::expose_secret(&s).to_string()),
+        Some("hunter2".to_string())
+    );
+
+    // B clears its keychain entry: the password stays in the file for A.
+    store_b.delete("1").unwrap();
+    sync_with(&b, &BTreeMap::new(), Some(&secrets_b)).unwrap();
+    assert!(read_sync_file(&shared.join(SYNC_FILE))
+        .unwrap()
+        .unwrap()
+        .0
+        .contains_key("secret:1"));
+}
+
+#[test]
+fn other_computers_extensions_are_only_suggested() {
+    let (a, b, shared) = (sync_dir("xa"), sync_dir("xb"), sync_dir("xshared"));
+    enable_sync(&a, &shared, "A");
+    enable_sync(&b, &shared, "B");
+    let mut ext = load_extensions_in(&a);
+    ext.install("redis");
+    save_extensions_in(&a, &ext).unwrap();
+    sync_with(&a, &BTreeMap::new(), None).unwrap();
+    sync_with(&b, &BTreeMap::new(), None).unwrap();
+    sync_with(&a, &BTreeMap::new(), None).unwrap();
+    let suggestions = extension_suggestions(&b);
+    assert_eq!(suggestions.len(), 1);
+    assert_eq!(suggestions[0].0, "A");
+    assert_eq!(suggestions[0].1[0].id, "redis");
+    assert!(!load_extensions_in(&b).is_installed("redis"));
+    assert!(extension_suggestions(&a).is_empty());
+}
+
+#[test]
+fn sync_config_keeps_every_toggle() {
+    let dir = sync_dir("cfg");
+    let mut c = load_sync_config_in(&dir);
+    c.categories = SyncCategories {
+        connections: false,
+        favorites: false,
+        appearance: false,
+        tools: false,
+        grid: false,
+        passwords: true,
+        extensions: false,
+    };
+    c.prod_approved = vec!["x".into()];
+    save_sync_config_in(&dir, &c).unwrap();
+    let back = load_sync_config_in(&dir);
+    assert_eq!(back.categories, c.categories);
+    assert_eq!(back.prod_approved, c.prod_approved);
 }

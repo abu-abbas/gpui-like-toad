@@ -6,7 +6,8 @@
 //!
 //! What is never written to the file: passwords (they stay in the OS
 //! keychain), query history (only the statements the user starred), and
-//! connections flagged PROD unless the user approved that connection.
+//! connections and tools flagged PROD unless the user approved that one.
+//! The command that starts a Developer Tools server is never synced.
 //!
 //! Merging is three-way. `base` is what both sides looked like after the
 //! last successful sync, so "changed on this computer", "changed on the
@@ -15,6 +16,7 @@
 //! user; nothing is written until every conflict has a choice.
 
 use super::*;
+use crate::credentials::{CredentialStore, ExposeSecret as _, SecretString};
 use std::collections::BTreeSet;
 
 /// Sync items by key: `conn:<id>`, `folder-color:<folder>`, `fav:<sql>`
@@ -32,6 +34,15 @@ pub struct SyncCategories {
     pub connections: bool,
     pub favorites: bool,
     pub appearance: bool,
+    /// Developer Tools entries (Redis, MailHog). Never the command that
+    /// starts a server: a shared file must not decide what runs here.
+    pub tools: bool,
+    /// Data grid preferences (auto count).
+    pub grid: bool,
+    /// Saved passwords, encrypted with the sync passphrase. Off by default.
+    pub passwords: bool,
+    /// Which extensions this computer has, so the others can suggest them.
+    pub extensions: bool,
 }
 
 impl Default for SyncCategories {
@@ -40,6 +51,10 @@ impl Default for SyncCategories {
             connections: true,
             favorites: true,
             appearance: true,
+            tools: true,
+            grid: true,
+            passwords: false,
+            extensions: true,
         }
     }
 }
@@ -50,6 +65,10 @@ impl SyncCategories {
             "conn" | "folder-color" => self.connections,
             "fav" => self.favorites,
             "appearance" => self.appearance,
+            "tool" => self.tools,
+            "grid" => self.grid,
+            "secret" => self.passwords,
+            "ext" => self.extensions,
             _ => false,
         }
     }
@@ -74,6 +93,11 @@ pub struct SyncConfig {
     pub prod_approved: Vec<String>,
     /// Unix seconds of the last successful sync; 0 = never.
     pub last_synced: u64,
+    /// `"drive"` when the folder is the local cache of a Google Drive
+    /// account (the app uploads and downloads it); empty for a plain folder.
+    pub target: String,
+    /// Email shown for the Google account.
+    pub drive_account: String,
 }
 
 impl Default for SyncConfig {
@@ -87,6 +111,8 @@ impl Default for SyncConfig {
             categories: SyncCategories::default(),
             prod_approved: Vec::new(),
             last_synced: 0,
+            target: String::new(),
+            drive_account: String::new(),
         }
     }
 }
@@ -119,6 +145,10 @@ pub fn load_sync_config_in(dir: &Path) -> SyncConfig {
             connections: flag("connections", true),
             favorites: flag("favorites", true),
             appearance: flag("appearance", true),
+            tools: flag("tools", true),
+            grid: flag("grid", true),
+            passwords: flag("passwords", false),
+            extensions: flag("extensions", true),
         };
         config.prod_approved = v
             .get("prod_approved")
@@ -130,6 +160,8 @@ pub fn load_sync_config_in(dir: &Path) -> SyncConfig {
             })
             .unwrap_or_default();
         config.last_synced = v.get("last_synced").and_then(Json::as_u64).unwrap_or(0);
+        config.target = text("target");
+        config.drive_account = text("drive_account");
     }
     if config.device_id.is_empty() {
         config.device_id = new_profile_id();
@@ -159,6 +191,13 @@ pub fn save_sync_config_in(dir: &Path, config: &SyncConfig) -> std::io::Result<(
                 "appearance".into(),
                 Json::Bool(config.categories.appearance),
             ),
+            ("tools".into(), Json::Bool(config.categories.tools)),
+            ("grid".into(), Json::Bool(config.categories.grid)),
+            ("passwords".into(), Json::Bool(config.categories.passwords)),
+            (
+                "extensions".into(),
+                Json::Bool(config.categories.extensions),
+            ),
             (
                 "prod_approved".into(),
                 Json::Arr(
@@ -171,6 +210,11 @@ pub fn save_sync_config_in(dir: &Path, config: &SyncConfig) -> std::io::Result<(
                 ),
             ),
             ("last_synced".into(), Json::Num(config.last_synced as f64)),
+            ("target".into(), Json::Str(config.target.clone())),
+            (
+                "drive_account".into(),
+                Json::Str(config.drive_account.clone()),
+            ),
         ]),
     )
 }
@@ -278,6 +322,19 @@ fn apply_appearance(dir: &Path, v: &Json) -> std::io::Result<()> {
     )
 }
 
+fn grid_item(auto_count: bool) -> Json {
+    Json::Obj(vec![("auto_count".into(), Json::Bool(auto_count))])
+}
+
+/// A tool as synced: without `start_server` and `server_command`.
+fn tool_item(t: &ToolInstance) -> Json {
+    let mut v = tool_to_json(t);
+    if let Json::Obj(pairs) = &mut v {
+        pairs.retain(|(k, _)| k != "start_server" && k != "server_command");
+    }
+    v
+}
+
 fn load_folder_colors(dir: &Path) -> BTreeMap<String, String> {
     match read_json_file(&dir.join("connection-folder-colors.json")) {
         Some(Json::Obj(entries)) => entries
@@ -316,6 +373,16 @@ pub fn collect_items(dir: &Path, categories: SyncCategories, prod_ok: &BTreeSet<
     }
     if categories.appearance {
         items.insert("appearance".into(), appearance_item(dir));
+    }
+    if categories.tools {
+        for t in load_tools_in(dir).iter().filter(|t| {
+            t.environment != ConnectionEnvironment::Production || prod_ok.contains(&t.id)
+        }) {
+            items.insert(format!("tool:{}", t.id), tool_item(t));
+        }
+    }
+    if categories.grid {
+        items.insert("grid".into(), grid_item(load_auto_count_in(dir)));
     }
     items
 }
@@ -399,6 +466,43 @@ pub fn apply_items(
     if categories.appearance {
         if let Some(v) = items.get("appearance") {
             apply_appearance(dir, v)?;
+        }
+    }
+    if categories.tools {
+        let local = load_tools_in(dir);
+        let mut wanted: BTreeMap<&str, ToolInstance> = items
+            .iter()
+            .filter_map(|(key, v)| {
+                let id = key.strip_prefix("tool:")?;
+                let mut t = tool_from_json(v)?;
+                t.id = id.to_string();
+                // Whatever a file says, it never decides what runs here.
+                t.start_server = false;
+                t.server_command.clear();
+                Some((id, t))
+            })
+            .collect();
+        let mut next = Vec::new();
+        for t in local {
+            if t.environment == ConnectionEnvironment::Production && !prod_ok.contains(&t.id) {
+                next.push(t);
+            } else if let Some(mut updated) = wanted.remove(t.id.as_str()) {
+                // What starts a program is decided on this computer only.
+                updated.start_server = t.start_server;
+                updated.server_command = t.server_command;
+                next.push(updated);
+            }
+        }
+        next.extend(wanted.into_values());
+        save_tools_in(dir, &next)?;
+    }
+    if categories.grid {
+        if let Some(on) = items
+            .get("grid")
+            .and_then(|v| v.get("auto_count"))
+            .and_then(Json::as_bool)
+        {
+            save_auto_count_in(dir, on)?;
         }
     }
     Ok(())
@@ -491,9 +595,33 @@ pub fn merge(
 pub struct SyncFileInfo {
     pub device_name: String,
     pub saved_at: u64,
+    /// Salt and check token of the sync passphrase, once one was set.
+    pub crypto: Option<CryptoHeader>,
 }
 
-fn sync_file_json(items: &Items, device: &str) -> Json {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CryptoHeader {
+    pub salt: Vec<u8>,
+    pub check: String,
+}
+
+impl CryptoHeader {
+    fn to_json(&self) -> Json {
+        Json::Obj(vec![
+            ("salt".into(), Json::Str(sync_crypto::encode(&self.salt))),
+            ("check".into(), Json::Str(self.check.clone())),
+        ])
+    }
+
+    fn from_json(v: &Json) -> Option<Self> {
+        Some(Self {
+            salt: sync_crypto::decode(v.get("salt")?.as_str()?)?,
+            check: v.get("check")?.as_str()?.to_string(),
+        })
+    }
+}
+
+pub(super) fn sync_file_json(items: &Items, device: &str) -> Json {
     Json::Obj(vec![
         ("format".into(), Json::Str(FORMAT.into())),
         ("version".into(), Json::Num(VERSION as f64)),
@@ -525,15 +653,25 @@ pub fn read_sync_file(path: &Path) -> Result<Option<(Items, SyncFileInfo)>, Stri
             .unwrap_or("")
             .to_string(),
         saved_at: v.get("saved_at").and_then(Json::as_u64).unwrap_or(0),
+        crypto: v.get("crypto").and_then(CryptoHeader::from_json),
     };
     Ok(Some((items_from_json(v.get("items")), info)))
 }
 
 /// Write via a temp file in the same folder, so a cloud client never
 /// uploads a half-written file.
-fn write_sync_file(path: &Path, items: &Items, device: &str) -> Result<(), String> {
+fn write_sync_file(
+    path: &Path,
+    items: &Items,
+    device: &str,
+    crypto: Option<&CryptoHeader>,
+) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, to_json(&sync_file_json(items, device)))
+    let mut json = sync_file_json(items, device);
+    if let (Some(header), Json::Obj(pairs)) = (crypto, &mut json) {
+        pairs.push(("crypto".into(), header.to_json()));
+    }
+    fs::write(&tmp, to_json(&json))
         .and_then(|()| fs::rename(&tmp, path))
         .map_err(|e| format!("Cannot write {}: {e}", path.display()))
 }
@@ -568,7 +706,7 @@ pub fn export_kilat_file(
     prod_ok: &BTreeSet<String>,
 ) -> Result<usize, String> {
     let items = collect_items(dir, categories, prod_ok);
-    write_sync_file(path, &items, &load_sync_config_in(dir).device_name)?;
+    write_sync_file(path, &items, &load_sync_config_in(dir).device_name, None)?;
     Ok(items.len())
 }
 
@@ -584,9 +722,138 @@ pub enum SyncOutcome {
     Conflicts(Vec<Conflict>),
 }
 
+/// What sync needs to move saved passwords: the keychain and the sync
+/// passphrase. Only used when "Passwords" is on.
+pub struct SyncSecrets<'a> {
+    pub store: &'a dyn CredentialStore,
+    pub passphrase: &'a str,
+}
+
+fn secret_id(profile_id: &str) -> String {
+    format!("secret:{profile_id}")
+}
+
+/// Check `passphrase` against the sync file in `folder`. `Ok(true)`: the
+/// file already has a passphrase and this is it. `Ok(false)`: nobody set
+/// one yet, so this becomes the passphrase at the next sync.
+pub fn check_passphrase(folder: &Path, passphrase: &str) -> Result<bool, String> {
+    match read_sync_file(&folder.join(SYNC_FILE))?.and_then(|(_, info)| info.crypto) {
+        Some(header) => {
+            let key = sync_crypto::derive_key(passphrase, &header.salt)?;
+            if sync_crypto::verify_check(&key, &header.check) {
+                Ok(true)
+            } else {
+                Err("Wrong sync passphrase.".into())
+            }
+        }
+        None => Ok(false),
+    }
+}
+
+/// Whether the sync file in `folder` already has a passphrase.
+pub fn sync_passphrase_set(folder: &Path) -> bool {
+    matches!(
+        read_sync_file(&folder.join(SYNC_FILE)),
+        Ok(Some((_, info))) if info.crypto.is_some()
+    )
+}
+
+/// The saved passwords of this computer as sealed items. A keychain that
+/// cannot be read stops the sync: reading nothing would look like "all
+/// passwords were deleted here".
+fn secret_items(
+    dir: &Path,
+    store: &dyn CredentialStore,
+    key: &sync_crypto::SyncKey,
+    prod_ok: &BTreeSet<String>,
+) -> Result<Items, String> {
+    let mut items = Items::new();
+    for p in load_profiles_in(dir)
+        .iter()
+        .filter(|p| p.save_password && (!is_prod(p) || prod_ok.contains(&p.id)))
+    {
+        match store.get(&p.id) {
+            Ok(Some(pw)) => {
+                items.insert(
+                    secret_id(&p.id),
+                    Json::Str(sync_crypto::encrypt(key, &p.id, pw.expose_secret())),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => return Err(format!("Cannot read saved passwords: {e}")),
+        }
+    }
+    Ok(items)
+}
+
+/// Write the passwords that came from the file into the keychain, only
+/// for profiles here that have "Save password" on.
+fn apply_secrets(
+    dir: &Path,
+    store: &dyn CredentialStore,
+    key: &sync_crypto::SyncKey,
+    merged: &Items,
+    local: &Items,
+) -> Result<(), String> {
+    let profiles = load_profiles_in(dir);
+    for (k, v) in merged {
+        let Some(id) = k.strip_prefix("secret:") else {
+            continue;
+        };
+        if local.get(k) == Some(v) || !profiles.iter().any(|p| p.id == id && p.save_password) {
+            continue;
+        }
+        let Some(pw) = v.as_str().and_then(|t| sync_crypto::decrypt(key, id, t)) else {
+            continue;
+        };
+        store
+            .set(id, &SecretString::from(pw))
+            .map_err(|e| format!("Cannot save a synced password: {e}"))?;
+    }
+    Ok(())
+}
+
+fn extension_ids(dir: &Path) -> Json {
+    let ext = load_extensions_in(dir);
+    Json::Arr(
+        REGISTRY
+            .iter()
+            .filter(|e| !e.built_in && ext.is_installed(e.id))
+            .map(|e| Json::Str(e.id.to_string()))
+            .collect(),
+    )
+}
+
+/// Extensions that other computers have and this one has not, as
+/// (computer name, extensions). Only a suggestion: nothing is installed.
+pub fn extension_suggestions(dir: &Path) -> Vec<(String, Vec<&'static ExtensionInfo>)> {
+    let own = format!("ext:{}", load_sync_config_in(dir).device_id);
+    let ext = load_extensions_in(dir);
+    load_base(dir)
+        .iter()
+        .filter(|(k, _)| k.starts_with("ext:") && **k != own)
+        .filter_map(|(_, v)| {
+            let name = v.get("device").and_then(Json::as_str)?.to_string();
+            let missing: Vec<&'static ExtensionInfo> = v
+                .get("ids")
+                .and_then(Json::as_arr)?
+                .iter()
+                .filter_map(|id| extension_info(id.as_str()?))
+                .filter(|info| !info.built_in && !ext.is_installed(info.id))
+                .collect();
+            (!missing.is_empty()).then_some((name, missing))
+        })
+        .collect()
+}
+
 /// Sync with the configured folder. Pass the user's `choices` for the
 /// conflicts of an earlier call that returned [`SyncOutcome::Conflicts`].
-pub fn sync_with(dir: &Path, choices: &BTreeMap<String, Choice>) -> Result<SyncOutcome, String> {
+/// `secrets` is needed only when passwords are synced.
+pub fn sync_with(
+    dir: &Path,
+    choices: &BTreeMap<String, Choice>,
+    secrets: Option<&SyncSecrets>,
+) -> Result<SyncOutcome, String> {
     let mut config = load_sync_config_in(dir);
     if !config.enabled || config.folder.trim().is_empty() {
         return Err("Sync is not set up.".into());
@@ -601,53 +868,123 @@ pub fn sync_with(dir: &Path, choices: &BTreeMap<String, Choice>) -> Result<SyncO
     let file = folder.join(SYNC_FILE);
     let cats = config.categories;
     let base = load_base(dir);
+    let remote_file = read_sync_file(&file)?;
+    let mut header = remote_file.as_ref().and_then(|(_, i)| i.crypto.clone());
+
+    // The key for passwords: the file's salt if there is one, else a new
+    // salt that is written with the next upload.
+    let key = if cats.passwords {
+        let secrets = secrets.ok_or("The sync passphrase is not set on this computer.")?;
+        match &header {
+            Some(h) => {
+                let key = sync_crypto::derive_key(secrets.passphrase, &h.salt)?;
+                if !sync_crypto::verify_check(&key, &h.check) {
+                    return Err("Wrong sync passphrase.".into());
+                }
+                Some(key)
+            }
+            None => {
+                let salt = sync_crypto::new_salt();
+                let key = sync_crypto::derive_key(secrets.passphrase, &salt)?;
+                header = Some(CryptoHeader {
+                    salt: salt.to_vec(),
+                    check: sync_crypto::check_token(&key),
+                });
+                Some(key)
+            }
+        }
+    } else {
+        None
+    };
+
     // A PROD connection already in the file was approved when it was
     // uploaded, so it stays in sync even if this list is empty here.
     let prod_ok: BTreeSet<String> = config
         .prod_approved
         .iter()
         .cloned()
-        .chain(
-            base.keys()
-                .filter_map(|k| k.strip_prefix("conn:").map(str::to_string)),
-        )
+        .chain(base.keys().filter_map(|k| {
+            k.strip_prefix("conn:")
+                .or_else(|| k.strip_prefix("tool:"))
+                .map(str::to_string)
+        }))
         .collect();
     let mut local = collect_items(dir, cats, &prod_ok);
+    if let (Some(secrets), Some(key)) = (secrets, &key) {
+        local.extend(secret_items(dir, secrets.store, key, &prod_ok)?);
+    }
+    if cats.extensions {
+        let own = format!("ext:{}", config.device_id);
+        local.insert(
+            own.clone(),
+            Json::Obj(vec![
+                ("device".into(), Json::Str(config.device_name.clone())),
+                ("ids".into(), extension_ids(dir)),
+            ]),
+        );
+        // Other computers' entries are theirs: carry them over untouched,
+        // or they would look deleted here.
+        for (k, v) in base
+            .iter()
+            .filter(|(k, _)| k.starts_with("ext:") && **k != own)
+        {
+            local.insert(k.clone(), v.clone());
+        }
+    }
     // A computer that never touched its appearance must not fight the
     // synced one over it on the first sync: let the file win.
-    if base.is_empty() && local.get("appearance") == Some(&appearance_item(&dir.join("__none__"))) {
-        local.remove("appearance");
+    if base.is_empty() {
+        let pristine = [
+            ("appearance", appearance_item(&dir.join("__none__"))),
+            ("grid", grid_item(false)),
+        ];
+        for (key, default) in pristine {
+            if local.get(key) == Some(&default) {
+                local.remove(key);
+            }
+        }
     }
-    let remote: Items = read_sync_file(&file)?
+    let remote: Items = remote_file
+        .as_ref()
         .map(|(items, _)| {
             items
-                .into_iter()
+                .iter()
                 .filter(|(k, _)| cats.includes(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
                 .collect()
         })
         .unwrap_or_default();
 
-    let result = merge(&base, &local, &remote, choices);
+    let mut result = merge(&base, &local, &remote, choices);
     if !result.conflicts.is_empty() {
         return Ok(SyncOutcome::Conflicts(result.conflicts));
+    }
+    // A password missing here (cleared keychain) must not delete it for
+    // every other computer.
+    for (k, v) in remote.iter().filter(|(k, _)| k.starts_with("secret:")) {
+        result.merged.entry(k.clone()).or_insert_with(|| v.clone());
     }
     let merged = result.merged;
     if merged != local {
         apply_items(dir, &merged, cats, &prod_ok)
             .map_err(|e| format!("Cannot update this computer: {e}"))?;
+        if let (Some(secrets), Some(key)) = (secrets, &key) {
+            apply_secrets(dir, secrets.store, key, &merged, &local)?;
+        }
     }
-    if merged != remote || !file.exists() {
+    let new_header = remote_file.as_ref().and_then(|(_, i)| i.crypto.as_ref()) != header.as_ref();
+    if merged != remote || !file.exists() || new_header {
         // Keep other computers' items of categories this computer does not sync.
         let mut out = merged.clone();
-        if let Some((all, _)) = read_sync_file(&file)? {
+        if let Some((all, _)) = &remote_file {
             for (k, v) in all {
-                if !cats.includes(&k) {
-                    out.insert(k, v);
+                if !cats.includes(k) {
+                    out.insert(k.clone(), v.clone());
                 }
             }
         }
         backup_version(&folder, &file);
-        write_sync_file(&file, &out, &config.device_name)?;
+        write_sync_file(&file, &out, &config.device_name, header.as_ref())?;
     }
     save_base(dir, &merged).map_err(|e| e.to_string())?;
     config.last_synced = now_unix_secs();
@@ -672,7 +1009,7 @@ pub fn import_kilat_file(
         read_sync_file(path)?.ok_or_else(|| format!("{} was not found.", path.display()))?;
     let remote: Items = remote
         .into_iter()
-        .filter(|(k, _)| categories.includes(k))
+        .filter(|(k, _)| categories.includes(k) && !k.starts_with("ext:"))
         .collect();
     let local = collect_items(dir, categories, &prod_ok);
     // Empty base: only-in-the-file is an addition, only-here is kept, so an
@@ -695,6 +1032,8 @@ pub fn import_kilat_file(
 pub fn disable_sync_in(dir: &Path) -> std::io::Result<()> {
     let mut config = load_sync_config_in(dir);
     config.enabled = false;
+    config.target.clear();
+    config.drive_account.clear();
     save_sync_config_in(dir, &config)?;
     let _ = fs::remove_file(dir.join("sync-base.json"));
     Ok(())
