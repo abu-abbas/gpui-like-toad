@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/ora-core", "crates/ora-driver", "crates/sqlite-driver", "crates/devtools", "crates/ext-sqlite", "crates/postgres-driver", "crates/ext-postgres", "crates/mysql-driver", "crates/ext-mysql", "crates/mssql-driver", "crates/ext-mssql", "crates/ext-mailhog", "crates/ext-redis", "crates/ext-dryrun", "crates/app"]
-# Patched copy of oracle/rust-oracledb (see vendor/oracledb/PATCHES.md).
-exclude = ["vendor/oracledb"]
+# Patched upstream dependencies, each documented in its PATCHES.md.
+exclude = ["vendor/oracledb", "vendor/native-tls"]
 
 [workspace.package]
 edition = "2021"
@@ -20,3 +20,7 @@ gpui-pre-platform = { opt-level = 3 }
 rustybuzz = { opt-level = 3 }
 taffy = { opt-level = 3 }
 ttf-parser = { opt-level = 3 }
+
+[patch.crates-io]
+# MySQL needs DHE-RSA on macOS as well as Linux.
+native-tls = { path = "vendor/native-tls" }
