@@ -441,6 +441,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-native-tls"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37dd6b179962fe4048a6f81d4c0d7ed419a21fdf49204b4c6b04971693358e79"
+dependencies = [
+ "futures-util",
+ "native-tls",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
 name = "async-net"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4800,8 +4812,8 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "futures-util",
+ "native-tls",
  "ora-core",
- "rustls",
  "tiberius",
  "tokio",
  "tokio-util",
@@ -4970,6 +4982,7 @@ dependencies = [
  "openssl",
  "openssl-probe",
  "openssl-sys",
+ "rustls-native-certs",
 ]
 
 [[package]]
@@ -8210,6 +8223,7 @@ version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e07324791de2bdaed058af4aa433a0b5ec5c0beac407a9797419c19805df2415"
 dependencies = [
+ "async-native-tls",
  "async-trait",
  "asynchronous-codec",
  "byteorder",
@@ -8225,14 +8239,10 @@ dependencies = [
  "once_cell",
  "pin-project-lite",
  "pretty-hex",
- "rustls-native-certs",
  "rustls-pki-types",
- "rustls-webpki",
  "secrecy",
  "thiserror 2.0.21",
  "tiberius-macros",
- "tokio-rustls",
- "tokio-util",
  "tracing",
  "uuid",
  "zeroize",

@@ -530,13 +530,14 @@ fn handle_guarded_job(
 
 /// A fresh, unconnected client for `kind`. Each database engine gets its
 /// own driver crate; this is the only place that picks one.
-fn new_client(kind: DbKind, demo: bool) -> Result<Box<dyn DbClient>, String> {
+fn new_client(profile: &ConnectionProfile, demo: bool) -> Result<Box<dyn DbClient>, String> {
     if demo {
         return Ok(Box::new(DemoClient::new()));
     }
+    let kind = profile.kind;
     match kind {
         DbKind::Oracle => Ok(Box::new(ThinClient::new())),
-        DbKind::Postgres | DbKind::Mysql | DbKind::Mssql => match downloaded_extension(kind) {
+        DbKind::Postgres | DbKind::Mysql | DbKind::Mssql => match downloaded_extension(profile)? {
             Some(client) => Ok(Box::new(client)),
             None => Err(format!(
                 "{} is an extension. Install it in Settings > Extensions, \
@@ -544,7 +545,7 @@ fn new_client(kind: DbKind, demo: bool) -> Result<Box<dyn DbClient>, String> {
                 kind.label()
             )),
         },
-        DbKind::Sqlite => match downloaded_extension(DbKind::Sqlite) {
+        DbKind::Sqlite => match downloaded_extension(profile)? {
             Some(client) => Ok(Box::new(client)),
             // Tests exercise the worker with the driver crate directly, so
             // they need no installed extension.
@@ -564,15 +565,25 @@ fn new_client(kind: DbKind, demo: bool) -> Result<Box<dyn DbClient>, String> {
 /// installed. Database engines other than Oracle only exist as extensions,
 /// so without one the connection is refused with a hint to install it. An
 /// extension that cannot start is reported on connect.
-fn downloaded_extension(kind: DbKind) -> Option<RemoteClient> {
+fn downloaded_extension(profile: &ConnectionProfile) -> Result<Option<RemoteClient>, String> {
+    let kind = profile.kind;
     let id = kind.key();
-    let install = ora_core::store::remote_install(id)?;
-    Some(RemoteClient::new(
+    let Some(install) = ora_core::store::remote_install(id) else {
+        return Ok(None);
+    };
+    if kind == DbKind::Mssql
+        && profile.access.allow_legacy_tls
+        && ora_core::update::Version::parse(&install.version)
+            .is_none_or(|version| version < ora_core::update::Version(1, 0, 2))
+    {
+        return Err("Legacy TLS requires SQL Server extension 1.0.2 or newer. Update it in Settings > Extensions.".into());
+    }
+    Ok(Some(RemoteClient::new(
         install.path,
         id,
         kind,
         env!("CARGO_PKG_VERSION"),
-    ))
+    )))
 }
 
 fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
@@ -587,7 +598,7 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                 Ok(pw) => pw,
                 Err(message) => return Response::Failed(message),
             };
-            let mut new_client = match new_client(profile.kind, demo) {
+            let mut new_client = match new_client(&profile, demo) {
                 Ok(c) => c,
                 Err(message) => return Response::Failed(message),
             };
@@ -615,7 +626,7 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                 Ok(pw) => pw,
                 Err(message) => return Response::Tested(Err(message)),
             };
-            let mut probe = match new_client(profile.kind, false) {
+            let mut probe = match new_client(&profile, false) {
                 Ok(c) => c,
                 Err(message) => return Response::Tested(Err(message)),
             };

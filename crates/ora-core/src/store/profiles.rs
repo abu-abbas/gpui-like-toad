@@ -64,6 +64,10 @@ pub(super) fn profile_to_json(p: &SavedProfile) -> Json {
             "trust_server_certificate".into(),
             Json::Bool(p.access.trust_server_certificate),
         ),
+        (
+            "allow_legacy_tls".into(),
+            Json::Bool(p.access.allow_legacy_tls),
+        ),
         ("save_password".to_string(), Json::Bool(p.save_password)),
     ])
 }
@@ -102,6 +106,10 @@ pub(super) fn profile_from_json(v: &Json) -> Option<SavedProfile> {
             sysdba: v.get("sysdba").and_then(Json::as_bool).unwrap_or(false),
             trust_server_certificate: v
                 .get("trust_server_certificate")
+                .and_then(Json::as_bool)
+                .unwrap_or(false),
+            allow_legacy_tls: v
+                .get("allow_legacy_tls")
                 .and_then(Json::as_bool)
                 .unwrap_or(false),
             // Files from before this option keep recording history.

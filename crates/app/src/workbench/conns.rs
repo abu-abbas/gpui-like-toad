@@ -862,6 +862,8 @@ impl Workbench {
                             && last.profile.access.sysdba == profile.access.sysdba
                             && last.profile.access.trust_server_certificate
                                 == profile.access.trust_server_certificate
+                            && last.profile.access.allow_legacy_tls
+                                == profile.access.allow_legacy_tls
                     })
             })
             .map(|conn| conn.id);

@@ -412,6 +412,22 @@ impl Workbench {
                             },
                             theme,
                         ))
+                        .child(
+                            Checkbox::new("allow-legacy-tls")
+                                .small()
+                                .label("Allow legacy TLS (1.0/1.1)")
+                                .checked(access.allow_legacy_tls)
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.connection_form.access.allow_legacy_tls = *checked;
+                                    cx.notify();
+                                })),
+                        )
+                        .when(access.allow_legacy_tls, |section| {
+                            section.child(caption_text(
+                                "Older TLS provides weaker protection. Use only for a server you trust that cannot use TLS 1.2.".into(),
+                                theme,
+                            ))
+                        })
                 })
                 .when(access.read_only, |section| {
                     section.child(caption_text(

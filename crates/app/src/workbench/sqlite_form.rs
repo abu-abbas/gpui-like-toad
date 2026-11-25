@@ -104,6 +104,7 @@ impl Workbench {
         }
         if !caps.databases {
             form.access.trust_server_certificate = false;
+            form.access.allow_legacy_tls = false;
         }
         form.form_notice = None;
         cx.notify();

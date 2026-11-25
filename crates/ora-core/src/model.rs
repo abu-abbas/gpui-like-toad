@@ -33,6 +33,8 @@ pub struct ConnectionAccess {
     /// (a self-signed one). Off by default: the connection is encrypted
     /// and the certificate must be valid.
     pub trust_server_certificate: bool,
+    /// SQL Server: allow TLS 1.0 and 1.1 on this connection.
+    pub allow_legacy_tls: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

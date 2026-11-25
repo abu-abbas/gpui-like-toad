@@ -12,12 +12,14 @@ default = []
 vendored = ["openssl/vendored"]
 alpn = []
 alpn-accept = []
+platform-roots = ["dep:rustls-native-certs"]
 
 [dependencies]
 log = "0.4.27"
 openssl = "0.10.75"
 openssl-probe = "0.2.1"
 openssl-sys = "0.9.111"
+rustls-native-certs = { version = "0.8", optional = true }
 
 [dev-dependencies]
 tempfile = "3.0"

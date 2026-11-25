@@ -276,9 +276,6 @@ impl DbClient for MssqlClient {
             port.parse()
                 .map_err(|_| DbError::new(format!("'{port}' is not a port number.")))?
         };
-        // The TLS library needs a crypto provider chosen once per process;
-        // another one may already be installed, which is fine.
-        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut config = Config::new();
         config.host(&host);
         config.port(port);
@@ -296,19 +293,23 @@ impl DbClient for MssqlClient {
         config.command_timeout(None);
         let addr = config.get_addr();
         let Self { rt, .. } = self;
-        let conn = rt.block_on(async {
-            let connect = async {
-                let tcp = TcpStream::connect(addr)
+        // The runtime polls connect on this thread, including the creation
+        // of the connector inside Tiberius.
+        let conn = native_tls::with_legacy_tls10(profile.access.allow_legacy_tls, || {
+            rt.block_on(async {
+                let connect = async {
+                    let tcp = TcpStream::connect(addr)
+                        .await
+                        .map_err(|e| DbError::new(format!("SQL Server: {e}")))?;
+                    tcp.set_nodelay(true).ok();
+                    Client::connect(config, tcp.compat_write())
+                        .await
+                        .map_err(db_err)
+                };
+                tokio::time::timeout(CONNECT_TIMEOUT, connect)
                     .await
-                    .map_err(|e| DbError::new(format!("SQL Server: {e}")))?;
-                tcp.set_nodelay(true).ok();
-                Client::connect(config, tcp.compat_write())
-                    .await
-                    .map_err(db_err)
-            };
-            tokio::time::timeout(CONNECT_TIMEOUT, connect)
-                .await
-                .map_err(|_| DbError::new("SQL Server: the connection timed out."))?
+                    .map_err(|_| DbError::new("SQL Server: the connection timed out."))?
+            })
         })?;
         self.conn = Some(conn);
         self.in_tx = false;

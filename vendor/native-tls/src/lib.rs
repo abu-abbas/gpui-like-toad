@@ -99,10 +99,31 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::any::Any;
+use std::cell::Cell;
 use std::{error, fmt, io, result};
 
 #[path = "imp/openssl.rs"]
 mod imp;
+
+thread_local! {
+    static ALLOW_LEGACY_TLS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Allow TLS 1.0 for connectors built during this call on the current thread.
+/// The setting is restored even if the call panics. Use this only with a
+/// synchronous call or a current-thread executor that drives the handshake.
+pub fn with_legacy_tls10<T>(enabled: bool, connect: impl FnOnce() -> T) -> T {
+    struct Restore<'a>(&'a Cell<bool>, bool);
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.1);
+        }
+    }
+    ALLOW_LEGACY_TLS.with(|setting| {
+        let _restore = Restore(setting, setting.replace(enabled));
+        connect()
+    })
+}
 
 #[cfg(test)]
 mod test;
@@ -346,6 +367,7 @@ pub struct TlsConnectorBuilder {
     accept_invalid_hostnames: bool,
     use_sni: bool,
     disable_built_in_roots: bool,
+    legacy_tls: bool,
     #[cfg(feature = "alpn")]
     alpn: Vec<Box<str>>,
 }
@@ -480,15 +502,21 @@ impl TlsConnector {
     /// Returns a new builder for a `TlsConnector`.
     #[must_use]
     pub fn builder() -> TlsConnectorBuilder {
+        let legacy_tls = ALLOW_LEGACY_TLS.with(Cell::get);
         TlsConnectorBuilder {
             identity: None,
-            min_protocol: Some(Protocol::Tlsv12),
+            min_protocol: Some(if legacy_tls {
+                Protocol::Tlsv10
+            } else {
+                Protocol::Tlsv12
+            }),
             max_protocol: None,
             root_certificates: vec![],
             use_sni: true,
             accept_invalid_certs: false,
             accept_invalid_hostnames: false,
             disable_built_in_roots: false,
+            legacy_tls,
             #[cfg(feature = "alpn")]
             alpn: vec![],
         }

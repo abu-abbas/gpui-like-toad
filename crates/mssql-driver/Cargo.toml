@@ -8,9 +8,10 @@ rust-version.workspace = true
 
 [dependencies]
 ora-core = { path = "../ora-core" }
-tiberius = { version = "0.13", default-features = false, features = ["tds73", "rustls", "chrono"] }
+tiberius = { version = "0.13", default-features = false, features = ["tds73", "native-tls", "chrono"] }
+# Use the workspace's OpenSSL backend and platform trust roots on all platforms.
+native-tls = { version = "=0.2.18", features = ["vendored", "platform-roots"] }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }
 tokio-util = { version = "0.7", default-features = false, features = ["compat"] }
 futures-util = { version = "0.3", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
