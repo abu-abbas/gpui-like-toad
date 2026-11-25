@@ -736,6 +736,14 @@ pub fn check_passphrase(folder: &Path, passphrase: &str) -> Result<bool, String>
     }
 }
 
+/// Whether the sync file in `folder` already has a passphrase.
+pub fn sync_passphrase_set(folder: &Path) -> bool {
+    matches!(
+        read_sync_file(&folder.join(SYNC_FILE)),
+        Ok(Some((_, info))) if info.crypto.is_some()
+    )
+}
+
 /// The saved passwords of this computer as sealed items. A keychain that
 /// cannot be read stops the sync: reading nothing would look like "all
 /// passwords were deleted here".

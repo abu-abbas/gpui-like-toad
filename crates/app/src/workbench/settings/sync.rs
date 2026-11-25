@@ -10,7 +10,10 @@
 use super::appearance::setting_group;
 use super::setting_row_owned;
 use super::*;
-use ora_core::store::{Choice, Conflict, Json, SyncCategories, SyncConfig, SyncOutcome};
+use ora_core::credentials::{CredentialStore as _, ExposeSecret as _, SecretString};
+use ora_core::store::{
+    Choice, Conflict, Json, SyncCategories, SyncConfig, SyncOutcome, SyncSecrets,
+};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -34,7 +37,23 @@ pub(super) struct SyncUi {
     /// Set while the open conflicts come from an import, not from the folder.
     import_file: Option<PathBuf>,
     detected: Vec<(String, PathBuf)>,
+    /// "Other computers have extensions you don't": (computer, names).
+    suggestions: Vec<(String, Vec<&'static str>)>,
+    /// The passphrase form, while it is open.
+    pass_form: Option<PassForm>,
 }
+
+struct PassForm {
+    first: Entity<InputState>,
+    second: Entity<InputState>,
+    /// The folder's file already has a passphrase: ask for it, once.
+    existing: bool,
+    error: Option<String>,
+    working: bool,
+}
+
+/// Keychain account of the sync passphrase on this computer.
+const PASSPHRASE_ACCOUNT: &str = "kilat-sync-passphrase";
 
 impl SyncUi {
     pub(super) fn load() -> Self {
@@ -52,6 +71,8 @@ impl SyncUi {
             choices: BTreeMap::new(),
             import_file: None,
             detected: Vec::new(),
+            suggestions: Vec::new(),
+            pass_form: None,
         }
     }
 }
@@ -103,7 +124,16 @@ fn conflict_title(c: &Conflict) -> String {
             .and_then(Json::as_str)
             .map(str::to_string)
     };
-    if c.key.starts_with("conn:") {
+    if c.key.starts_with("secret:") {
+        "Saved password".into()
+    } else if c.key.starts_with("tool:") {
+        format!(
+            "Developer Tool: {}",
+            name(&c.local).or(name(&c.remote)).unwrap_or_default()
+        )
+    } else if c.key == "grid" {
+        "Data grid preferences".into()
+    } else if c.key.starts_with("conn:") {
         format!(
             "Connection: {}",
             name(&c.local).or(name(&c.remote)).unwrap_or_default()
@@ -201,7 +231,22 @@ impl Workbench {
             let dir = store::config_dir();
             match import {
                 Some(file) => store::import_kilat_file(&dir, &file, cats, &choices),
-                None => store::sync_with(&dir, &choices),
+                None if cats.passwords => {
+                    let keychain = crate::keychain::store();
+                    let passphrase = keychain
+                        .get(PASSPHRASE_ACCOUNT)
+                        .map_err(|e| e.to_string())?
+                        .ok_or("The sync passphrase is not saved on this computer.")?;
+                    store::sync_with(
+                        &dir,
+                        &choices,
+                        Some(&SyncSecrets {
+                            store: keychain,
+                            passphrase: passphrase.expose_secret(),
+                        }),
+                    )
+                }
+                None => store::sync_with(&dir, &choices, None),
             }
         });
         cx.spawn(async move |view, cx| {
@@ -254,6 +299,7 @@ impl Workbench {
                 if pulled > 0 {
                     self.reload_after_sync(cx);
                 }
+                self.refresh_sync_suggestions();
             }
             Ok(SyncOutcome::Conflicts(conflicts)) => {
                 sync.status = SyncStatus::Conflicts(conflicts.len());
@@ -593,6 +639,14 @@ impl Workbench {
                             cx,
                         ),
                         toggle(
+                            "sync-extensions",
+                            "Extensions list",
+                            "Your other computers get a suggestion to install what you use. Nothing is installed for you.",
+                            cats.extensions,
+                            |c, v| c.extensions = v,
+                            cx,
+                        ),
+                        toggle(
                             "sync-appearance",
                             "Appearance",
                             "Light and dark theme, accent, fonts, app icon.",
@@ -603,6 +657,31 @@ impl Workbench {
                     ],
                 ));
 
+            page = page
+                .child(div().font_weight(FontWeight::SEMIBOLD).child("Passwords"))
+                .child(self.render_sync_passwords(theme, cx));
+            if !sync.suggestions.is_empty() {
+                let lines: Vec<String> = sync
+                    .suggestions
+                    .iter()
+                    .map(|(computer, names)| format!("{computer}: {}", names.join(", ")))
+                    .collect();
+                page = page.child(setting_group(
+                    theme,
+                    [setting_row_owned(
+                        "Extensions on your other computers".into(),
+                        format!("Not installed here. {}", lines.join(" · ")),
+                        Button::new("sync-open-extensions")
+                            .small()
+                            .label("Open Extensions")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings.page = SettingsPage::Extensions;
+                                cx.notify();
+                            })),
+                        theme,
+                    )],
+                ));
+            }
             let mut prod: Vec<(String, String, String)> = Vec::new();
             if cats.connections {
                 prod.extend(
@@ -660,7 +739,7 @@ impl Workbench {
                 page = page
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("PROD connections and tools"))
                     .child(caption_text(
-                        "PROD connections and tools stay on this computer unless you tick them here. Ticked ones are uploaded to the folder (without password).".into(),
+                        "PROD connections and tools stay on this computer unless you tick them here. Ticked ones are uploaded to the folder; their password too, but only if you turned on encrypted passwords.".into(),
                         theme,
                     ))
                     .child(setting_group(theme, rows.collect::<Vec<_>>()));
@@ -712,6 +791,87 @@ impl Workbench {
             );
         }
         page
+    }
+
+    fn render_sync_passwords(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let sync = &self.settings.sync;
+        let on = sync.config.categories.passwords;
+        let mut group = vec![setting_row_owned(
+            "Sync saved passwords, encrypted".into(),
+            if on {
+                "On. Passwords are encrypted on this computer with your sync passphrase before they are uploaded. PROD ones only when ticked below.".into()
+            } else {
+                "Off. Each computer asks for a password once and keeps it in its own Keychain."
+                    .into()
+            },
+            if on {
+                Button::new("sync-passwords-off")
+                    .small()
+                    .label("Turn off")
+                    .on_click(cx.listener(|this, _, _, cx| this.sync_passwords_off(cx)))
+            } else {
+                Button::new("sync-passwords-on")
+                    .small()
+                    .label("Turn on…")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.sync_open_pass_form(window, cx)),
+                    )
+            },
+            theme,
+        )];
+        if let Some(form) = &sync.pass_form {
+            let mut body = div()
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_2))
+                .px(px(SPACE_4))
+                .py(px(SPACE_3))
+                .child(body_text(
+                    if form.existing {
+                        "This folder already uses a sync passphrase. Enter it once on this computer.".into()
+                    } else {
+                        "Choose a sync passphrase. If you forget it, nobody can recover the synced passwords, not even us: you would type the database passwords again on each computer.".into()
+                    },
+                    theme,
+                ))
+                .child(Input::new(&form.first).mask_toggle());
+            if !form.existing {
+                body = body.child(Input::new(&form.second).mask_toggle());
+            }
+            if let Some(err) = &form.error {
+                body = body.child(body_text(err.clone(), theme).text_color(theme.danger));
+            }
+            body = body.child(
+                div()
+                    .flex()
+                    .gap(px(SPACE_2))
+                    .child(
+                        Button::new("sync-pass-ok")
+                            .small()
+                            .primary()
+                            .label("Turn on")
+                            .disabled(form.working)
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.sync_confirm_passphrase(cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("sync-pass-cancel")
+                            .small()
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings.sync.pass_form = None;
+                                cx.notify();
+                            })),
+                    ),
+            );
+            group.push(body);
+        }
+        setting_group(theme, group)
     }
 
     fn render_sync_conflicts(
@@ -879,5 +1039,91 @@ impl Workbench {
     /// Look for cloud folders when the page opens.
     pub(super) fn detect_sync_folders(&mut self) {
         self.settings.sync.detected = store::detect_cloud_folders();
+        self.refresh_sync_suggestions();
+    }
+
+    fn refresh_sync_suggestions(&mut self) {
+        self.settings.sync.suggestions = store::extension_suggestions(&store::config_dir())
+            .into_iter()
+            .map(|(computer, missing)| (computer, missing.iter().map(|e| e.name).collect()))
+            .collect();
+    }
+
+    /// Open the passphrase form: one field if the folder already has a
+    /// passphrase (set on another computer), two if this is the first.
+    fn sync_open_pass_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let folder = PathBuf::from(&self.settings.sync.config.folder);
+        let existing = ora_core::store::sync_passphrase_set(&folder);
+        let first = cx.new(|cx| InputState::new(&mut *window, cx).masked(true));
+        let second = cx.new(|cx| InputState::new(&mut *window, cx).masked(true));
+        self.settings.sync.pass_form = Some(PassForm {
+            first,
+            second,
+            existing,
+            error: None,
+            working: false,
+        });
+        cx.notify();
+    }
+
+    fn sync_confirm_passphrase(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = &mut self.settings.sync.pass_form else {
+            return;
+        };
+        if form.working {
+            return;
+        }
+        let first = Self::input_text(&form.first, cx);
+        let second = Self::input_text(&form.second, cx);
+        let existing = form.existing;
+        if first.chars().count() < 8 {
+            form.error = Some("Use at least 8 characters.".into());
+            cx.notify();
+            return;
+        }
+        if !existing && first != second {
+            form.error = Some("The two passphrases are different.".into());
+            cx.notify();
+            return;
+        }
+        form.error = None;
+        form.working = true;
+        let folder = PathBuf::from(&self.settings.sync.config.folder);
+        let task = cx.background_executor().spawn(async move {
+            store::check_passphrase(&folder, &first)?;
+            crate::keychain::store()
+                .set(PASSPHRASE_ACCOUNT, &SecretString::from(first))
+                .map_err(|e| e.to_string())
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => {
+                        this.settings.sync.pass_form = None;
+                        this.settings.sync.config.categories.passwords = true;
+                        this.save_sync_config(cx);
+                        this.run_sync(false, cx);
+                    }
+                    Err(err) => {
+                        if let Some(form) = &mut this.settings.sync.pass_form {
+                            form.working = false;
+                            form.error = Some(err);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn sync_passwords_off(&mut self, cx: &mut Context<Self>) {
+        self.settings.sync.config.categories.passwords = false;
+        self.save_sync_config(cx);
+        cx.background_executor()
+            .spawn(async { crate::keychain::store().delete(PASSPHRASE_ACCOUNT) })
+            .detach();
     }
 }
