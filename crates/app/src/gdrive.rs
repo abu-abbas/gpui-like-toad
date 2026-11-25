@@ -507,6 +507,7 @@ mod tests {
 
     #[test]
     fn state_round_trips_and_missing_file_is_empty() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join(format!("kilat-gd-{}", oauth::random_state()));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(State::load(&dir).file_id, "");
