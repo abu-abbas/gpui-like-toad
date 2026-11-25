@@ -134,6 +134,12 @@ jobs:
           assert done, "kilat entry not found in Cargo.lock"
           lock.write_text("".join(out))
           print([line for line in updated.splitlines() if line.startswith("version")])
+      - if: runner.os == 'Windows'
+        name: Pakai Perl lengkap (Strawberry) untuk OpenSSL vendored
+        # Perl bawaan Git for Windows tidak punya semua modul yang dibutuhkan
+        # Configure OpenSSL, sehingga build openssl-src gagal.
+        shell: bash
+        run: echo "OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe" >> "$GITHUB_ENV"
       - name: Build biner rilis
         run: cargo build --locked --release -p kilat
       - name: Smoke test --version dan siapkan artifact
