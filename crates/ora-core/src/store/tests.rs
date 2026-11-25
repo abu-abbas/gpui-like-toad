@@ -582,3 +582,190 @@ fn auto_count_defaults_off_and_keeps_other_settings() {
     save_auto_count_in(&dir, false).unwrap();
     assert!(!load_auto_count_in(&dir));
 }
+
+// ---------------------------------------------------------------------------
+// Settings Sync
+// ---------------------------------------------------------------------------
+
+fn sync_dir(tag: &str) -> PathBuf {
+    let dir = env::temp_dir().join(format!("kilat-sync-test-{tag}-{}", new_profile_id()));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn sync_profile(id: &str, name: &str, env: ConnectionEnvironment) -> SavedProfile {
+    SavedProfile {
+        id: id.into(),
+        name: name.into(),
+        kind: DbKind::from_key("oracle"),
+        username: "u".into(),
+        connect_string: "h:1521/S".into(),
+        folder: String::new(),
+        access: ConnectionAccess {
+            environment: env,
+            ..Default::default()
+        },
+        save_password: true,
+    }
+}
+
+fn enable_sync(dir: &Path, shared: &Path, name: &str) {
+    let mut c = load_sync_config_in(dir);
+    c.enabled = true;
+    c.folder = shared.to_string_lossy().into();
+    c.device_name = name.into();
+    save_sync_config_in(dir, &c).unwrap();
+}
+
+#[test]
+fn sync_moves_connections_between_computers_without_prod_or_passwords() {
+    let (a, b, shared) = (sync_dir("a"), sync_dir("b"), sync_dir("shared"));
+    save_profiles_in(
+        &a,
+        &[
+            sync_profile("1", "dev", ConnectionEnvironment::Development),
+            sync_profile("2", "prod", ConnectionEnvironment::Production),
+        ],
+    )
+    .unwrap();
+    enable_sync(&a, &shared, "A");
+    enable_sync(&b, &shared, "B");
+    assert!(matches!(
+        sync_with(&a, &BTreeMap::new()),
+        Ok(SyncOutcome::Synced { pushed: 1.., .. })
+    ));
+    let text = fs::read_to_string(shared.join(SYNC_FILE)).unwrap();
+    assert!(text.contains("\"dev\"") && !text.contains("\"prod\""));
+    assert!(!text.to_lowercase().contains("password\":\""));
+
+    sync_with(&b, &BTreeMap::new()).unwrap();
+    let on_b = load_profiles_in(&b);
+    assert_eq!(on_b.len(), 1);
+    assert_eq!(on_b[0].name, "dev");
+
+    // Deleting on B reaches A; A's local PROD connection is untouched.
+    save_profiles_in(&b, &[]).unwrap();
+    sync_with(&b, &BTreeMap::new()).unwrap();
+    sync_with(&a, &BTreeMap::new()).unwrap();
+    let on_a = load_profiles_in(&a);
+    assert_eq!(on_a.len(), 1);
+    assert_eq!(on_a[0].name, "prod");
+}
+
+#[test]
+fn approved_prod_connection_syncs() {
+    let (a, b, shared) = (sync_dir("pa"), sync_dir("pb"), sync_dir("pshared"));
+    save_profiles_in(
+        &a,
+        &[sync_profile("2", "prod", ConnectionEnvironment::Production)],
+    )
+    .unwrap();
+    enable_sync(&a, &shared, "A");
+    enable_sync(&b, &shared, "B");
+    let mut c = load_sync_config_in(&a);
+    c.prod_approved = vec!["2".into()];
+    save_sync_config_in(&a, &c).unwrap();
+    sync_with(&a, &BTreeMap::new()).unwrap();
+    sync_with(&b, &BTreeMap::new()).unwrap();
+    assert_eq!(load_profiles_in(&b)[0].name, "prod");
+    // Still there after another round on A (the base keeps it approved).
+    sync_with(&a, &BTreeMap::new()).unwrap();
+    assert!(read_sync_file(&shared.join(SYNC_FILE))
+        .unwrap()
+        .unwrap()
+        .0
+        .contains_key("conn:2"));
+}
+
+#[test]
+fn change_on_both_sides_is_a_conflict_until_chosen() {
+    let (a, b, shared) = (sync_dir("ca"), sync_dir("cb"), sync_dir("cshared"));
+    save_profiles_in(&a, &[sync_profile("1", "dev", ConnectionEnvironment::None)]).unwrap();
+    enable_sync(&a, &shared, "A");
+    enable_sync(&b, &shared, "B");
+    sync_with(&a, &BTreeMap::new()).unwrap();
+    sync_with(&b, &BTreeMap::new()).unwrap();
+
+    save_profiles_in(
+        &a,
+        &[sync_profile("1", "from-a", ConnectionEnvironment::None)],
+    )
+    .unwrap();
+    save_profiles_in(
+        &b,
+        &[sync_profile("1", "from-b", ConnectionEnvironment::None)],
+    )
+    .unwrap();
+    sync_with(&a, &BTreeMap::new()).unwrap();
+
+    let Ok(SyncOutcome::Conflicts(conflicts)) = sync_with(&b, &BTreeMap::new()) else {
+        panic!("expected a conflict");
+    };
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].key, "conn:1");
+    // Nothing changed on B while the conflict is open.
+    assert_eq!(load_profiles_in(&b)[0].name, "from-b");
+
+    let choices = BTreeMap::from([("conn:1".to_string(), Choice::Remote)]);
+    sync_with(&b, &choices).unwrap();
+    assert_eq!(load_profiles_in(&b)[0].name, "from-a");
+}
+
+#[test]
+fn first_sync_merges_both_sides_and_keeps_old_versions() {
+    let (a, b, shared) = (sync_dir("ma"), sync_dir("mb"), sync_dir("mshared"));
+    save_profiles_in(&a, &[sync_profile("1", "one", ConnectionEnvironment::None)]).unwrap();
+    save_profiles_in(&b, &[sync_profile("2", "two", ConnectionEnvironment::None)]).unwrap();
+    enable_sync(&a, &shared, "A");
+    enable_sync(&b, &shared, "B");
+    sync_with(&a, &BTreeMap::new()).unwrap();
+    sync_with(&b, &BTreeMap::new()).unwrap();
+    sync_with(&a, &BTreeMap::new()).unwrap();
+    assert_eq!(load_profiles_in(&a).len(), 2);
+    assert_eq!(load_profiles_in(&b).len(), 2);
+    assert!(shared.join("versions").is_dir());
+}
+
+#[test]
+fn favorites_and_appearance_sync_but_plain_history_does_not() {
+    let (a, b, shared) = (sync_dir("fa"), sync_dir("fb"), sync_dir("fshared"));
+    let mut hist = Vec::new();
+    record_history(&mut hist, "select 1 from secret_table", 10);
+    record_history(&mut hist, "select 2 from dual", 20);
+    hist[0].favorite = true;
+    save_history_in(&a, &hist).unwrap();
+    save_theme_names_in(
+        &a,
+        &ThemeNames {
+            light: Some("Latte".into()),
+            dark: None,
+        },
+    )
+    .unwrap();
+    enable_sync(&a, &shared, "A");
+    enable_sync(&b, &shared, "B");
+    sync_with(&a, &BTreeMap::new()).unwrap();
+    sync_with(&b, &BTreeMap::new()).unwrap();
+    let on_b = load_history_in(&b);
+    assert_eq!(on_b.len(), 1);
+    assert_eq!(on_b[0].sql, "select 2 from dual");
+    assert_eq!(load_theme_names_in(&b).light.as_deref(), Some("Latte"));
+}
+
+#[test]
+fn kilat_file_export_and_import_never_delete() {
+    let (a, b) = (sync_dir("ea"), sync_dir("eb"));
+    save_profiles_in(&a, &[sync_profile("1", "one", ConnectionEnvironment::None)]).unwrap();
+    save_profiles_in(
+        &b,
+        &[sync_profile("9", "mine", ConnectionEnvironment::None)],
+    )
+    .unwrap();
+    let file = a.join("backup.kilat");
+    export_kilat_file(&a, &file, SyncCategories::default(), &Default::default()).unwrap();
+    import_kilat_file(&b, &file, SyncCategories::default(), &BTreeMap::new()).unwrap();
+    assert_eq!(load_profiles_in(&b).len(), 2);
+    assert!(read_sync_file(&a.join("nope.kilat")).unwrap().is_none());
+    fs::write(a.join("bad.kilat"), "{}").unwrap();
+    assert!(read_sync_file(&a.join("bad.kilat")).is_err());
+}

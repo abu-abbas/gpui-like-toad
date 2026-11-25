@@ -735,6 +735,7 @@ impl Workbench {
                 .items_center()
                 .justify_end()
                 .gap(px(SPACE_2))
+                .children(self.render_sync_chip(theme, cx))
                 // A spinning loader while a database job runs, so a long
                 // query or refresh is visible at a glance.
                 .when(self.conn.busy, |row| {

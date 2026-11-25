@@ -29,6 +29,7 @@ mod layout;
 mod migrate;
 mod profile_import;
 mod profiles;
+mod sync;
 #[cfg(test)]
 mod tests;
 mod theme;
@@ -43,6 +44,7 @@ pub use layout::*;
 pub use migrate::*;
 pub use profile_import::*;
 pub use profiles::*;
+pub use sync::*;
 pub use theme::*;
 pub use tools::*;
 pub use update_prefs::*;
