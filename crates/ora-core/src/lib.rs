@@ -27,6 +27,7 @@ pub mod fetch;
 pub mod filter;
 pub mod import;
 pub mod model;
+pub mod oauth;
 pub mod pretty;
 pub mod recycle;
 pub mod redact;

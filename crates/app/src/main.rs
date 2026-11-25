@@ -23,6 +23,7 @@ mod completion;
 mod crash_log;
 mod diagnostics;
 mod error_log;
+mod gdrive;
 mod keychain;
 #[cfg(target_os = "macos")]
 mod macos_bundle;

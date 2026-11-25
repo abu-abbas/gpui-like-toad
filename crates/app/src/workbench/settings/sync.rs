@@ -41,6 +41,9 @@ pub(super) struct SyncUi {
     suggestions: Vec<(String, Vec<&'static str>)>,
     /// The passphrase form, while it is open.
     pass_form: Option<PassForm>,
+    /// Set while the browser sign-in for Google Drive is open; setting it
+    /// to true cancels the wait.
+    drive_login: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 struct PassForm {
@@ -73,6 +76,7 @@ impl SyncUi {
             detected: Vec::new(),
             suggestions: Vec::new(),
             pass_form: None,
+            drive_login: None,
         }
     }
 }
@@ -199,8 +203,85 @@ impl Workbench {
         .detach();
     }
 
+    fn sync_drive_cancel(&mut self, cx: &mut Context<Self>) {
+        if let Some(flag) = self.settings.sync.drive_login.take() {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        cx.notify();
+    }
+
+    /// Open Google's sign-in page, wait for the browser in the background,
+    /// then turn Drive sync on.
+    fn sync_drive_connect(&mut self, cx: &mut Context<Self>) {
+        let pending = match crate::gdrive::begin() {
+            Ok(p) => p,
+            Err(err) => {
+                self.settings.sync.note = Some((true, err));
+                cx.notify();
+                return;
+            }
+        };
+        cx.open_url(&pending.url);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.settings.sync.drive_login = Some(cancel.clone());
+        self.settings.sync.note = None;
+        let task = cx.background_executor().spawn(async move {
+            crate::gdrive::finish_login(pending, crate::keychain::store(), || {
+                cancel.load(std::sync::atomic::Ordering::SeqCst)
+            })
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |this, cx| {
+                this.settings.sync.drive_login = None;
+                match result {
+                    Ok(email) => this.sync_use_drive(email, cx),
+                    Err(err) => {
+                        if !err.contains("cancelled") {
+                            this.settings.sync.note = Some((true, err));
+                        }
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn sync_use_drive(&mut self, email: String, cx: &mut Context<Self>) {
+        let cache = crate::gdrive::cache_dir();
+        if let Err(err) = std::fs::create_dir_all(&cache) {
+            self.settings.sync.note =
+                Some((true, format!("Could not create the cache folder: {err}")));
+            cx.notify();
+            return;
+        }
+        let sync = &mut self.settings.sync;
+        sync.config.enabled = true;
+        sync.config.target = "drive".into();
+        sync.config.drive_account = email;
+        sync.config.folder = cache.to_string_lossy().into_owned();
+        sync.status = SyncStatus::Idle;
+        sync.note = None;
+        sync.conflicts.clear();
+        sync.choices.clear();
+        sync.import_file = None;
+        self.save_sync_config(cx);
+        self.run_sync(false, cx);
+    }
+
     fn sync_turn_off(&mut self, cx: &mut Context<Self>) {
         let sync = &mut self.settings.sync;
+        if sync.config.target == "drive" {
+            // The keychain can block, so not on the UI thread.
+            cx.background_executor()
+                .spawn(async {
+                    crate::gdrive::sign_out(crate::keychain::store());
+                    let _ = std::fs::remove_dir_all(crate::gdrive::cache_dir());
+                })
+                .detach();
+        }
         if let Err(err) = store::disable_sync_in(&store::config_dir()) {
             sync.note = Some((true, format!("Could not turn sync off: {err}")));
         }
@@ -227,12 +308,16 @@ impl Workbench {
         let choices = sync.choices.clone();
         let import = sync.import_file.clone();
         let cats = sync.config.categories;
+        let drive = sync.config.target == "drive" && import.is_none();
         let task = cx.background_executor().spawn(async move {
             let dir = store::config_dir();
-            match import {
+            let keychain = crate::keychain::store();
+            if drive {
+                crate::gdrive::pull(&crate::gdrive::cache_dir(), keychain)?;
+            }
+            let result = match import {
                 Some(file) => store::import_kilat_file(&dir, &file, cats, &choices),
                 None if cats.passwords => {
-                    let keychain = crate::keychain::store();
                     let passphrase = keychain
                         .get(PASSPHRASE_ACCOUNT)
                         .map_err(|e| e.to_string())?
@@ -247,7 +332,11 @@ impl Workbench {
                     )
                 }
                 None => store::sync_with(&dir, &choices, None),
+            };
+            if drive && matches!(result, Ok(SyncOutcome::Synced { .. })) {
+                crate::gdrive::push(&crate::gdrive::cache_dir(), keychain)?;
             }
+            result
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -428,7 +517,11 @@ impl Workbench {
                 IconName::Check,
                 theme.muted_foreground,
                 format!("Synced {}", ago(sync.config.last_synced)),
-                format!("Synced with {}", sync.config.folder),
+                if sync.config.target == "drive" {
+                    format!("Synced with Google Drive ({})", sync.config.drive_account)
+                } else {
+                    format!("Synced with {}", sync.config.folder)
+                },
             ),
             SyncStatus::Syncing => (
                 IconName::RefreshCw,
@@ -524,18 +617,45 @@ impl Workbench {
                     theme,
                 ));
             }
+            let waiting = sync.drive_login.is_some();
+            let (desc, label) = if !crate::gdrive::available() {
+                (
+                    "Not available in this build. Use a release build of Kilat.",
+                    "Connect…",
+                )
+            } else if waiting {
+                (
+                    "Finish signing in in your browser. Kilat waits up to 5 minutes.",
+                    "Cancel",
+                )
+            } else {
+                ("Sign in with Google, no folder needed. Kilat only sees the files it creates, in a folder named Kilat Sync.", "Connect Google Drive…")
+            };
             rows.push(setting_row_owned(
                 "Google Drive account".into(),
-                "Sign in with Google, no folder needed. Coming later.".into(),
+                desc.into(),
                 Button::new("sync-google")
                     .small()
-                    .label("Coming soon")
-                    .disabled(true),
+                    .primary()
+                    .label(label)
+                    .disabled(!crate::gdrive::available())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if waiting {
+                            this.sync_drive_cancel(cx)
+                        } else {
+                            this.sync_drive_connect(cx)
+                        }
+                    })),
                 theme,
             ));
             page = page.child(setting_group(theme, rows));
         } else {
-            let folder = sync.config.folder.clone();
+            let is_drive = sync.config.target == "drive";
+            let folder = if is_drive {
+                format!("{} (folder Kilat Sync)", sync.config.drive_account)
+            } else {
+                sync.config.folder.clone()
+            };
             let status = if running {
                 "Syncing…".to_string()
             } else {
@@ -545,7 +665,7 @@ impl Workbench {
                 theme,
                 [
                     setting_row_owned(
-                        "Folder".into(),
+                        if is_drive { "Google Drive" } else { "Folder" }.into(),
                         format!("{folder}\n{status}"),
                         div()
                             .flex()
@@ -561,9 +681,23 @@ impl Workbench {
                             .child(
                                 Button::new("sync-change")
                                     .small()
-                                    .label("Change…")
+                                    .label(if sync.drive_login.is_some() {
+                                        "Cancel"
+                                    } else if is_drive {
+                                        "Sign in again…"
+                                    } else {
+                                        "Change…"
+                                    })
                                     .disabled(running)
-                                    .on_click(cx.listener(|this, _, _, cx| this.sync_choose_folder(cx))),
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if this.settings.sync.drive_login.is_some() {
+                                            this.sync_drive_cancel(cx)
+                                        } else if is_drive {
+                                            this.sync_drive_connect(cx)
+                                        } else {
+                                            this.sync_choose_folder(cx)
+                                        }
+                                    })),
                             ),
                         theme,
                     ),

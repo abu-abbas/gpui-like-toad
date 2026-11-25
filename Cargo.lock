@@ -4322,6 +4322,7 @@ dependencies = [
  "rust-embed",
  "rustix",
  "serde_json",
+ "sha2 0.10.9",
  "sqlite-driver",
  "tempfile",
  "ureq",
@@ -5871,6 +5872,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "url",
 ]
 

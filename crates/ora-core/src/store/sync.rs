@@ -93,6 +93,11 @@ pub struct SyncConfig {
     pub prod_approved: Vec<String>,
     /// Unix seconds of the last successful sync; 0 = never.
     pub last_synced: u64,
+    /// `"drive"` when the folder is the local cache of a Google Drive
+    /// account (the app uploads and downloads it); empty for a plain folder.
+    pub target: String,
+    /// Email shown for the Google account.
+    pub drive_account: String,
 }
 
 impl Default for SyncConfig {
@@ -106,6 +111,8 @@ impl Default for SyncConfig {
             categories: SyncCategories::default(),
             prod_approved: Vec::new(),
             last_synced: 0,
+            target: String::new(),
+            drive_account: String::new(),
         }
     }
 }
@@ -153,6 +160,8 @@ pub fn load_sync_config_in(dir: &Path) -> SyncConfig {
             })
             .unwrap_or_default();
         config.last_synced = v.get("last_synced").and_then(Json::as_u64).unwrap_or(0);
+        config.target = text("target");
+        config.drive_account = text("drive_account");
     }
     if config.device_id.is_empty() {
         config.device_id = new_profile_id();
@@ -201,6 +210,11 @@ pub fn save_sync_config_in(dir: &Path, config: &SyncConfig) -> std::io::Result<(
                 ),
             ),
             ("last_synced".into(), Json::Num(config.last_synced as f64)),
+            ("target".into(), Json::Str(config.target.clone())),
+            (
+                "drive_account".into(),
+                Json::Str(config.drive_account.clone()),
+            ),
         ]),
     )
 }
@@ -1018,6 +1032,8 @@ pub fn import_kilat_file(
 pub fn disable_sync_in(dir: &Path) -> std::io::Result<()> {
     let mut config = load_sync_config_in(dir);
     config.enabled = false;
+    config.target.clear();
+    config.drive_account.clear();
     save_sync_config_in(dir, &config)?;
     let _ = fs::remove_file(dir.join("sync-base.json"));
     Ok(())
