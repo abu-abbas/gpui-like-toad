@@ -1,6 +1,7 @@
 //! End to end: the real extension program, driven through `RemoteClient`.
 //! The database part needs a server: set `KILAT_TEST_MYSQL` to
 //! `host:port/database;user;password` (CI has none, so it is skipped there).
+//! Set `KILAT_TEST_MYSQL_TLS_CIPHER` to also check the negotiated cipher.
 
 use std::path::PathBuf;
 
@@ -57,6 +58,18 @@ fn queries_and_edits_work_through_the_protocol() {
         "{}",
         info.version
     );
+    if let Ok(cipher) = std::env::var("KILAT_TEST_MYSQL_TLS_CIPHER") {
+        let status = c
+            .query(
+                "SHOW SESSION STATUS LIKE 'Ssl_cipher'",
+                FetchLimits::rows(1),
+            )
+            .unwrap();
+        assert_eq!(
+            status.rows,
+            vec![vec![Value::Text("Ssl_cipher".into()), Value::Text(cipher)]]
+        );
+    }
     c.execute("CREATE TEMPORARY TABLE kt_proto (id int, name varchar(20))")
         .unwrap();
     c.execute_binds(

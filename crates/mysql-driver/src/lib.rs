@@ -228,8 +228,8 @@ impl DbClient for MysqlClient {
         };
         let mut conn = match Conn::new(build(true)) {
             Ok(c) => c,
-            // Only a server without TLS gets a second try: a wrong
-            // password must not be sent twice.
+            // Retry without TLS only if the server's greeting did not offer
+            // it. A failed handshake must never downgrade the connection.
             Err(e) if tls::is_tls_unavailable(&e) => Conn::new(build(false)).map_err(db_err)?,
             Err(e) => return Err(db_err(e)),
         };

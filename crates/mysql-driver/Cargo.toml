@@ -8,8 +8,9 @@ rust-version.workspace = true
 
 [dependencies]
 ora-core = { path = "../ora-core" }
-mysql = { version = "28", default-features = false, features = ["default-rust", "rustls-tls"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+mysql = { version = "28", default-features = false, features = ["default-rust", "native-tls"] }
+# Link OpenSSL into the downloadable extension on every platform.
+native-tls = { version = "=0.2.18", features = ["vendored"] }
 
 [dev-dependencies]
 sqlite-driver = { path = "../sqlite-driver" }
