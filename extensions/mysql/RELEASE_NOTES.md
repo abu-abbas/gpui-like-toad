@@ -1,5 +1,11 @@
 # MySQL extension release notes
 
+## 1.0.3 · Unreleased
+
+Minimum Kilat version `0.1.55`.
+
+- Fixes encrypted connections to older MySQL 5.7 servers that require a TLS 1.2 DHE-RSA cipher. If a server offers TLS and the handshake fails, Kilat reports the error without retrying unencrypted.
+
 ## [1.0.2](https://github.com/abu-abbas/kilat/releases/tag/ext-mysql-1.0.2) · 2026-11-24
 
 Minimum Kilat version `0.1.55`. The Explain analyze button appears in Kilat 0.1.63 and newer; older versions keep working without it.
