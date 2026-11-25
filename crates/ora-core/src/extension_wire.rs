@@ -342,6 +342,7 @@ pub fn profile_to_json(p: &ConnectionProfile) -> Json {
                     "trust_server_certificate",
                     Json::Bool(p.access.trust_server_certificate),
                 ),
+                ("allow_legacy_tls", Json::Bool(p.access.allow_legacy_tls)),
             ]),
         ),
     ])
@@ -361,6 +362,7 @@ pub fn profile_from_json(j: &Json) -> Result<ConnectionProfile, String> {
             sysdba: get_flag(access, "sysdba"),
             skip_history: get_flag(access, "skip_history"),
             trust_server_certificate: get_flag(access, "trust_server_certificate"),
+            allow_legacy_tls: get_flag(access, "allow_legacy_tls"),
         },
     })
 }
@@ -812,6 +814,7 @@ mod tests {
                 sysdba: false,
                 skip_history: true,
                 trust_server_certificate: true,
+                allow_legacy_tls: true,
             },
         };
         let back = profile_from_json(&through_text(&profile_to_json(&profile))).unwrap();

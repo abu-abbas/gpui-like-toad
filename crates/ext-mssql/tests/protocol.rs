@@ -4,6 +4,8 @@
 //! The server needs two databases, `dev` and `staging`, each with a table
 //! `dbo.users` of different columns and contents (see `docs/mssql-test-data.sql`
 //! in the pull request that added this test).
+//! Set `KILAT_TEST_MSSQL_LEGACY` with the same format for a TLS 1.0-only
+//! server. That test account must be able to read its encrypted session status.
 
 use std::path::PathBuf;
 
@@ -37,8 +39,12 @@ fn profile(target: &str, user: &str) -> ConnectionProfile {
 }
 
 fn server() -> Option<(String, String, String)> {
-    let Some(spec) = std::env::var("KILAT_TEST_MSSQL").ok() else {
-        eprintln!("KILAT_TEST_MSSQL not set: skipped");
+    server_from_env("KILAT_TEST_MSSQL")
+}
+
+fn server_from_env(variable: &str) -> Option<(String, String, String)> {
+    let Some(spec) = std::env::var(variable).ok() else {
+        eprintln!("{variable} not set: skipped");
         return None;
     };
     let mut parts = spec.split(';');
@@ -47,6 +53,33 @@ fn server() -> Option<(String, String, String)> {
         parts.next().unwrap().to_string(),
         parts.next().unwrap().to_string(),
     ))
+}
+
+#[test]
+fn legacy_tls_requires_opt_in_and_stays_encrypted() {
+    let Some((target, user, password)) = server_from_env("KILAT_TEST_MSSQL_LEGACY") else {
+        return;
+    };
+    let mut profile = profile(&target, &user);
+    let mut c = client();
+    assert!(c.connect(&profile, &password).is_err());
+
+    // The legacy option changes the allowed protocol versions only.
+    profile.access.allow_legacy_tls = true;
+    profile.access.trust_server_certificate = false;
+    assert!(c.connect(&profile, &password).is_err());
+    profile.access.trust_server_certificate = true;
+    c.connect(&profile, &password).unwrap();
+    let result = c
+        .query(
+            "SELECT encrypt_option FROM sys.dm_exec_connections WHERE session_id = @@SPID",
+            FetchLimits::rows(1),
+        )
+        .unwrap();
+    assert_eq!(result.rows, vec![vec![Value::Text("TRUE".into())]]);
+
+    profile.access.allow_legacy_tls = false;
+    assert!(c.connect(&profile, &password).is_err());
 }
 
 #[test]

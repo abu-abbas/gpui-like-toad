@@ -310,8 +310,22 @@ impl TlsConnector {
         }
         supported_protocols(builder.min_protocol, builder.max_protocol, &mut connector)?;
 
+        if builder.legacy_tls {
+            // TLS 1.0 handshakes require legacy signature algorithms that
+            // OpenSSL's normal security level rejects.
+            connector.set_security_level(0);
+        }
         if builder.disable_built_in_roots {
             connector.set_cert_store(X509StoreBuilder::new()?.build());
+        }
+
+        #[cfg(feature = "platform-roots")]
+        if !builder.disable_built_in_roots && !builder.accept_invalid_certs {
+            for cert in rustls_native_certs::load_native_certs().certs {
+                if let Ok(cert) = X509::from_der(cert.as_ref()) {
+                    let _ = connector.cert_store_mut().add_cert(cert);
+                }
+            }
         }
 
         for cert in &builder.root_certificates {
