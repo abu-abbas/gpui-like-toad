@@ -11,6 +11,7 @@
 use super::appearance::setting_group;
 use super::setting_row_owned;
 use super::*;
+use ora_core::extension_index::{self, IndexEntry};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ExtFilter {
@@ -75,10 +76,15 @@ pub(super) struct OnlineState {
     installed: std::collections::HashMap<String, store::RemoteInstall>,
     /// The index is being fetched (Check for updates).
     checking: bool,
-    /// The id being installed.
-    busy: Option<String>,
+    download: Option<ExtensionDownload>,
     /// (is_error, text) of the last action.
     note: Option<(bool, String)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExtensionDownload {
+    Single(&'static str),
+    All,
 }
 
 impl OnlineState {
@@ -91,16 +97,34 @@ impl OnlineState {
     }
 
     fn working(&self) -> bool {
-        self.checking || self.busy.is_some()
+        self.checking || self.download.is_some()
     }
 
     /// The online entry for `id` when it is newer than what is downloaded
     /// and this app can run it.
-    fn update_for(&self, id: &str) -> Option<&ora_core::extension_index::IndexEntry> {
+    fn update_for(&self, id: &str) -> Option<&IndexEntry> {
         let entry = self.index.as_ref()?.get(id)?;
         let have = ora_core::update::Version::parse(&self.installed.get(id)?.version)?;
         let app = ora_core::update::Version::parse(env!("CARGO_PKG_VERSION"))?;
-        (have < entry.version && entry.compatible_with(app)).then_some(entry)
+        (have < entry.version
+            && entry.compatible_with(app)
+            && entry
+                .file_for(&extension_index::current_platform())
+                .is_some())
+        .then_some(entry)
+    }
+
+    fn available_updates<'a>(
+        &'a self,
+        extensions: &'a store::Extensions,
+    ) -> impl Iterator<Item = (&'static store::ExtensionInfo, &'a IndexEntry)> {
+        store::REGISTRY
+            .iter()
+            .filter(|extension| !extension.built_in && extensions.is_installed(extension.id))
+            .filter_map(|extension| {
+                self.update_for(extension.id)
+                    .map(|entry| (extension, entry))
+            })
     }
 }
 
@@ -125,13 +149,9 @@ impl Workbench {
                     Ok(index) => {
                         online.index = Some(index);
                         online.refresh_installed();
-                        let updates: Vec<String> = store::REGISTRY
-                            .iter()
-                            .filter_map(|e| {
-                                online
-                                    .update_for(e.id)
-                                    .map(|u| format!("{} {}", e.name, u.version))
-                            })
+                        let updates: Vec<String> = online
+                            .available_updates(&this.extensions)
+                            .map(|(info, entry)| format!("{} {}", info.name, entry.version))
                             .collect();
                         online.note = Some((
                             false,
@@ -147,6 +167,62 @@ impl Workbench {
                         online.note = Some((true, format!("Could not check: {err}")));
                     }
                 }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Install the versions from the checked, signed index. Each package
+    /// is verified and installed separately so a failure leaves its old
+    /// version available and does not stop the rest of the batch.
+    fn update_all_extensions(&mut self, cx: &mut Context<Self>) {
+        let online = &mut self.settings.ext_online;
+        if online.working() {
+            return;
+        }
+        online.refresh_installed();
+        let updates: Vec<_> = online
+            .available_updates(&self.extensions)
+            .map(|(info, entry)| (info.name, entry.clone()))
+            .collect();
+        if updates.is_empty() {
+            online.note = Some((false, "Everything is up to date.".into()));
+            cx.notify();
+            return;
+        }
+
+        online.download = Some(ExtensionDownload::All);
+        online.note = Some((
+            false,
+            format!("Downloading and verifying {} updates…", updates.len()),
+        ));
+        let task = cx.background_executor().spawn(async move {
+            let mut updated = Vec::new();
+            let mut failed = Vec::new();
+            for (name, entry) in updates {
+                match crate::release_fetch::install_extension(&entry) {
+                    Ok(installed) => updated.push(format!("{name} {}", installed.version)),
+                    Err(error) => failed.push(format!("{name} ({error})")),
+                }
+            }
+            (updated, failed)
+        });
+        cx.spawn(async move |view, cx| {
+            let (updated, failed) = task.await;
+            let _ = view.update(cx, |this, cx| {
+                let online = &mut this.settings.ext_online;
+                online.download = None;
+                online.refresh_installed();
+                let mut summary = Vec::new();
+                if !updated.is_empty() {
+                    summary.push(format!("Updated: {}.", updated.join(", ")));
+                }
+                if !failed.is_empty() {
+                    summary.push(format!("Could not update: {}.", failed.join(", ")));
+                }
+                online.note = Some((!failed.is_empty(), summary.join(" ")));
                 cx.notify();
             });
         })
@@ -170,7 +246,7 @@ impl Workbench {
         }
         let name = info.name;
         let online = &mut self.settings.ext_online;
-        online.busy = Some(id.to_string());
+        online.download = Some(ExtensionDownload::Single(id));
         online.note = Some((false, format!("Downloading and verifying {name}…")));
         let task = cx.background_executor().spawn(async move {
             let index = crate::release_fetch::fetch_extension_index().inspect_err(|e| {
@@ -189,7 +265,7 @@ impl Workbench {
             let result = task.await;
             let _ = view.update(cx, |this, cx| {
                 let online = &mut this.settings.ext_online;
-                online.busy = None;
+                online.download = None;
                 let ok = result.is_ok();
                 online.note = Some(match result {
                     Ok((index, installed)) => {
@@ -329,6 +405,8 @@ impl Workbench {
         );
         let online = &self.settings.ext_online;
         let working = online.working();
+        let update_all = online.available_updates(&self.extensions).count() > 1;
+        let updating_all = online.download == Some(ExtensionDownload::All);
         // The search box of the Settings dialog also narrows this list, as
         // long as something in it matches.
         let search = Self::input_text(&self.settings.search, cx).to_lowercase();
@@ -351,8 +429,11 @@ impl Workbench {
                 let installed = self.extension_ready(info.id);
                 let id = info.id;
                 let downloaded = online.installed.get(id);
-                let update = online.update_for(id).map(|u| u.version.to_string());
-                let installing = online.busy.as_deref() == Some(id);
+                let update = online
+                    .update_for(id)
+                    .filter(|_| installed)
+                    .map(|u| u.version.to_string());
+                let installing = online.download == Some(ExtensionDownload::Single(id));
                 let control = if info.built_in {
                     caption_text("Built in".into(), theme).into_any_element()
                 } else {
@@ -434,16 +515,95 @@ impl Workbench {
                     .child(
                         div().flex_none().child(Button::new("ext-check-updates")
                             .small()
+                            .when(update_all || updating_all, |b| b.primary())
                             .label(if online.checking {
                                 "Checking…"
+                            } else if updating_all {
+                                "Updating…"
+                            } else if update_all {
+                                "Update all"
                             } else {
                                 "Check for updates"
                             })
                             .disabled(working)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.check_online_extensions(cx)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if update_all {
+                                    this.update_all_extensions(cx);
+                                } else {
+                                    this.check_online_extensions(cx);
+                                }
                             }))),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ora_core::update::Version;
+
+    #[test]
+    fn bulk_update_includes_only_eligible_installed_extensions() {
+        let platform = extension_index::current_platform();
+        let mut online = OnlineState::default();
+        let mut extensions = store::Extensions::default();
+        let mut entries = Vec::new();
+        let current = Version(1, 0, 0);
+        let newer = Version(1, 0, 1);
+        let any_app = Version(0, 0, 0);
+        let future_app = Version(u64::MAX, 0, 0);
+        for (id, installed, downloaded, version, min_app, ships_platform) in [
+            ("sqlite", true, true, newer, any_app, true),
+            ("redis", true, true, newer, any_app, true),
+            ("mysql", true, true, current, any_app, true),
+            ("postgres", true, true, newer, future_app, true),
+            ("mssql", true, true, newer, any_app, false),
+            ("mailhog", false, true, newer, any_app, true),
+            ("dryrun", true, false, newer, any_app, true),
+        ] {
+            let info = store::extension_info(id).unwrap();
+            if installed {
+                extensions.install(id);
+            }
+            if downloaded {
+                online.installed.insert(
+                    id.into(),
+                    store::RemoteInstall {
+                        id: id.into(),
+                        version: "1.0.0".into(),
+                        file: id.into(),
+                        path: id.into(),
+                    },
+                );
+            }
+            entries.push(IndexEntry {
+                id: id.into(),
+                name: info.name.into(),
+                description: String::new(),
+                kind: info.kind,
+                version,
+                min_app,
+                max_app: None,
+                tag: format!("ext-{id}-{version}"),
+                files: ships_platform
+                    .then(|| (platform.clone(), id.to_string()))
+                    .into_iter()
+                    .collect(),
+            });
+        }
+        assert_eq!(online.available_updates(&extensions).count(), 0);
+        online.index = Some(extension_index::ExtensionIndex {
+            revision: 1,
+            entries,
+        });
+        let pending: Vec<_> = online
+            .available_updates(&extensions)
+            .map(|(info, _)| info.id)
+            .collect();
+        assert_eq!(pending, ["sqlite", "redis"]);
+
+        online.installed.get_mut("redis").unwrap().version = "1.0.1".into();
+        assert_eq!(online.available_updates(&extensions).count(), 1);
     }
 }

@@ -69,7 +69,7 @@ pub const REGISTRY: &[ExtensionInfo] = &[
     ExtensionInfo {
         id: "mssql",
         name: "SQL Server",
-        description: "Connect to Microsoft SQL Server (SQL login).",
+        description: "Connect to Microsoft SQL Server (SQL login). Requires TLS 1.2 or newer. SQL Server 2014 may need an update.",
         kind: ExtensionKind::Database,
         built_in: false,
         version: env!("CARGO_PKG_VERSION"),
