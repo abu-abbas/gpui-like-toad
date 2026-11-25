@@ -50,6 +50,19 @@ pub(super) struct DryRun {
     _subscription: Subscription,
 }
 
+impl DryRun {
+    /// Whether this run is over: it failed, or the extension showed its
+    /// final view (it polls only while the rows are held, so a ready view
+    /// with no polling is committed or rolled back).
+    fn finished(&self) -> bool {
+        match self.stage {
+            Stage::Failed(_) => true,
+            Stage::Ready => !self.busy && self.polling.is_none(),
+            Stage::Uncommitted | Stage::Working => false,
+        }
+    }
+}
+
 /// What the background start needs, kept while the dialog asks about
 /// uncommitted changes.
 struct Pending {
@@ -165,6 +178,11 @@ impl Workbench {
     }
 
     pub(super) fn open_dryrun(&mut self, cx: &mut Context<Self>) {
+        // A finished dry run (committed, rolled back or failed) holds no
+        // locks, so pressing Dry-run again replaces it with a fresh run.
+        if self.dryrun.as_ref().is_some_and(DryRun::finished) {
+            self.close_dryrun(cx);
+        }
         if let Some(tab_id) = self.dryrun_tab() {
             if tab_id == self.active_tab().id {
                 self.active_tab_mut().results_tab = ResultsTab::DryRun;
@@ -561,8 +579,9 @@ impl Workbench {
                 theme,
             ))
             .child(
+                // Sized to the caption beside it, not to the toolbar.
                 Button::new("dryrun-close")
-                    .small()
+                    .xsmall()
                     .ghost()
                     .icon(IconName::X)
                     .label("Close")

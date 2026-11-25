@@ -381,40 +381,39 @@ impl ExtensionPanel {
                     body.into_any_element()
                 }
             }
-            Node::Badge { text, tone } => div()
+            Node::Badge { text, tone } => steady_text(text.as_str(), false)
                 .text_color(color(*tone, theme))
-                .child(text.as_str().to_owned())
                 .into_any_element(),
             Node::Code { text, copy, .. } => {
                 let content = text.as_str().to_owned();
+                // The copy icon sits inside the box, top right; the text
+                // keeps clear of it so a long first line never runs under it.
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(SPACE_2))
+                    .relative()
+                    .p(px(SPACE_3))
+                    .when(*copy, |this| this.pr(px(SPACE_3 + 28.)))
+                    .rounded(px(RADIUS_MD))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.secondary.opacity(0.4))
+                    .font_family(theme.mono_font_family.clone())
+                    .text_size(crate::theme::ui_size(theme, FONT_LABEL))
+                    .whitespace_normal()
+                    .child(content.clone())
                     .children(copy.then(|| {
-                        let content = content.clone();
-                        Button::new("copy-code")
-                            .small()
-                            .ghost()
-                            .label("Copy")
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
-                                    content.clone(),
-                                ));
-                            })
+                        div().absolute().top(px(SPACE_1)).right(px(SPACE_1)).child(
+                            Button::new("copy-code")
+                                .small()
+                                .ghost()
+                                .icon(IconName::Copy)
+                                .tooltip("Copy")
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                        content.clone(),
+                                    ));
+                                }),
+                        )
                     }))
-                    .child(
-                        div()
-                            .p(px(SPACE_3))
-                            .rounded(px(RADIUS_MD))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.secondary.opacity(0.4))
-                            .font_family(theme.mono_font_family.clone())
-                            .text_size(crate::theme::ui_size(theme, FONT_LABEL))
-                            .whitespace_normal()
-                            .child(content),
-                    )
                     .into_any_element()
             }
             Node::Icon { name } => node_icon(name)
@@ -804,12 +803,7 @@ impl ExtensionPanel {
                                     .map(|t| t.as_str().to_owned())
                                     .unwrap_or_default(),
                             )
-                            .child(
-                                trailing
-                                    .as_ref()
-                                    .map(|t| t.as_str().to_owned())
-                                    .unwrap_or_default(),
-                            ),
+                            .children(trailing.as_ref().map(|t| steady_text(t.as_str(), true))),
                     )
                     .child(
                         div()
@@ -887,8 +881,13 @@ impl ExtensionPanel {
             Node::Diff { columns, rows } => {
                 let cell = |cell: &ora_core::extension_ui::DiffCell| {
                     let new = cell.text.as_str().to_owned();
+                    // Every piece may shrink to the column and wrap (a long
+                    // key with no spaces breaks mid-word), and the cell clips
+                    // as a last resort, so a value never runs into the next
+                    // column.
+                    let piece = || div().min_w(px(0.)).max_w_full();
                     let struck = |text: String| {
-                        div()
+                        piece()
                             .px(px(4.))
                             .rounded(px(3.))
                             .bg(theme.danger.opacity(0.14))
@@ -901,7 +900,7 @@ impl ExtensionPanel {
                         inner.child(struck(new))
                     } else if let Some(old) = &cell.old {
                         inner.child(struck(old.as_str().to_owned())).child(
-                            div()
+                            piece()
                                 .px(px(4.))
                                 .rounded(px(3.))
                                 .bg(theme.success.opacity(0.16))
@@ -910,9 +909,9 @@ impl ExtensionPanel {
                                 .child(new),
                         )
                     } else {
-                        inner.child(new)
+                        inner.child(piece().child(new))
                     };
-                    div().flex_1().min_w(px(0.)).child(inner)
+                    div().flex_1().min_w(px(0.)).overflow_hidden().child(inner)
                 };
                 div()
                     .flex()
@@ -973,6 +972,38 @@ fn text_row<'a>(cells: impl IntoIterator<Item = &'a Text>) -> gpui_kit::Div {
             .into_iter()
             .map(|cell| div().flex_1().min_w(px(0.)).child(cell.as_str().to_owned())),
     )
+}
+
+/// Text whose width does not follow its digits, so a ticking countdown
+/// ("Lock 0:27", "4:32") never shoves its neighbours around. Digits use
+/// tabular figures, and the box takes its width from an invisible copy with
+/// every digit replaced by "0", so the slot stays put even on a font
+/// without tabular figures. `right` pins the visible text to the right edge.
+fn steady_text(text: &str, right: bool) -> gpui_kit::Div {
+    let ghost: String = text
+        .chars()
+        .map(|c| if c.is_ascii_digit() { '0' } else { c })
+        .collect();
+    let shown = div()
+        .absolute()
+        .top_0()
+        .whitespace_nowrap()
+        .child(text.to_owned());
+    div()
+        .relative()
+        .flex_none()
+        .whitespace_nowrap()
+        .font_features(tabular_digits())
+        .child(div().invisible().child(ghost))
+        .child(if right {
+            shown.right_0()
+        } else {
+            shown.left_0()
+        })
+}
+
+fn tabular_digits() -> gpui_kit::FontFeatures {
+    gpui_kit::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
 }
 
 fn color(tone: Option<Tone>, theme: &gpui_kit::component::Theme) -> Hsla {
