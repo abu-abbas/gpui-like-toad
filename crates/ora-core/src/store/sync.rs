@@ -290,6 +290,10 @@ fn apply_appearance(dir: &Path, v: &Json) -> std::io::Result<()> {
     )
 }
 
+fn grid_item(auto_count: bool) -> Json {
+    Json::Obj(vec![("auto_count".into(), Json::Bool(auto_count))])
+}
+
 /// A tool as synced: without `start_server` and `server_command`.
 fn tool_item(t: &ToolInstance) -> Json {
     let mut v = tool_to_json(t);
@@ -346,13 +350,7 @@ pub fn collect_items(dir: &Path, categories: SyncCategories, prod_ok: &BTreeSet<
         }
     }
     if categories.grid {
-        items.insert(
-            "grid".into(),
-            Json::Obj(vec![(
-                "auto_count".into(),
-                Json::Bool(load_auto_count_in(dir)),
-            )]),
-        );
+        items.insert("grid".into(), grid_item(load_auto_count_in(dir)));
     }
     items
 }
@@ -689,8 +687,16 @@ pub fn sync_with(dir: &Path, choices: &BTreeMap<String, Choice>) -> Result<SyncO
     let mut local = collect_items(dir, cats, &prod_ok);
     // A computer that never touched its appearance must not fight the
     // synced one over it on the first sync: let the file win.
-    if base.is_empty() && local.get("appearance") == Some(&appearance_item(&dir.join("__none__"))) {
-        local.remove("appearance");
+    if base.is_empty() {
+        let pristine = [
+            ("appearance", appearance_item(&dir.join("__none__"))),
+            ("grid", grid_item(false)),
+        ];
+        for (key, default) in pristine {
+            if local.get(key) == Some(&default) {
+                local.remove(key);
+            }
+        }
     }
     let remote: Items = read_sync_file(&file)?
         .map(|(items, _)| {
