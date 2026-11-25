@@ -815,7 +815,9 @@ impl Workbench {
                                     .min_w(px(0.))
                                     .text_left()
                                     .truncate()
-                                    .when(active || focused, |t| t.font_weight(FontWeight::SEMIBOLD))
+                                    .when(active || focused, |t| {
+                                        t.font_weight(FontWeight::SEMIBOLD)
+                                    })
                                     .child(tool.name.clone()),
                             )
                             .when(flags.running, |row| {
