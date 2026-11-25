@@ -92,6 +92,9 @@ pub(super) struct ToolsState {
     pub instances: Vec<ToolInstance>,
     /// The tool shown in the explorer column and work area.
     pub active: Option<String>,
+    /// The row selected with a single click; it is not connected until
+    /// opened (double click, or Open in the right-click menu).
+    pub focused: Option<String>,
     pub picker: bool,
     pub form: Option<ToolForm>,
     pub confirm: Option<ToolConfirm>,
@@ -246,6 +249,20 @@ impl Workbench {
     /// Back to the database explorer (a connection row was clicked).
     pub(super) fn leave_tools(&mut self) {
         self.tools.active = None;
+        self.tools.focused = None;
+    }
+
+    /// Single click on a tool row: select it like a connection row. A tool
+    /// that is already open is brought to the front; a closed one is not
+    /// connected until it is opened.
+    fn select_tool(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.tools.focused = Some(id.to_string());
+        self.focused_profile_id = None;
+        if self.tools.is_open(id) {
+            self.tools.active = Some(id.to_string());
+            self.rail = RailPanel::Connections;
+        }
+        cx.notify();
     }
 
     // -----------------------------------------------------------------
@@ -655,6 +672,7 @@ impl Workbench {
         let pilot = self.tools.pilots.get(&tool.id);
         let open = self.tools.is_open(&tool.id);
         let active = self.tools.active.as_deref() == Some(tool.id.as_str());
+        let focused = self.tools.focused.as_deref() == Some(tool.id.as_str());
         let id = tool.id.clone();
         let kind = tool.kind;
         let view = cx.entity();
@@ -674,7 +692,7 @@ impl Workbench {
             .items_center()
             .flex_none()
             .rounded(px(RADIUS_MD))
-            .when(active, |row| row.bg(theme.accent))
+            .when(active || focused, |row| row.bg(theme.accent))
             .context_menu(move |menu, _, _| {
                 let (v1, v2, v3, v4) = (view.clone(), view.clone(), view.clone(), view.clone());
                 let (i1, i2, i3, i4) = (
@@ -774,9 +792,15 @@ impl Workbench {
                     .small()
                     .w_full()
                     .tooltip(format!("{} · {}", tool.name, tool.address()))
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.open_tool(&id, window, cx)),
-                    )
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        if matches!(event, ClickEvent::Mouse(m) if m.down.click_count >= 2) {
+                            this.tools.focused = Some(id.clone());
+                            this.focused_profile_id = None;
+                            this.open_tool(&id, window, cx);
+                        } else {
+                            this.select_tool(&id, cx);
+                        }
+                    }))
                     .child(
                         div()
                             .flex()
@@ -791,7 +815,9 @@ impl Workbench {
                                     .min_w(px(0.))
                                     .text_left()
                                     .truncate()
-                                    .when(active, |t| t.font_weight(FontWeight::SEMIBOLD))
+                                    .when(active || focused, |t| {
+                                        t.font_weight(FontWeight::SEMIBOLD)
+                                    })
                                     .child(tool.name.clone()),
                             )
                             .when(flags.running, |row| {
