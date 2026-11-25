@@ -554,6 +554,9 @@ impl Workbench {
                     Effect::OpenUrl { url } => cx.open_url(url.as_str()),
                     // The pilot uses native button confirmations.
                     Effect::Confirm { .. } => {}
+                    Effect::Save { name, parts } => {
+                        self.save_text_file(name.as_str().to_owned(), Effect::joined(&parts), cx)
+                    }
                 }
             }
         }

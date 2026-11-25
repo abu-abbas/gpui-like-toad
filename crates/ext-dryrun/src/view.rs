@@ -15,6 +15,11 @@ const MAX_COLUMNS: usize = 10;
 /// The protocol allows 5,000 nodes in a reply; the table gets most of them.
 const CELL_BUDGET: usize = 3_800;
 const CELL_CHARS: usize = 120;
+/// The longest undo script drawn (and copied) whole; one view string is
+/// capped at 64 KiB.
+const SHOW_SCRIPT_BYTES: usize = 60_000;
+/// How much of a longer script is drawn.
+const PREVIEW_BYTES: usize = 20_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
@@ -134,6 +139,66 @@ fn changes_table(report: &Report) -> Json {
     json!({"type": "column", "children": children})
 }
 
+/// Whether the whole undo script fits one view string (and the clipboard
+/// effect). Longer ones are shown in part and exported as a file.
+pub fn fits_view(script: &str) -> bool {
+    script.len() <= SHOW_SCRIPT_BYTES
+}
+
+/// `id` differs per place: IDs are unique within the view.
+fn export_button(id: &str) -> Json {
+    json!({"type": "button", "id": id, "label": "Export .sql",
+        "icon": "download", "variant": "secondary"})
+}
+
+/// The undo tab: a line with its size and Export .sql, then the script, or
+/// its first lines when it is too long to show whole.
+fn undo_tab(script: &str) -> Json {
+    let statements = script
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with("--"))
+        .count();
+    let size = if script.len() >= 1_000_000 {
+        format!("{:.1} MB", script.len() as f64 / 1_000_000.0)
+    } else {
+        format!("{} KB", script.len().div_ceil(1000))
+    };
+    let header = json!({"type": "row", "children": [
+        text("caption", "muted", &format!("{statements} statement(s) · {size}")),
+        {"type": "spacer"},
+        export_button("export-undo-file"),
+    ]});
+    let code = if fits_view(script) {
+        json!({"type": "code", "language": "sql", "text": script, "copy": true})
+    } else {
+        let mut shown = String::new();
+        let mut lines = 0usize;
+        for line in script.lines() {
+            if shown.len() + line.len() + 1 > PREVIEW_BYTES {
+                break;
+            }
+            shown.push_str(line);
+            shown.push('\n');
+            lines += 1;
+        }
+        let rest = script.lines().count() - lines;
+        shown.push_str(&format!(
+            "-- ... {rest} more line(s). Export .sql for the whole script."
+        ));
+        json!({"type": "code", "language": "sql", "text": shown})
+    };
+    let mut children = vec![header];
+    if !fits_view(script) {
+        children.push(text(
+            "caption",
+            "warning",
+            "The script is too long to show or copy whole. Export .sql saves all of it.",
+        ));
+    }
+    children.push(code);
+    json!({"type": "column", "children": children})
+}
+
 fn text(style: &str, tone: &str, text: &str) -> Json {
     json!({"type": "text", "style": style, "tone": tone, "text": text})
 }
@@ -183,9 +248,12 @@ fn banner(state: &State, report: &Report) -> Json {
         }
         Phase::Committed => {
             let mut children = Vec::new();
-            if report.undo.is_some() {
-                children.push(json!({"type": "button", "id": "copy-undo",
-                    "label": "Copy undo script", "icon": "copy", "variant": "secondary"}));
+            if let Some(script) = &report.undo {
+                if fits_view(script) {
+                    children.push(json!({"type": "button", "id": "copy-undo",
+                        "label": "Copy undo script", "icon": "copy", "variant": "secondary"}));
+                }
+                children.push(export_button("export-undo"));
             }
             json!({"type": "banner", "tone": "success", "icon": "check",
                 "title": "Committed",
@@ -231,10 +299,12 @@ pub fn build(state: &State) -> Json {
             }
             let mut items = vec![json!({"id": "changes", "label": "Changes",
                 "child": {"type": "column", "children": changes}})];
-            items.push(json!({"id": "undo", "label": "Undo script", "child": match &report.undo {
-                Some(script) => json!({"type": "code", "language": "sql", "text": script, "copy": true}),
-                None => json!({"type": "empty", "text": "No undo script for this statement."}),
-            }}));
+            items.push(
+                json!({"id": "undo", "label": "Undo script", "child": match &report.undo {
+                    Some(script) => undo_tab(script),
+                    None => json!({"type": "empty", "text": "No undo script for this statement."}),
+                }}),
+            );
             items.push(json!({"id": "statement", "label": "Statement",
                 "child": {"type": "code", "language": "sql", "text": report.sql, "copy": true}}));
             let active = if items.iter().any(|i| i["id"] == state.tab) {

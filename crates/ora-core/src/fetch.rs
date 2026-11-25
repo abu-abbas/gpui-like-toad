@@ -211,6 +211,29 @@ impl RowCollector {
         Value::bytes_limited(bytes, self.limits.max_cell_bytes)
     }
 
+    /// The rows kept so far, as a result that more rows will follow
+    /// (`truncated`): what a streamed fetch shows while it runs.
+    pub fn snapshot(&self, columns: Vec<ColumnInfo>) -> QueryResult {
+        QueryResult {
+            columns,
+            rows: self.rows.clone(),
+            truncated: true,
+            byte_limited: false,
+            elapsed: self.started.elapsed(),
+            fetch_time: self.fetching.map(|f| f.elapsed()),
+            order_by: Vec::new(),
+        }
+    }
+
+    /// Rows kept so far.
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
     pub fn finish(self, columns: Vec<ColumnInfo>) -> QueryResult {
         QueryResult {
             columns,

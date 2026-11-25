@@ -18,11 +18,11 @@ pub(crate) struct Fake {
     pub(crate) rolled_back: usize,
 }
 
-fn text(s: &str) -> Value {
+pub(crate) fn text(s: &str) -> Value {
     Value::Text(s.into())
 }
 
-fn int(n: i128) -> Value {
+pub(crate) fn int(n: i128) -> Value {
     Value::Integer(n)
 }
 
@@ -304,10 +304,23 @@ fn refused_statements_never_reach_the_database() {
 }
 
 #[test]
-fn a_script_over_the_view_limit_is_not_written() {
+fn a_script_over_the_view_limit_is_still_written_for_export() {
     let mut db = Fake::new(|_| true, |rows| rows.len() as u64);
     let wide = "x".repeat(3000);
     db.rows = (0..40)
+        .map(|n| (format!("R{n}"), vec![int(n), text(&wide), int(1), int(1)]))
+        .collect();
+    let report = run(&mut db, "DELETE FROM emp").unwrap();
+    let script = report.undo.expect("an undo script");
+    assert!(script.len() > 100_000);
+    assert!(!crate::view::fits_view(&script));
+}
+
+#[test]
+fn a_script_over_the_export_limit_is_not_written() {
+    let mut db = Fake::new(|_| true, |rows| rows.len() as u64);
+    let wide = "x".repeat(3000);
+    db.rows = (0..1100)
         .map(|n| (format!("R{n}"), vec![int(n), text(&wide), int(1), int(1)]))
         .collect();
     let report = run(&mut db, "DELETE FROM emp").unwrap();

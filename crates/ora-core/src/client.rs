@@ -154,6 +154,24 @@ pub trait DbClient: Send {
         self.query_table(owner, table, filter, page)
     }
 
+    /// Like [`DbClient::query_table_in`], with the first rows early: a
+    /// driver that can calls `first` once with the rows of its first round
+    /// trip while the rest of the page is still on its way (a page of a
+    /// wide table takes seconds over a slow VPN). The default never calls
+    /// it and just returns the whole page.
+    fn query_table_streamed(
+        &mut self,
+        database: Option<&str>,
+        owner: &str,
+        table: &str,
+        filter: &TableFilter,
+        page: TablePage,
+        first: &mut dyn FnMut(QueryResult),
+    ) -> Result<QueryResult, DbError> {
+        let _ = first;
+        self.query_table_in(database, owner, table, filter, page)
+    }
+
     /// Number of rows of `table` that pass `filter` (the data tab's total).
     /// A full count can be slow on a big table, so the UI asks only when
     /// the user does.

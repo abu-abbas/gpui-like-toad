@@ -170,6 +170,9 @@ pub(crate) struct Transport {
     full_packet_size: bool,
     print_packets: bool,
     op_num: usize,
+    // Patched (gpui-like-toad): bytes read from the socket, for the
+    // timing log's link speed.
+    bytes_received: u64,
 }
 
 // a custom client certificate resolver is required because the client
@@ -388,6 +391,7 @@ impl Transport {
             full_packet_size: false,
             print_packets: env::var_os("RSO_DEBUG_PACKETS").is_some(),
             op_num: 0,
+            bytes_received: 0,
         }
     }
 
@@ -405,6 +409,7 @@ impl Transport {
                 return Ok(packet);
             }
             let num_bytes = self.read_packet()?;
+            self.bytes_received += num_bytes as u64;
             if num_bytes == 0 {
                 self.low_level_transport = None;
                 break;
@@ -478,6 +483,11 @@ impl Transport {
             .as_ref()
             .ok_or_else(Error::not_connected)
             .and_then(|t| t.set_timeout(duration))
+    }
+
+    /// Bytes read from the database so far (patched, gpui-like-toad).
+    pub(crate) fn bytes_received(&self) -> u64 {
+        self.bytes_received
     }
 
     /// Indicates that the full packet size should be used for all subsequent

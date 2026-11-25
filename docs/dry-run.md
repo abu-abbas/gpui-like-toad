@@ -54,15 +54,18 @@ Assumptions (the mockup was approved as a direction only):
   rows from the `USING` source).
 - The target table is found by its name in the statement (`[schema.]table
   [alias]`), and the changed rows by `ROWID`.
-- At most 1,000 rows are captured. The affected count is always exact (the
-  database reports it). Above 1,000, the Dry-run tab shows the first 200 old/new
-  rows and says that no undo script is written.
+- At most 10,000 rows are captured (read again 1,000 ROWIDs per query). The
+  affected count is always exact (the database reports it). Above 10,000, the
+  Dry-run tab shows the first 200 old/new rows and says that no undo script is
+  written.
 - At most 200 changed rows are drawn.
 - The connection's password must be saved in the keychain: Kilat never keeps
   a typed password after connecting, and the extension needs one for its own
   session. Without it the button explains what to do. (Phase 2: ask for it.)
-- The undo script has to fit one view string (60 KB); longer ones are not
-  written, and values over 4,000 bytes are left out of it.
+- The undo script is written up to 3 MB and values over 4,000 bytes are left
+  out of it. Up to 60 KB it is shown and copied whole; a longer one shows its
+  first lines and is saved whole with Export .sql (a `save` effect, Kilat
+  0.1.68 or later).
 
 ## What the extension does
 1. Parse the statement (`dryrun_sql`): kind, `[schema.]table`, alias, the
@@ -108,7 +111,7 @@ Extension methods (after `hello`):
 | `dryrun.run` | `sql` | `{affected, state}` and the view is ready for `ui.open` |
 | `dryrun.rollback` | none | `{}` |
 | `ui.open` | `slot: "main"` | view |
-| `ui.event` | button ids `rollback`, `commit`, `copy-undo`; tabs `view` | view and effects |
+| `ui.event` | button ids `rollback`, `commit`, `copy-undo`, `export-undo`, `export-undo-file`; tabs `view` | view and effects |
 | `ui.tick` | none | view (countdown, expired) |
 
 `commit` is declared with `writes: true`, so the app's Read Only and PROD

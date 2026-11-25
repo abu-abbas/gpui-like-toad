@@ -860,6 +860,11 @@ impl Client {
         self.transport.get_read_timeout()
     }
 
+    /// Bytes read from the database so far (patched, gpui-like-toad).
+    pub(crate) fn bytes_received(&self) -> u64 {
+        self.transport.bytes_received()
+    }
+
     /// Returns the compile time capabilities.
     pub(crate) fn get_compile_caps(&self) -> &[u8] {
         self.caps.compile_caps()

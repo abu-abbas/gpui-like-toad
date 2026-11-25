@@ -583,6 +583,7 @@ pub struct Workbench {
 impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::start_heartbeat(cx);
+        Self::start_sync_loop(cx);
         let connection_form = ConnectionForm::new(window, cx);
         let catalog = Rc::new(RefCell::new(Catalog::new()));
         let workbench = cx.weak_entity();

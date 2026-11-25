@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use ora_core::client::DbClient;
-use ora_core::extension_ui::{Effect, Event, EventKind, Open, Slot, Text, Tick};
+use ora_core::extension_ui::{split_parts, Effect, Event, EventKind, Open, Slot, Text, Tick};
 use ora_core::extension_wire as wire;
 use ora_core::store::{parse_json, to_json, Json};
 use serde_json::{json, Value};
@@ -78,6 +78,27 @@ impl Inner {
             hold: self.hold,
             locked: self.started.map(|t| t.elapsed()),
         })
+    }
+}
+
+/// `undo_<table>.sql`, with anything but letters, digits, `_` and `-`
+/// in the table name turned into `_` (a schema dot, quotes).
+fn undo_file_name(table: &str) -> String {
+    let name: String = table
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let name = name.trim_matches('_');
+    if name.is_empty() {
+        "undo.sql".into()
+    } else {
+        format!("undo_{name}.sql")
     }
 }
 
@@ -218,9 +239,30 @@ impl Service {
                     }
                     ("copy-undo", EventKind::Click { .. }) => {
                         if let Some(script) = inner.report.as_ref().and_then(|r| r.undo.clone()) {
-                            effects.push(Effect::Copy {
-                                text: Text::new(script).map_err(str::to_owned)?,
+                            effects.push(if view::fits_view(&script) {
+                                Effect::Copy {
+                                    text: Text::new(script).map_err(str::to_owned)?,
+                                }
+                            } else {
+                                Effect::Toast {
+                                    text: Text::new(
+                                        "The undo script is too long to copy. Use Export .sql."
+                                            .into(),
+                                    )
+                                    .map_err(str::to_owned)?,
+                                }
                             });
+                        }
+                    }
+                    ("export-undo" | "export-undo-file", EventKind::Click { .. }) => {
+                        if let Some(report) = inner.report.as_ref() {
+                            if let Some(script) = &report.undo {
+                                effects.push(Effect::Save {
+                                    name: Text::new(undo_file_name(&report.table))
+                                        .map_err(str::to_owned)?,
+                                    parts: split_parts(script),
+                                });
+                            }
                         }
                     }
                     ("view", EventKind::Tab { item }) => {
@@ -250,7 +292,7 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::tests::{dept10, raise, Fake};
+    use crate::engine::tests::{dept10, int, raise, text, Fake};
     use ora_core::extension_ui::{decode_update, Origin};
 
     fn service(hold: Duration) -> (Service, Arc<Mutex<Inner>>) {
@@ -382,6 +424,86 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("INSERT INTO emp"));
+    }
+
+    #[test]
+    fn export_undo_sends_the_whole_script_as_a_file() {
+        let (mut s, _) = service(HOLD);
+        call(
+            &mut s,
+            "dryrun.run",
+            json!({"sql": "UPDATE emp SET salary = salary + 10 WHERE dept = 10"}),
+        )
+        .unwrap();
+        let view = call(&mut s, "ui.open", json!({"slot": "main"})).unwrap();
+        let revision = view["revision"].as_u64().unwrap();
+        let reply = call(
+            &mut s,
+            "ui.event",
+            json!({"revision": revision, "slot": "main", "node": "export-undo",
+                   "event": {"type": "click"}}),
+        )
+        .unwrap();
+        let update = decode_update(&reply.to_string(), Origin::UserEvent).unwrap();
+        match &update.effects[0] {
+            Effect::Save { name, parts } => {
+                assert_eq!(name.as_str(), "undo_emp.sql");
+                let script = Effect::joined(parts);
+                assert!(script.contains("UPDATE emp SET"), "{script}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_large_script_is_previewed_and_exported_whole_within_the_reply_limit() {
+        let mut db = Fake::new(|_| true, |rows| rows.len() as u64);
+        // Quotes double when JSON-escaped, the worst case for the reply.
+        let wide = "'\"".repeat(1400);
+        db.rows = (0..650)
+            .map(|n| (format!("R{n}"), vec![int(n), text(&wide), int(1), int(1)]))
+            .collect();
+        let mut s = Service::new(Box::new(db), HOLD);
+        call(&mut s, "dryrun.run", json!({"sql": "DELETE FROM emp"})).unwrap();
+        let script = lock(&s.inner)
+            .report
+            .as_ref()
+            .unwrap()
+            .undo
+            .clone()
+            .unwrap();
+        assert!(script.len() > 2_000_000, "{}", script.len());
+        let revision = lock(&s.inner).revision;
+        let view = call(
+            &mut s,
+            "ui.event",
+            json!({"revision": revision, "slot": "main", "node": "view",
+                   "event": {"type": "tab", "item": "undo"}}),
+        )
+        .unwrap();
+        let body = view.to_string();
+        decode_update(&body, Origin::UserEvent).unwrap();
+        assert!(body.contains("Export .sql for the whole script"));
+        let revision = lock(&s.inner).revision;
+        let reply = call(
+            &mut s,
+            "ui.event",
+            json!({"revision": revision, "slot": "main",
+                   "node": "export-undo-file", "event": {"type": "click"}}),
+        )
+        .unwrap();
+        let update = decode_update(&reply.to_string(), Origin::UserEvent).unwrap();
+        match &update.effects[0] {
+            Effect::Save { parts, .. } => assert_eq!(Effect::joined(parts), script),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn undo_file_names_are_plain() {
+        assert_eq!(undo_file_name("HR.EMP"), "undo_HR_EMP.sql");
+        assert_eq!(undo_file_name("\"My Table\""), "undo_My_Table.sql");
+        assert_eq!(undo_file_name("\"\""), "undo.sql");
     }
 
     #[test]

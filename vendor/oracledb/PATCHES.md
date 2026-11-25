@@ -31,3 +31,10 @@ When moving to a newer upstream revision, re-apply these patches (search for
    (present, hex, AES block multiple, iteration counts 1..=10,000,000) when
    the verifier response is parsed, and a bad value is a normal connect
    error. Unit tests only; not run against a real server.
+
+3. **Received byte counter** (`src/transport.rs`, `src/client/mod.rs`,
+   `src/connection/conn_impl.rs`, `src/connection/mod.rs`). The transport
+   counts the bytes it reads from the socket and `Connection::bytes_received`
+   returns the total. Kilat's opt-in timing log divides a fetch's bytes by
+   its wait to tell a slow link (bandwidth) apart from slow round trips.
+   No behaviour change.

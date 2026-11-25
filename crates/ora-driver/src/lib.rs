@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 use ora_core::completion::CatalogObject;
 use ora_core::sql::clean_statement;
+mod native_ddl;
+
 use ora_core::{
     ColumnDef, ColumnInfo, ConnectionProfile, DbClient, DbError, DbInfo, DbKind, FetchLimits,
     IndexDef, ObjectKind, PlanNode, QueryResult, RowCollector, SchemaObject, Value,
@@ -56,6 +58,26 @@ impl ThinClient {
         self.conn
             .as_ref()
             .ok_or_else(|| DbError::new("not connected"))
+    }
+}
+
+impl ThinClient {
+    fn table_page(
+        &mut self,
+        owner: &str,
+        table: &str,
+        filter: &ora_core::TableFilter,
+        page: ora_core::TablePage,
+        early: Option<Early<'_>>,
+    ) -> Result<QueryResult, DbError> {
+        let dialect = self.dialect();
+        let query = ora_core::filter::select_sql(dialect, owner, table, filter, page);
+        let limits = FetchLimits::rows(page.limit);
+        let plan = FetchPlan {
+            max_previews: if page.rowid { 0 } else { MAX_LOB_PREVIEWS },
+            label: "fetch",
+        };
+        self.in_read_scope(|conn| fetch_rows(conn, &query.sql, &query.binds, limits, plan, early))
     }
 }
 
@@ -199,6 +221,8 @@ struct FetchTiming {
     lob_size_calls_ms_max: u128,
     lob_read_ms_max: u128,
     rows: u64,
+    /// When the early rows of a streamed fetch were handed over.
+    early_ms: Option<u128>,
 }
 
 use ora_core::timing::{enabled as timing_enabled, write_line as write_timing_line};
@@ -340,12 +364,24 @@ impl FetchPlan {
     };
 }
 
+/// Rows the data tab asks for with the execute call itself (row prefetch),
+/// shown before the rest of the page arrives. The page's other rows still
+/// come in arrays of [`array_size_for`], so this costs no extra round trip.
+const EARLY_ROWS: usize = 100;
+
+/// A streamed fetch: `call` gets the first `rows` rows once they are in.
+struct Early<'a> {
+    rows: usize,
+    call: &'a mut dyn FnMut(QueryResult),
+}
+
 fn fetch_rows(
     conn: &oracledb::Connection,
     sql: &str,
     binds: &[String],
     limits: FetchLimits,
     plan: FetchPlan,
+    mut early: Option<Early<'_>>,
 ) -> Result<QueryResult, DbError> {
     let sql = clean_statement(sql);
     let started = Instant::now();
@@ -355,11 +391,18 @@ fn fetch_rows(
         .collect();
     // LOBs always come as locators (never inline), so a table of
     // documents never sends whole documents to the client.
-    let cursor = conn
+    let mut builder = conn
         .statement(sql)
         .map_err(db_err)?
         .fetch_lobs()
-        .fetch_array_size(array_size_for(limits.max_rows))
+        .fetch_array_size(array_size_for(limits.max_rows));
+    // Only worth it when the page holds more rows than come early.
+    early = early.filter(|e| e.rows > 0 && limits.max_rows > e.rows);
+    if let Some(e) = &early {
+        builder = builder.prefetch_rows(e.rows as u32);
+    }
+    let net_before = conn.bytes_received();
+    let cursor = builder
         .build()
         .map_err(db_err)?
         .query(&params)
@@ -418,7 +461,14 @@ fn fetch_rows(
         if !collector.push(values) {
             break;
         }
+        if early.as_ref().is_some_and(|e| collector.len() == e.rows) {
+            if let Some(e) = early.take() {
+                timing.early_ms = Some(started.elapsed().as_millis());
+                (e.call)(collector.snapshot(columns.clone()));
+            }
+        }
     }
+    let net_bytes = conn.bytes_received().saturating_sub(net_before);
     if timing_enabled() {
         let n = db_types.len();
         // One bare round trip to the server, for comparison.
@@ -435,7 +485,8 @@ fn fetch_rows(
         write_timing_line(&format!(
             "{} total_ms={} execute_ms={} next_row_ms={} cells_ms={} lob_cells_ms={} \
              lob_read_ms={} rows={} columns={} lob_columns={} lob_cells={} lob_read_calls={} \
-             lob_size_max_ms={} lob_read_max_ms={} fetch_array_size={} ping_ms={}",
+             lob_size_max_ms={} lob_read_max_ms={} fetch_array_size={} ping_ms={} \
+             net_kb={} net_kbps={} early_ms={}",
             plan.label,
             started.elapsed().as_millis(),
             t_executed.as_millis(),
@@ -452,6 +503,15 @@ fn fetch_rows(
             timing.lob_read_ms_max,
             array_size_for(limits.max_rows),
             ping_ms.map_or_else(|| "-".to_string(), |m| m.to_string()),
+            net_bytes / 1024,
+            // Received bytes over the time spent waiting for them: about
+            // the link's speed when the result is large.
+            (net_bytes as u128 * 1000 / 1024)
+                .checked_div((t_executed + timing.next_row).as_millis())
+                .unwrap_or(0),
+            timing
+                .early_ms
+                .map_or_else(|| "-".to_string(), |m| m.to_string()),
         ));
     }
     Ok(collector.finish(columns))
@@ -592,7 +652,7 @@ impl DbClient for ThinClient {
         binds: &[String],
         limits: FetchLimits,
     ) -> Result<QueryResult, DbError> {
-        self.in_read_scope(|conn| fetch_rows(conn, sql, binds, limits, FetchPlan::DEFAULT))
+        self.in_read_scope(|conn| fetch_rows(conn, sql, binds, limits, FetchPlan::DEFAULT, None))
     }
 
     /// The data tab's page. CLOB cells are not read while the cursor runs
@@ -606,14 +666,28 @@ impl DbClient for ThinClient {
         filter: &ora_core::TableFilter,
         page: ora_core::TablePage,
     ) -> Result<QueryResult, DbError> {
-        let dialect = self.dialect();
-        let query = ora_core::filter::select_sql(dialect, owner, table, filter, page);
-        let limits = FetchLimits::rows(page.limit);
-        let plan = FetchPlan {
-            max_previews: if page.rowid { 0 } else { MAX_LOB_PREVIEWS },
-            label: "fetch",
+        self.table_page(owner, table, filter, page, None)
+    }
+
+    /// [`DbClient::query_table`] with the first [`EARLY_ROWS`] rows handed
+    /// to `first` as soon as the execute round trip brought them.
+    fn query_table_streamed(
+        &mut self,
+        database: Option<&str>,
+        owner: &str,
+        table: &str,
+        filter: &ora_core::TableFilter,
+        page: ora_core::TablePage,
+        first: &mut dyn FnMut(QueryResult),
+    ) -> Result<QueryResult, DbError> {
+        if database.is_some() {
+            return self.query_table_in(database, owner, table, filter, page);
+        }
+        let early = Early {
+            rows: EARLY_ROWS,
+            call: first,
         };
-        self.in_read_scope(|conn| fetch_rows(conn, &query.sql, &query.binds, limits, plan))
+        self.table_page(owner, table, filter, page, Some(early))
     }
 
     fn fetch_clob_previews(
@@ -642,6 +716,7 @@ impl DbClient for ThinClient {
                     chunk,
                     FetchLimits::unlimited_bytes(chunk.len()),
                     plan,
+                    None,
                 )?;
                 previews.extend(previews_from_rows(&names, part.rows));
             }
@@ -793,6 +868,22 @@ impl DbClient for ThinClient {
     ) -> Result<String, DbError> {
         let total = std::time::Instant::now();
         let conn = self.conn()?;
+        // Plain objects come straight from the dictionary: DBMS_METADATA's
+        // first call per object can take 10+ s on a big production
+        // dictionary. "Show storage" always asks DBMS_METADATA.
+        if !show_storage {
+            if let Some(ddl) = native_ddl::native_ddl(conn, owner, name, kind) {
+                if timing_enabled() {
+                    write_timing_line(&format!(
+                        "ddl native=1 total_ms={} bytes={} lines={}",
+                        total.elapsed().as_millis(),
+                        ddl.len(),
+                        ddl.lines().count(),
+                    ));
+                }
+                return Ok(ddl);
+            }
+        }
         // Session-scoped DBMS_METADATA setup (terminator, pretty print and
         // the storage noise switch). Only re-sent when the choice changed.
         let t_setup = std::time::Instant::now();
@@ -872,7 +963,7 @@ impl DbClient for ThinClient {
         self.ddl_storage = Some(show_storage);
         if timing_enabled() {
             write_timing_line(&format!(
-                "ddl total_ms={} setup_ms={setup_ms} setup_calls={setup_calls} \
+                "ddl native=0 total_ms={} setup_ms={setup_ms} setup_calls={setup_calls} \
                  query_ms={query_ms} read_ms={read_ms} body_ms={} bytes={} lines={} \
                  show_storage={}",
                 total.elapsed().as_millis(),

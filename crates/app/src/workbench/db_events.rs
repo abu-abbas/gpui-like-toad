@@ -217,10 +217,27 @@ impl Workbench {
         cx.notify();
         let handle = self.window_handle;
         cx.spawn(async move |view, cx| {
-            let resp = cx
-                .background_executor()
-                .spawn(async move { rx.recv() })
-                .await;
+            let mut rx = rx;
+            let resp = loop {
+                let (back, resp) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let resp = rx.recv();
+                        (rx, resp)
+                    })
+                    .await;
+                rx = back;
+                // Early rows of a data page: show them, keep waiting for
+                // the whole page.
+                let Ok(Response::QueryPartial(part)) = resp else {
+                    break resp;
+                };
+                let _ = view.update(cx, |this, cx| {
+                    if this.op_is_current(conn_id, generation) {
+                        this.on_query_partial(conn_id, part, cx);
+                    }
+                });
+            };
             // The window is needed to create tabs (View Script) and set
             // editor text from a response.
             let _ = cx.update_window(handle, |_, window, cx| {

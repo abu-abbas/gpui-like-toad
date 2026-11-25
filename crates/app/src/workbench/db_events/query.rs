@@ -111,6 +111,40 @@ impl Workbench {
         self.enforce_result_budget(cx);
     }
 
+    /// The first rows of a data page while the rest is still on its way:
+    /// shown at once, the connection stays busy until the whole page is in
+    /// ([`Workbench::on_query_done`] then grows the grid in place).
+    pub(crate) fn on_query_partial(
+        &mut self,
+        cid: u64,
+        result: QueryResult,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(conn) = self.conn_by_id(cid) else {
+            return;
+        };
+        if conn.abandoned || !matches!(conn.pending_op, Some(PendingOp::Run)) {
+            return;
+        }
+        let Some(ix) = self.target_ix_for(cid) else {
+            return;
+        };
+        let rows = result.row_count();
+        let column_names: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
+        let Some(data) = self.tabs[ix].data.as_mut() else {
+            return;
+        };
+        data.set_columns(column_names);
+        data.partial_rows = rows;
+        self.set_grid_result_for(cid, result, cx);
+        self.tabs[ix].results_tab = ResultsTab::Results;
+        self.set_status_for(
+            cid,
+            format!("First {rows} rows shown, loading the rest of the page…"),
+        );
+        cx.notify();
+    }
+
     pub(super) fn on_query_done(
         &mut self,
         cid: u64,
@@ -155,7 +189,18 @@ impl Workbench {
                 self.replace_message(&old, new);
             }
         }
-        self.set_grid_result_for(cid, result, cx);
+        // The page's first rows are on screen already: keep the grid's
+        // scroll, selection and sort while the rest joins them.
+        let grow = self
+            .target_tab_for_mut(cid)
+            .data
+            .as_mut()
+            .is_some_and(|d| std::mem::take(&mut d.partial_rows) > 0);
+        if grow {
+            self.grow_grid_result_for(cid, result, cx);
+        } else {
+            self.set_grid_result_for(cid, result, cx);
+        }
         self.target_tab_for_mut(cid).results_tab = ResultsTab::Results;
         let is_data = self.target_tab_for_mut(cid).data.is_some();
         if is_data {

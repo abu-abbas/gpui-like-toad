@@ -8,6 +8,12 @@ example, SQL Server 2014 SP1 build `12.0.4100.1` predates TLS 1.2 support.
 See [Microsoft KB3135244](https://learn.microsoft.com/en-us/troubleshoot/sql/database-engine/connect/tls-1-2-support-microsoft-sql-server)
 for the minimum builds and applicable updates.
 
+## 1.0.3 · Unreleased
+
+Minimum Kilat version `0.1.64` for installation. The legacy TLS option appears in Kilat 0.1.66 and newer.
+
+- Connection errors now name the option that fixes them. A server that only offers TLS 1.0 or 1.1, such as SQL Server 2014 build `12.0.4100.1`, now says to tick **Allow legacy TLS (1.0/1.1)** instead of only "unsupported protocol". A server with a self-signed certificate now says to tick **Trust server certificate** instead of only "certificate verify failed". Such a server needs both options.
+
 ## [1.0.2](https://github.com/abu-abbas/kilat/releases/tag/ext-mssql-1.0.2) · 2026-11-25
 
 Minimum Kilat version `0.1.64` for installation. The legacy TLS option below appears in Kilat 0.1.66 and newer; with an older Kilat the extension keeps working without it.

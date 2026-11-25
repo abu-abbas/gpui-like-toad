@@ -14,11 +14,12 @@ use crate::sql::{self, Kind, Parsed};
 
 /// Rows captured before the statement runs. More than this and the dry run
 /// still reports the exact count, but writes no undo script.
-pub const CAPTURE_ROWS: usize = 1000;
+pub const CAPTURE_ROWS: usize = 10_000;
 /// Changed rows that are drawn in the view.
 pub const SHOW_ROWS: usize = 200;
-/// ROWIDs per `IN (...)` when the rows are read again.
-const REREAD_CHUNK: usize = 100;
+/// ROWIDs per `IN (...)` when the rows are read again (Oracle allows 1,000
+/// expressions in a list; fewer round trips matter on a slow link).
+const REREAD_CHUNK: usize = 1000;
 /// Text and binary cells longer than this are clipped (and left out of the
 /// undo script).
 const CELL_BYTES: usize = 4000;
@@ -27,9 +28,11 @@ const ROWID_COLUMN: &str = "KILAT_RID";
 /// so rows another session changed and has not committed (often the user's
 /// own editor) would make the statement wait forever.
 const LOCK_WAIT_SECS: u32 = 10;
-/// The view carries the script as one string, which the UI protocol caps at
-/// 64 KiB. A longer script is not written (a cut one would look complete).
-pub const UNDO_MAX_BYTES: usize = 60_000;
+/// The largest undo script that is written. It goes out whole as an exported
+/// .sql file, which shares the protocol's 8 MiB reply limit with JSON
+/// escaping (quotes double in the worst case). A longer script is not
+/// written at all (a cut one would look complete).
+pub const UNDO_MAX_BYTES: usize = 3_000_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Change {
@@ -277,10 +280,10 @@ pub fn run(client: &mut dyn DbClient, statement: &str) -> Result<Report, String>
         let script = undo_script(&parsed, &old.columns, &all_changes, &mut notes);
         if script.len() > UNDO_MAX_BYTES {
             notes.push(format!(
-                "The undo script would be {} KB, more than the {} KB the view can carry, so it \
-                 is not written. Narrow the WHERE clause to get one.",
-                script.len() / 1000,
-                UNDO_MAX_BYTES / 1000
+                "The undo script would be {} MB, more than the {} MB that can be exported, so \
+                 it is not written. Narrow the WHERE clause to get one.",
+                script.len().div_ceil(1_000_000),
+                UNDO_MAX_BYTES / 1_000_000
             ));
             None
         } else {
