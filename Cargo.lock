@@ -4813,6 +4813,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "native-tls",
+ "openssl",
  "ora-core",
  "tiberius",
  "tokio",

@@ -38,7 +38,7 @@ use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
-use conv::{cell, db_err, first_word, type_label};
+use conv::{cell, connect_err, db_err, first_word, type_label};
 
 type Conn = Client<Compat<TcpStream>>;
 
@@ -295,7 +295,9 @@ impl DbClient for MssqlClient {
         let Self { rt, .. } = self;
         // The runtime polls connect on this thread, including the creation
         // of the connector inside Tiberius.
-        let conn = native_tls::with_legacy_tls10(profile.access.allow_legacy_tls, || {
+        let legacy_tls = profile.access.allow_legacy_tls;
+        let trust_cert = profile.access.trust_server_certificate;
+        let conn = native_tls::with_legacy_tls10(legacy_tls, || {
             rt.block_on(async {
                 let connect = async {
                     let tcp = TcpStream::connect(addr)
@@ -304,7 +306,7 @@ impl DbClient for MssqlClient {
                     tcp.set_nodelay(true).ok();
                     Client::connect(config, tcp.compat_write())
                         .await
-                        .map_err(db_err)
+                        .map_err(|e| connect_err(e, legacy_tls, trust_cert))
                 };
                 tokio::time::timeout(CONNECT_TIMEOUT, connect)
                     .await

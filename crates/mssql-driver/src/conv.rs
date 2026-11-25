@@ -15,6 +15,30 @@ pub(crate) fn db_err(err: Error) -> DbError {
     }
 }
 
+/// A failed connect, with a pointer to the connection option that allows
+/// it when TLS stopped it: an older TLS version than 1.2, or a certificate
+/// the system does not trust (SQL Server's default self-signed one).
+pub(crate) fn connect_err(err: Error, legacy_tls: bool, trust_cert: bool) -> DbError {
+    let mut e = db_err(err);
+    // OpenSSL's words for the server choosing an older version, or
+    // refusing the client's minimum with an alert.
+    if !legacy_tls
+        && (e.0.contains("unsupported protocol") || e.0.contains("alert protocol version"))
+    {
+        e.0.push_str(LEGACY_TLS_HINT);
+    } else if !trust_cert && e.0.contains("certificate verify failed") {
+        e.0.push_str(TRUST_CERT_HINT);
+    }
+    e
+}
+
+const LEGACY_TLS_HINT: &str = " (The server only offers TLS 1.0 or 1.1. \
+     For a server you trust, tick Allow legacy TLS (1.0/1.1) in the connection's Advanced settings.)";
+
+const TRUST_CERT_HINT: &str = " (The server's certificate is not trusted by this computer. \
+     For a server you know, such as one with a self-signed certificate, tick Trust server certificate \
+     in the connection's Advanced settings.)";
+
 /// `'text'` as a T-SQL literal for catalog queries (doubled quotes).
 pub(crate) fn lit(text: &str) -> String {
     format!("N'{}'", text.replace('\'', "''"))
