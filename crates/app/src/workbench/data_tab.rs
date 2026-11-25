@@ -120,6 +120,9 @@ pub(super) struct DataTab {
     _page_subs: Vec<Subscription>,
     /// Lazy CLOB previews of the rows on screen (see `clob_preview`).
     pub(super) preview: super::clob_preview::PreviewState,
+    /// Rows of the page being loaded that are already on screen (its first
+    /// rows arrive early); 0 when no load is half done.
+    pub(super) partial_rows: usize,
 }
 
 impl DataTab {
@@ -225,6 +228,7 @@ impl DataTab {
             insert_rows: Default::default(),
             _page_subs: page_subs,
             preview: super::clob_preview::PreviewState::new(),
+            partial_rows: 0,
         }
     }
 
@@ -737,6 +741,9 @@ impl Workbench {
         );
         self.push_message(log);
         self.conn.status = format!("Loading {owner}.{name}…");
+        if let Some(data) = self.data_mut() {
+            data.partial_rows = 0;
+        }
         // Not recorded in query history: the statement has bind
         // placeholders, so re-running it from History would fail.
         self.conn.pending_sql = None;

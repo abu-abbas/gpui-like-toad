@@ -310,6 +310,10 @@ pub struct ScriptStep {
 }
 
 pub enum Response {
+    /// The first rows of a data tab page, sent before the job's final
+    /// [`Response::QueryDone`] with the whole page. Never a job's last
+    /// response.
+    QueryPartial(QueryResult),
     ScriptDone(Vec<StatementResult>),
     ScriptRan(Vec<ScriptStep>),
     Connected(DbInfo),
@@ -392,6 +396,7 @@ impl DbHandle {
             let mut last_activity = Instant::now();
             let mut lost = None;
             while let Ok((job, confirmed, reply)) = rx.recv() {
+                EARLY_REPLY.with(|early| *early.borrow_mut() = Some(reply.clone()));
                 // A panic in one job must not kill the session: report it
                 // and keep the worker (and its connection) alive.
                 let response = catch_unwind(AssertUnwindSafe(|| {
@@ -405,6 +410,7 @@ impl DbHandle {
                     )
                 }))
                 .unwrap_or_else(|_| Response::Failed("internal error di DB worker".to_string()));
+                EARLY_REPLY.with(|early| *early.borrow_mut() = None);
                 let _ = reply.send(response);
             }
         });
@@ -431,6 +437,23 @@ impl DbHandle {
         }
         rx
     }
+}
+
+thread_local! {
+    /// Reply channel of the job running on this worker thread, for the
+    /// responses that come before its last one ([`Response::QueryPartial`]).
+    /// Unset outside the worker loop (tests), where early rows are dropped.
+    static EARLY_REPLY: std::cell::RefCell<Option<Sender<Response>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Send `response` ahead of the running job's final one.
+fn send_early(response: Response) {
+    EARLY_REPLY.with(|early| {
+        if let Some(reply) = early.borrow().as_ref() {
+            let _ = reply.send(response);
+        }
+    });
 }
 
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(45);
@@ -750,7 +773,17 @@ fn handle_job(job: Job, client: &mut Option<Box<dyn DbClient>>) -> Response {
                     limit: wanted.saturating_add(1),
                     ..page
                 };
-                match client.query_table_in(database.as_deref(), &owner, &name, &filter, probe) {
+                // The first rows go to the grid right away; a wide page
+                // can take seconds over a slow link.
+                let mut first = |part: QueryResult| send_early(Response::QueryPartial(part));
+                match client.query_table_streamed(
+                    database.as_deref(),
+                    &owner,
+                    &name,
+                    &filter,
+                    probe,
+                    &mut first,
+                ) {
                     Ok(mut result) => {
                         if result.rows.len() > wanted {
                             result.rows.truncate(wanted);

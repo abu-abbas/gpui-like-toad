@@ -159,9 +159,11 @@ impl Workbench {
                 })
                 .into_any_element()
         };
+        // No overlay over a page's early rows: they are the new page.
         let reloading = self.conn.busy
             && matches!(self.conn.pending_op, Some(PendingOp::Run))
-            && tab.last_result.as_ref().is_some_and(|r| r.row_count() > 0);
+            && tab.last_result.as_ref().is_some_and(|r| r.row_count() > 0)
+            && tab.data.as_ref().is_none_or(|d| d.partial_rows == 0);
         let grid = if reloading {
             div()
                 .relative()
@@ -231,15 +233,33 @@ impl Workbench {
                 .overflow_hidden()
                 .when(self.active_kind() == DbKind::Oracle, |body| {
                     body.child(
-                        div().flex().flex_none().px_2().py_1().child(
-                            Checkbox::new("ddl-show-storage")
-                                .small()
-                                .label("Show storage")
-                                .checked(data.show_storage)
-                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                    this.set_show_storage(*checked, cx);
-                                })),
-                        ),
+                        div()
+                            .flex()
+                            .flex_none()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(SPACE_3))
+                            .px_2()
+                            .py_1()
+                            .child(
+                                Checkbox::new("ddl-show-storage")
+                                    .small()
+                                    .label("Show storage")
+                                    .checked(data.show_storage)
+                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                        this.set_show_storage(*checked, cx);
+                                    })),
+                            )
+                            .child(caption_text(
+                                if data.show_storage {
+                                    "Full script from DBMS_METADATA (slow the first time on a big database)."
+                                } else {
+                                    "Quick script from the data dictionary. Tick Show storage for the full DBMS_METADATA script."
+                                }
+                                .to_string(),
+                                theme,
+                            )),
                     )
                 })
                 .child(
@@ -1243,6 +1263,24 @@ impl Workbench {
         tab.last_result = Some(result.clone());
         tab.table_state.update(cx, |state, cx| {
             state.delegate_mut().set_result(result);
+            state.refresh(cx);
+        });
+        self.enforce_result_budget(cx);
+    }
+
+    /// Like [`Workbench::set_grid_result_for`] for the rest of a page whose
+    /// first rows the grid shows already ([`crate::worker::Response::QueryPartial`]).
+    pub(super) fn grow_grid_result_for(
+        &mut self,
+        conn_id: u64,
+        result: QueryResult,
+        cx: &mut Context<Self>,
+    ) {
+        let result = Arc::new(result);
+        let tab = self.target_tab_for_mut(conn_id);
+        tab.last_result = Some(result.clone());
+        tab.table_state.update(cx, |state, cx| {
+            state.delegate_mut().extend_result(result);
             state.refresh(cx);
         });
         self.enforce_result_budget(cx);

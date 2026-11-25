@@ -184,6 +184,11 @@ impl ConnImpl {
         self.client_ref.lock()?.get_call_timeout()
     }
 
+    /// Bytes read from the database so far (patched, gpui-like-toad).
+    pub fn bytes_received(&self) -> u64 {
+        self.client_ref.lock().map_or(0, |c| c.bytes_received())
+    }
+
     /// Returns the domain of the database.
     pub fn get_db_domain(&self) -> &str {
         self.db_info.get_db_domain()
