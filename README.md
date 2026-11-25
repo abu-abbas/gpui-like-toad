@@ -36,7 +36,7 @@ The explorer works like Toad (pick a schema, then browse objects by type), the c
 
 - Schema dropdown, then an object type dropdown with counts: Tables, Views, Materialized Views, Indexes, Sequences, Procs (procedures, functions, packages), Triggers, Synonyms, Types and DB Links, plus a search box over a virtualized list. SQLite shows its tables, views, indexes and triggers.
 - **Double click** a table or view to open its data in a new tab.
-- **Right click** for Open Data, Describe, View Script (DDL from `DBMS_METADATA`), Export Data (CSV or XLSX), Import Data (CSV) and, on materialized views, Refresh Materialized View.
+- **Right click** for Open Data, Describe, View Script (DDL read from the data dictionary in a few quick queries; tick **Show storage** in the DDL tab for the full `DBMS_METADATA` script), Export Data (CSV or XLSX), Import Data (CSV) and, on materialized views, Refresh Materialized View.
 - **Quick Open** (Ctrl/Cmd+P) jumps to any table or view by name.
 
 | Object types | Right click |
@@ -45,7 +45,7 @@ The explorer works like Toad (pick a schema, then browse objects by type), the c
 
 ### Data grid
 
-- Dense, virtualized grid with **Limit/Offset** paging (1,000 rows by default) and a **Columns** picker.
+- Dense, virtualized grid with **Limit/Offset** paging (1,000 rows by default) and a **Columns** picker. On Oracle the first 100 rows show as soon as they arrive while the rest of the page loads.
 - **Filter bar** with AND/OR, values sent as bind variables, a SQL preview with Copy SQL and Open in SQL editor, and **Quick Filter** from a right click on a cell.
 - **Edit in place**: double click a cell or press Enter, move between cells with Tab, Shift+Tab and Enter, paste a block of cells (TSV), add, **duplicate** or delete rows. Pending changes are coloured until you Apply, and nothing is committed until you press Commit.
 - Copy rows as values, field names, INSERT/UPDATE statements or TSV.

@@ -110,6 +110,13 @@ impl Connection {
         self.get_impl()?.get_call_timeout()
     }
 
+    /// Bytes read from the database on this connection so far, 0 when it
+    /// is closed. Patched (gpui-like-toad): the timing log derives the
+    /// link's speed from it.
+    pub fn bytes_received(&self) -> u64 {
+        self.get_impl().map_or(0, |i| i.bytes_received())
+    }
+
     /// Changes the password of the logged on user.
     pub fn change_password(
         &self,

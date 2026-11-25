@@ -50,6 +50,8 @@ pub struct ResultsDelegate {
     result: Arc<QueryResult>,
     /// Result row behind each grid row after a sort; `None` = fetch order.
     order: Option<Vec<usize>>,
+    /// The sort behind `order`, so rows that arrive later can join it.
+    sorted_by: Option<(usize, ColumnSort)>,
     /// Cells changed in the grid (edits not refetched yet), by (result
     /// row, result column), shown over the shared result.
     overrides: HashMap<(usize, usize), Value>,
@@ -274,6 +276,7 @@ impl ResultsDelegate {
             insert_disabled: false,
             result: Arc::default(),
             order: None,
+            sorted_by: None,
             overrides: HashMap::new(),
             columns: Vec::new(),
             numeric: Vec::new(),
@@ -895,10 +898,36 @@ impl ResultsDelegate {
         self.rowid_col = result.columns.iter().position(|c| c.name == ROWID_COLUMN);
         self.result = result;
         self.order = None;
+        self.sorted_by = None;
         self.overrides.clear();
         self.previews_asked.clear();
         self.rebuild_columns();
         self.page = 0;
+    }
+
+    /// Show `result`, the whole page whose first rows are on screen: the
+    /// selection, page, sort and grid edits stay. Anything else (other
+    /// columns, fewer rows) is a new result for [`Self::set_result`].
+    pub fn extend_result(&mut self, result: impl Into<Arc<QueryResult>>) {
+        let result = result.into();
+        let same_columns = result.columns.len() == self.result.columns.len()
+            && result
+                .columns
+                .iter()
+                .zip(&self.result.columns)
+                .all(|(a, b)| a.name == b.name);
+        if !same_columns || result.rows.len() < self.result.rows.len() {
+            return self.set_result(result);
+        }
+        let numeric = numeric_columns(&result);
+        self.result = result;
+        if numeric != self.numeric {
+            self.numeric = numeric;
+            self.rebuild_columns();
+        }
+        if let Some((col_ix, sort)) = self.sorted_by {
+            self.sort_by_column(col_ix, sort);
+        }
     }
 
     /// Result row behind grid row `view_row` (after sorting).
@@ -1435,6 +1464,7 @@ impl ResultsDelegate {
         // Sorting orders row indexes; the shared result stays as fetched,
         // so Default restores the fetch order.
         let mut order: Vec<usize> = (0..self.result.rows.len()).collect();
+        self.sorted_by = Some((col_ix, sort));
         match sort {
             ColumnSort::Ascending => order.sort_by(|&a, &b| {
                 cmp_values(self.source_cell(a, col_ix), self.source_cell(b, col_ix))
@@ -1444,6 +1474,7 @@ impl ResultsDelegate {
             }),
             ColumnSort::Default => {
                 self.order = None;
+                self.sorted_by = None;
                 return;
             }
         }
@@ -1518,6 +1549,25 @@ mod tests {
         // Rows far from the view were never asked for.
         let far = grid.take_preview_batch(900..910, 0, 60).unwrap();
         assert_eq!(far.rowids.len(), 10);
+    }
+
+    #[test]
+    fn extended_result_keeps_selection_edits_and_sort() {
+        let mut grid = clob_grid(3);
+        grid.selected_rows.insert(1);
+        grid.set_cell("R0", "BODY", Value::Text("edited".into()));
+        grid.sort_by_column(1, ColumnSort::Descending);
+        // The rest of the page arrives: same columns, more rows.
+        grid.extend_result(clob_grid(5).result.clone());
+        assert_eq!(grid.result.rows.len(), 5);
+        assert!(grid.selected_rows.contains(&1));
+        // Still sorted by ID descending, new rows included.
+        assert_eq!(grid.cell(0, 1), Some(&Value::Integer(4)));
+        assert_eq!(grid.cell(4, 2), Some(&Value::Text("edited".into())));
+        // A different result replaces everything.
+        grid.extend_result(clob_grid(2).result.clone());
+        assert!(grid.selected_rows.is_empty());
+        assert!(grid.order.is_none());
     }
 
     #[test]
