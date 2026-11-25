@@ -30,6 +30,7 @@ mod migrate;
 mod profile_import;
 mod profiles;
 mod sync;
+pub mod sync_crypto;
 #[cfg(test)]
 mod tests;
 mod theme;
