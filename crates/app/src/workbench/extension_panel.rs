@@ -325,7 +325,7 @@ impl ExtensionPanel {
                 let row = if matches!(tree, Node::Column { .. }) {
                     row.flex_col().flex_1()
                 } else {
-                    row.flex_wrap()
+                    row.flex_wrap().items_center()
                 };
                 row.children(
                     children
@@ -1030,6 +1030,7 @@ fn node_icon(name: &Text) -> Option<Icon> {
         "x" => Icon::new(IconName::X),
         "alert" => Icon::new(IconName::CircleAlert),
         "copy" => Icon::new(IconName::Copy),
+        "download" => Icon::new(IconName::Download),
         _ => Icon::new(interface_icon(name)?),
     };
     Some(icon)

@@ -439,6 +439,9 @@ impl Workbench {
                 Effect::Toast { text } => self.push_message(text.as_str().to_owned()),
                 Effect::OpenUrl { url } => cx.open_url(url.as_str()),
                 Effect::Confirm { .. } => {}
+                Effect::Save { name, parts } => {
+                    self.save_text_file(name.as_str().to_owned(), Effect::joined(&parts), cx)
+                }
             }
         }
         self.schedule_dryrun_poll(update.poll_ms, cx);

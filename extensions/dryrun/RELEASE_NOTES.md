@@ -1,5 +1,14 @@
 # Dry-run extension release notes
 
+## [1.1.0](https://github.com/abu-abbas/kilat/releases/tag/ext-dryrun-1.1.0) · unreleased
+
+Minimum Kilat version `0.1.68`.
+
+- Export .sql: save the undo script as a file, from the Undo script tab or from the green strip after a commit. Kilat asks where to save it.
+- Bigger statements get an undo script: up to 10,000 rows (was 1,000) and 3 MB of script (was 60 KB).
+- A long undo script shows its first lines with its size and statement count; copy is for scripts up to 60 KB, Export .sql always saves all of it.
+- Reading the changed rows again takes ten times fewer round trips, which helps on a slow VPN.
+
 ## [1.0.1](https://github.com/abu-abbas/kilat/releases/tag/ext-dryrun-1.0.1) · 2026-11-25
 
 Minimum Kilat version `0.1.65`.

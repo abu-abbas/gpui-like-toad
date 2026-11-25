@@ -56,6 +56,20 @@ types, so an extension that sends them sets `min_app` to `0.1.65` or later.
 Icon names: `flask`, `lock`, `undo`, `check`, `zap`, `table`, `x`, `alert`,
 `copy`, plus the list icons (`search`, `trash`, `refresh`, `key`, `type-*`).
 
+## Added in Kilat 0.1.68
+
+An older Kilat rejects these, so an extension that sends them sets `min_app`
+to `0.1.68` or later.
+
+- The `save` effect: `{"type": "save", "name": "undo_emp.sql", "parts": [...]}`.
+  Kilat asks where to save, suggesting `name`, and writes the parts one after
+  another. `name` must be a plain file name (no folders, no leading dot, no
+  `/ \ : * ? " < > |` or control characters). Parts let a file be larger than
+  one 64 KiB string; the whole reply still has to fit the 8 MiB transport
+  limit. Like the clipboard effect it requires a user event.
+- The `download` icon.
+- `row` children are centred vertically.
+
 ## Validation
 
 The host validates an entire reply before applying it. Each free-form string
@@ -67,8 +81,8 @@ are unique within their component. Unknown component and event types are
 errors.
 
 Links require HTTP or HTTPS with a host and no embedded credentials.
-Clipboard, external URL and confirmation effects require a response to a
-user event. The host still verifies which action triggered the effect and
+Clipboard, save, external URL and confirmation effects require a response
+to a user event. The host still verifies which action triggered the effect and
 applies Read Only and production checks before forwarding writes. The
 extension also enforces permissions at the service boundary. Polling uses
 a minimum interval of one second. A reply without a polling interval stops polling.
