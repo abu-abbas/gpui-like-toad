@@ -84,6 +84,39 @@ impl Workbench {
         .detach();
     }
 
+    /// Ask where to save `text` (an extension's `save` effect, such as the
+    /// Dry-run undo script) and write it there.
+    pub(super) fn save_text_file(&mut self, name: String, text: String, cx: &mut Context<Self>) {
+        let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let prompt = cx.prompt_for_new_path(&dir, Some(&name));
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |view, cx| {
+            let path = match prompt.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) => return,
+                _ => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.push_message("Failed to open the save dialog.".into());
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let display = path.display().to_string();
+            let written = executor
+                .spawn(async move { std::fs::write(path, text) })
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                this.push_message(match written {
+                    Ok(()) => format!("Saved: {display}"),
+                    Err(err) => format!("Failed to save {display}: {err}"),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn editor_text(&self, cx: &App) -> String {
         self.active_tab().editor.read(cx).value().to_string()
     }

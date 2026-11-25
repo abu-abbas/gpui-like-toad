@@ -4,5 +4,5 @@
   "description": "Run an UPDATE or DELETE without committing: see old and new values and get an undo script.",
   "kind": "action",
   "crate": "kilat-ext-dryrun",
-  "min_app": "0.1.65"
+  "min_app": "0.1.68"
 }

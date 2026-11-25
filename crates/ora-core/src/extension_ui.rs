@@ -250,10 +250,51 @@ pub enum Node {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
 pub enum Effect {
-    Toast { text: Text },
-    Copy { text: Text },
-    OpenUrl { url: Text },
-    Confirm { id: Text, text: Text },
+    Toast {
+        text: Text,
+    },
+    Copy {
+        text: Text,
+    },
+    OpenUrl {
+        url: Text,
+    },
+    Confirm {
+        id: Text,
+        text: Text,
+    },
+    /// Offer to save a text file: the host asks where, with `name` as the
+    /// suggested file name, and writes the parts one after another. Parts
+    /// let a file be larger than one string (the reply stays within the
+    /// transport limit). Needs Kilat 0.1.68 or later.
+    Save {
+        name: Text,
+        parts: Vec<Text>,
+    },
+}
+
+impl Effect {
+    /// The joined text of a `save` effect.
+    pub fn joined(parts: &[Text]) -> String {
+        parts.iter().map(Text::as_str).collect()
+    }
+}
+
+/// Split `text` into strings that fit the per-string limit, at character
+/// boundaries, for a `save` effect.
+pub fn split_parts(text: &str) -> Vec<Text> {
+    let mut parts = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let mut end = rest.len().min(MAX_STRING_BYTES);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (head, tail) = rest.split_at(end);
+        parts.push(Text(head.to_owned()));
+        rest = tail;
+    }
+    parts
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -369,6 +410,10 @@ impl ViewUpdate {
             match effect {
                 Effect::OpenUrl { url } => validate_url(url)?,
                 Effect::Confirm { id, .. } => validate_id(id)?,
+                Effect::Save { name, parts } => {
+                    validate_file_name(name)?;
+                    spend(&mut budget, parts.len())?;
+                }
                 _ => {}
             }
         }
@@ -384,6 +429,22 @@ fn validate_url(text: &Text) -> Result<(), &'static str> {
         || url.password().is_some()
     {
         return Err("extension UI links require an HTTP(S) URL without credentials");
+    }
+    Ok(())
+}
+
+/// A bare file name: no folders, nothing hidden, nothing a file system
+/// would read specially. The host still asks the user where to save it.
+fn validate_file_name(name: &Text) -> Result<(), &'static str> {
+    let name = name.as_str();
+    if name.is_empty()
+        || name.len() > 255
+        || name.starts_with('.')
+        || name.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
+    {
+        return Err("extension UI file name must be a plain file name");
     }
     Ok(())
 }
@@ -526,6 +587,40 @@ mod tests {
 
     fn check(reply: Value, origin: Origin) -> Result<ViewUpdate, String> {
         decode_update(&reply.to_string(), origin)
+    }
+
+    #[test]
+    fn save_effects_need_a_user_event_and_a_plain_file_name() {
+        let reply = |name: &str| {
+            let mut reply = update(json!({"type": "empty", "text": "x"}));
+            reply["effects"] =
+                json!([{"type": "save", "name": name, "parts": ["UPDATE t;\n", "COMMIT;\n"]}]);
+            reply
+        };
+        let ok = check(reply("undo_emp.sql"), Origin::UserEvent).unwrap();
+        match &ok.effects[0] {
+            Effect::Save { name, parts } => {
+                assert_eq!(name.as_str(), "undo_emp.sql");
+                assert_eq!(Effect::joined(parts), "UPDATE t;\nCOMMIT;\n");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(check(reply("undo_emp.sql"), Origin::Tick).is_err());
+        for bad in [
+            "", "../x.sql", "a/b.sql", "a\\b.sql", ".hidden", "c:x.sql", "a\nb",
+        ] {
+            assert!(check(reply(bad), Origin::UserEvent).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn split_parts_keeps_characters_whole_and_round_trips() {
+        let text = format!("{}{}", "a".repeat(MAX_STRING_BYTES - 1), "é".repeat(40_000));
+        let parts = split_parts(&text);
+        assert!(parts.len() > 1);
+        assert!(parts.iter().all(|p| p.as_str().len() <= MAX_STRING_BYTES));
+        assert_eq!(Effect::joined(&parts), text);
+        assert!(split_parts("").is_empty());
     }
 
     #[test]

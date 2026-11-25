@@ -1,6 +1,6 @@
 [package]
 name = "kilat-ext-dryrun"
-version = "1.0.1"
+version = "1.1.0"
 description = "The Dry-run extension of Kilat: runs an UPDATE or DELETE in a transaction that is never committed, shows old and new values and writes an undo script"
 edition.workspace = true
 license.workspace = true

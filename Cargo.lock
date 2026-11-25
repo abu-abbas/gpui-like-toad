@@ -4274,7 +4274,7 @@ dependencies = [
 
 [[package]]
 name = "kilat-ext-dryrun"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "ora-core",
  "ora-driver",
