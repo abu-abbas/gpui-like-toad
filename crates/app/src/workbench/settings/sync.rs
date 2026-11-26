@@ -712,11 +712,13 @@ impl Workbench {
                         theme,
                     ),
             ];
-            if !is_drive && crate::gdrive::available() {
+            if !is_drive {
                 let waiting = sync.drive_login.is_some();
                 rows.push(setting_row_owned(
                     "Use Google Drive instead".into(),
-                    if waiting {
+                    if !crate::gdrive::available() {
+                        "Not set up in this build of Kilat (the release was made without a Google client). Install a newer release."
+                    } else if waiting {
                         "Finish signing in in your browser. Kilat waits up to 5 minutes."
                     } else {
                         "Sign in with Google and keep the sync file in a Kilat Sync folder on Drive."
@@ -725,7 +727,7 @@ impl Workbench {
                     Button::new("sync-switch-google")
                         .small()
                         .label(if waiting { "Cancel" } else { "Connect Google Drive…" })
-                        .disabled(running)
+                        .disabled(running || !crate::gdrive::available())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if waiting {
                                 this.sync_drive_cancel(cx)
