@@ -24,11 +24,12 @@ Settings Sync with Google Drive is off until you click "Connect Google Drive".
   only the files it created itself, in a folder named "Kilat Sync" in your
   Drive. It cannot read your other files.
 - **What is uploaded:** one file, `kilat-sync.json`, with the settings you
-  chose to sync (connections without passwords, folders, favorite queries,
-  appearance, developer tools, grid preferences, a list of installed
-  extensions). Saved passwords are never uploaded unless you turn on
-  encrypted password sync; they are then encrypted on your computer with a
-  passphrase that only you know, before upload.
+  chose to sync (connections, folders, favorite queries, appearance,
+  developer tools, grid preferences, a list of installed extensions). The
+  whole content is encrypted on your computer with a passphrase that only you
+  know (Argon2id and XChaCha20-Poly1305) before it is uploaded, so Google
+  cannot read it. Saved database passwords are uploaded only if you turn that
+  option on, and then only inside the encrypted file.
 - **Where it goes:** straight from your computer to Google Drive. It is not
   sent to the author of Kilat or to any other third party.
 - **Your email address:** Kilat reads the email address of the signed-in

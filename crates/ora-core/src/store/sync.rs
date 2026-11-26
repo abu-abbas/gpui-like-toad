@@ -25,7 +25,12 @@ pub type Items = BTreeMap<String, Json>;
 
 pub const SYNC_FILE: &str = "kilat-sync.json";
 const FORMAT: &str = "kilat-sync";
-const VERSION: u64 = 1;
+/// 1: plain items (also what an unencrypted `.kilat` export uses).
+/// 2: items sealed in `payload` with the sync passphrase.
+const VERSION: u64 = 2;
+const PAYLOAD_ID: &str = "kilat-sync-payload";
+/// Shown when a file is encrypted and no passphrase was given.
+pub const ENCRYPTED_FILE: &str = "This file is encrypted. Enter the sync passphrase.";
 const KEEP_VERSIONS: usize = 20;
 
 /// What the user chose to sync (Settings > Sync > What to sync).
@@ -624,15 +629,23 @@ impl CryptoHeader {
 pub(super) fn sync_file_json(items: &Items, device: &str) -> Json {
     Json::Obj(vec![
         ("format".into(), Json::Str(FORMAT.into())),
-        ("version".into(), Json::Num(VERSION as f64)),
+        ("version".into(), Json::Num(1.0)),
         ("device".into(), Json::Str(device.into())),
         ("saved_at".into(), Json::Num(now_unix_secs() as f64)),
         ("items".into(), items_to_json(items)),
     ])
 }
 
-/// Read a sync / `.kilat` file. `Ok(None)` when it does not exist yet.
-pub fn read_sync_file(path: &Path) -> Result<Option<(Items, SyncFileInfo)>, String> {
+/// A sync / `.kilat` file as it is on disk, before decrypting.
+struct RawFile {
+    info: SyncFileInfo,
+    /// Version 1: the items in the clear.
+    plain: Option<Items>,
+    /// Version 2: the items, sealed.
+    payload: Option<String>,
+}
+
+fn read_raw(path: &Path) -> Result<Option<RawFile>, String> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -655,23 +668,93 @@ pub fn read_sync_file(path: &Path) -> Result<Option<(Items, SyncFileInfo)>, Stri
         saved_at: v.get("saved_at").and_then(Json::as_u64).unwrap_or(0),
         crypto: v.get("crypto").and_then(CryptoHeader::from_json),
     };
-    Ok(Some((items_from_json(v.get("items")), info)))
+    let payload = v.get("payload").and_then(Json::as_str).map(str::to_string);
+    let plain = payload.is_none().then(|| items_from_json(v.get("items")));
+    Ok(Some(RawFile {
+        info,
+        plain,
+        payload,
+    }))
+}
+
+/// The items of a file, decrypting with `key` when the file is sealed.
+fn open_raw(
+    raw: RawFile,
+    key: Option<&sync_crypto::SyncKey>,
+) -> Result<(Items, SyncFileInfo), String> {
+    let items = match (raw.plain, raw.payload) {
+        (Some(items), _) => items,
+        (None, Some(payload)) => {
+            let key = key.ok_or(ENCRYPTED_FILE)?;
+            let text = sync_crypto::decrypt(key, PAYLOAD_ID, &payload).ok_or(
+                "The sync file could not be decrypted. It is damaged, or the passphrase is wrong.",
+            )?;
+            items_from_json(parse_json(&text).ok().as_ref())
+        }
+        (None, None) => Items::new(),
+    };
+    Ok((items, raw.info))
+}
+
+/// The key for a file: from its own salt, after checking the passphrase.
+fn key_for_header(passphrase: &str, header: &CryptoHeader) -> Result<sync_crypto::SyncKey, String> {
+    let key = sync_crypto::derive_key(passphrase, &header.salt)?;
+    if sync_crypto::verify_check(&key, &header.check) {
+        Ok(key)
+    } else {
+        Err("Wrong sync passphrase.".into())
+    }
+}
+
+/// Read a sync / `.kilat` file. `Ok(None)` when it does not exist yet. An
+/// encrypted file needs the sync `passphrase`.
+pub fn read_sync_file(
+    path: &Path,
+    passphrase: Option<&str>,
+) -> Result<Option<(Items, SyncFileInfo)>, String> {
+    let Some(raw) = read_raw(path)? else {
+        return Ok(None);
+    };
+    let key = match (&raw.payload, passphrase, &raw.info.crypto) {
+        (Some(_), Some(pass), Some(header)) => Some(key_for_header(pass, header)?),
+        _ => None,
+    };
+    open_raw(raw, key.as_ref()).map(Some)
 }
 
 /// Write via a temp file in the same folder, so a cloud client never
-/// uploads a half-written file.
+/// uploads a half-written file. The items are sealed with `key`.
 fn write_sync_file(
     path: &Path,
     items: &Items,
     device: &str,
-    crypto: Option<&CryptoHeader>,
+    header: &CryptoHeader,
+    key: &sync_crypto::SyncKey,
 ) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
-    let mut json = sync_file_json(items, device);
-    if let (Some(header), Json::Obj(pairs)) = (crypto, &mut json) {
-        pairs.push(("crypto".into(), header.to_json()));
-    }
+    let json = Json::Obj(vec![
+        ("format".into(), Json::Str(FORMAT.into())),
+        ("version".into(), Json::Num(VERSION as f64)),
+        ("device".into(), Json::Str(device.into())),
+        ("saved_at".into(), Json::Num(now_unix_secs() as f64)),
+        ("crypto".into(), header.to_json()),
+        (
+            "payload".into(),
+            Json::Str(sync_crypto::seal_blob(
+                key,
+                PAYLOAD_ID,
+                &to_json(&items_to_json(items)),
+            )),
+        ),
+    ]);
     fs::write(&tmp, to_json(&json))
+        .and_then(|()| fs::rename(&tmp, path))
+        .map_err(|e| format!("Cannot write {}: {e}", path.display()))
+}
+
+fn write_plain_file(path: &Path, items: &Items, device: &str) -> Result<(), String> {
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, to_json(&sync_file_json(items, device)))
         .and_then(|()| fs::rename(&tmp, path))
         .map_err(|e| format!("Cannot write {}: {e}", path.display()))
 }
@@ -698,15 +781,35 @@ fn backup_version(folder: &Path, file: &Path) {
     }
 }
 
-/// Export the enabled categories to a `.kilat` file.
+/// Older versions of the file were kept in the clear. Once the file is
+/// sealed they must not stay behind.
+fn purge_versions(folder: &Path) {
+    let _ = fs::remove_dir_all(folder.join("versions"));
+}
+
+/// Export the enabled categories to a `.kilat` file, sealed with the sync
+/// `passphrase` when one is given.
 pub fn export_kilat_file(
     dir: &Path,
     path: &Path,
     categories: SyncCategories,
     prod_ok: &BTreeSet<String>,
+    passphrase: Option<&str>,
 ) -> Result<usize, String> {
     let items = collect_items(dir, categories, prod_ok);
-    write_sync_file(path, &items, &load_sync_config_in(dir).device_name, None)?;
+    let device = load_sync_config_in(dir).device_name;
+    match passphrase {
+        Some(pass) => {
+            let salt = sync_crypto::new_salt();
+            let key = sync_crypto::derive_key(pass, &salt)?;
+            let header = CryptoHeader {
+                salt: salt.to_vec(),
+                check: sync_crypto::check_token(&key),
+            };
+            write_sync_file(path, &items, &device, &header, &key)?;
+        }
+        None => write_plain_file(path, &items, &device)?,
+    }
     Ok(items.len())
 }
 
@@ -737,15 +840,8 @@ fn secret_id(profile_id: &str) -> String {
 /// file already has a passphrase and this is it. `Ok(false)`: nobody set
 /// one yet, so this becomes the passphrase at the next sync.
 pub fn check_passphrase(folder: &Path, passphrase: &str) -> Result<bool, String> {
-    match read_sync_file(&folder.join(SYNC_FILE))?.and_then(|(_, info)| info.crypto) {
-        Some(header) => {
-            let key = sync_crypto::derive_key(passphrase, &header.salt)?;
-            if sync_crypto::verify_check(&key, &header.check) {
-                Ok(true)
-            } else {
-                Err("Wrong sync passphrase.".into())
-            }
-        }
+    match read_raw(&folder.join(SYNC_FILE))?.and_then(|r| r.info.crypto) {
+        Some(header) => key_for_header(passphrase, &header).map(|_| true),
         None => Ok(false),
     }
 }
@@ -753,8 +849,8 @@ pub fn check_passphrase(folder: &Path, passphrase: &str) -> Result<bool, String>
 /// Whether the sync file in `folder` already has a passphrase.
 pub fn sync_passphrase_set(folder: &Path) -> bool {
     matches!(
-        read_sync_file(&folder.join(SYNC_FILE)),
-        Ok(Some((_, info))) if info.crypto.is_some()
+        read_raw(&folder.join(SYNC_FILE)),
+        Ok(Some(raw)) if raw.info.crypto.is_some()
     )
 }
 
@@ -848,11 +944,12 @@ pub fn extension_suggestions(dir: &Path) -> Vec<(String, Vec<&'static ExtensionI
 
 /// Sync with the configured folder. Pass the user's `choices` for the
 /// conflicts of an earlier call that returned [`SyncOutcome::Conflicts`].
-/// `secrets` is needed only when passwords are synced.
+/// `secrets` holds the sync passphrase, which is always needed: the file is
+/// sealed with it.
 pub fn sync_with(
     dir: &Path,
     choices: &BTreeMap<String, Choice>,
-    secrets: Option<&SyncSecrets>,
+    secrets: &SyncSecrets,
 ) -> Result<SyncOutcome, String> {
     let mut config = load_sync_config_in(dir);
     if !config.enabled || config.folder.trim().is_empty() {
@@ -868,34 +965,23 @@ pub fn sync_with(
     let file = folder.join(SYNC_FILE);
     let cats = config.categories;
     let base = load_base(dir);
-    let remote_file = read_sync_file(&file)?;
-    let mut header = remote_file.as_ref().and_then(|(_, i)| i.crypto.clone());
-
-    // The key for passwords: the file's salt if there is one, else a new
-    // salt that is written with the next upload.
-    let key = if cats.passwords {
-        let secrets = secrets.ok_or("The sync passphrase is not set on this computer.")?;
-        match &header {
-            Some(h) => {
-                let key = sync_crypto::derive_key(secrets.passphrase, &h.salt)?;
-                if !sync_crypto::verify_check(&key, &h.check) {
-                    return Err("Wrong sync passphrase.".into());
-                }
-                Some(key)
-            }
-            None => {
-                let salt = sync_crypto::new_salt();
-                let key = sync_crypto::derive_key(secrets.passphrase, &salt)?;
-                header = Some(CryptoHeader {
-                    salt: salt.to_vec(),
-                    check: sync_crypto::check_token(&key),
-                });
-                Some(key)
-            }
+    let raw = read_raw(&file)?;
+    // The key comes from the file's own salt; a new file gets a new salt.
+    let remote_crypto = raw.as_ref().and_then(|r| r.info.crypto.clone());
+    let legacy = raw.as_ref().is_some_and(|r| r.payload.is_none());
+    let (key, header) = match &remote_crypto {
+        Some(h) => (key_for_header(secrets.passphrase, h)?, h.clone()),
+        None => {
+            let salt = sync_crypto::new_salt();
+            let key = sync_crypto::derive_key(secrets.passphrase, &salt)?;
+            let header = CryptoHeader {
+                salt: salt.to_vec(),
+                check: sync_crypto::check_token(&key),
+            };
+            (key, header)
         }
-    } else {
-        None
     };
+    let remote_file = raw.map(|r| open_raw(r, Some(&key))).transpose()?;
 
     // A PROD connection already in the file was approved when it was
     // uploaded, so it stays in sync even if this list is empty here.
@@ -910,8 +996,8 @@ pub fn sync_with(
         }))
         .collect();
     let mut local = collect_items(dir, cats, &prod_ok);
-    if let (Some(secrets), Some(key)) = (secrets, &key) {
-        local.extend(secret_items(dir, secrets.store, key, &prod_ok)?);
+    if cats.passwords {
+        local.extend(secret_items(dir, secrets.store, &key, &prod_ok)?);
     }
     if cats.extensions {
         let own = format!("ext:{}", config.device_id);
@@ -968,12 +1054,12 @@ pub fn sync_with(
     if merged != local {
         apply_items(dir, &merged, cats, &prod_ok)
             .map_err(|e| format!("Cannot update this computer: {e}"))?;
-        if let (Some(secrets), Some(key)) = (secrets, &key) {
-            apply_secrets(dir, secrets.store, key, &merged, &local)?;
+        if cats.passwords {
+            apply_secrets(dir, secrets.store, &key, &merged, &local)?;
         }
     }
-    let new_header = remote_file.as_ref().and_then(|(_, i)| i.crypto.as_ref()) != header.as_ref();
-    if merged != remote || !file.exists() || new_header {
+    let new_header = remote_crypto.as_ref() != Some(&header);
+    if merged != remote || !file.exists() || new_header || legacy {
         // Keep other computers' items of categories this computer does not sync.
         let mut out = merged.clone();
         if let Some((all, _)) = &remote_file {
@@ -983,8 +1069,14 @@ pub fn sync_with(
                 }
             }
         }
-        backup_version(&folder, &file);
-        write_sync_file(&file, &out, &config.device_name, header.as_ref())?;
+        if legacy {
+            // The old file and its versions are in the clear: the sealed
+            // file replaces them and they must not linger.
+            purge_versions(&folder);
+        } else {
+            backup_version(&folder, &file);
+        }
+        write_sync_file(&file, &out, &config.device_name, &header, &key)?;
     }
     save_base(dir, &merged).map_err(|e| e.to_string())?;
     config.last_synced = now_unix_secs();
@@ -1003,10 +1095,11 @@ pub fn import_kilat_file(
     path: &Path,
     categories: SyncCategories,
     choices: &BTreeMap<String, Choice>,
+    passphrase: Option<&str>,
 ) -> Result<SyncOutcome, String> {
     let prod_ok = BTreeSet::new();
-    let (remote, _) =
-        read_sync_file(path)?.ok_or_else(|| format!("{} was not found.", path.display()))?;
+    let (remote, _) = read_sync_file(path, passphrase)?
+        .ok_or_else(|| format!("{} was not found.", path.display()))?;
     let remote: Items = remote
         .into_iter()
         .filter(|(k, _)| categories.includes(k) && !k.starts_with("ext:"))
