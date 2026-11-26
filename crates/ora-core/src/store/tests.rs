@@ -609,6 +609,29 @@ fn sync_profile(id: &str, name: &str, env: ConnectionEnvironment) -> SavedProfil
     }
 }
 
+const PASS: &str = "test passphrase";
+
+fn sync_plain(dir: &Path, choices: &BTreeMap<String, Choice>) -> Result<SyncOutcome, String> {
+    let store = crate::credentials::MemoryCredentialStore::default();
+    sync_with(
+        dir,
+        choices,
+        &SyncSecrets {
+            store: &store,
+            passphrase: PASS,
+        },
+    )
+}
+
+/// What the sync file holds once decrypted, as JSON text.
+fn shared_text(shared: &Path) -> String {
+    let items = read_sync_file(&shared.join(SYNC_FILE), Some(PASS))
+        .unwrap()
+        .unwrap()
+        .0;
+    to_json(&Json::Obj(items.into_iter().collect()))
+}
+
 fn enable_sync(dir: &Path, shared: &Path, name: &str) {
     let mut c = load_sync_config_in(dir);
     c.enabled = true;
@@ -631,22 +654,22 @@ fn sync_moves_connections_between_computers_without_prod_or_passwords() {
     enable_sync(&a, &shared, "A");
     enable_sync(&b, &shared, "B");
     assert!(matches!(
-        sync_with(&a, &BTreeMap::new(), None),
+        sync_plain(&a, &BTreeMap::new()),
         Ok(SyncOutcome::Synced { pushed: 1.., .. })
     ));
-    let text = fs::read_to_string(shared.join(SYNC_FILE)).unwrap();
+    let text = shared_text(&shared);
     assert!(text.contains("\"dev\"") && !text.contains("\"prod\""));
     assert!(!text.to_lowercase().contains("password\":\""));
 
-    sync_with(&b, &BTreeMap::new(), None).unwrap();
+    sync_plain(&b, &BTreeMap::new()).unwrap();
     let on_b = load_profiles_in(&b);
     assert_eq!(on_b.len(), 1);
     assert_eq!(on_b[0].name, "dev");
 
     // Deleting on B reaches A; A's local PROD connection is untouched.
     save_profiles_in(&b, &[]).unwrap();
-    sync_with(&b, &BTreeMap::new(), None).unwrap();
-    sync_with(&a, &BTreeMap::new(), None).unwrap();
+    sync_plain(&b, &BTreeMap::new()).unwrap();
+    sync_plain(&a, &BTreeMap::new()).unwrap();
     let on_a = load_profiles_in(&a);
     assert_eq!(on_a.len(), 1);
     assert_eq!(on_a[0].name, "prod");
@@ -665,12 +688,12 @@ fn approved_prod_connection_syncs() {
     let mut c = load_sync_config_in(&a);
     c.prod_approved = vec!["2".into()];
     save_sync_config_in(&a, &c).unwrap();
-    sync_with(&a, &BTreeMap::new(), None).unwrap();
-    sync_with(&b, &BTreeMap::new(), None).unwrap();
+    sync_plain(&a, &BTreeMap::new()).unwrap();
+    sync_plain(&b, &BTreeMap::new()).unwrap();
     assert_eq!(load_profiles_in(&b)[0].name, "prod");
     // Still there after another round on A (the base keeps it approved).
-    sync_with(&a, &BTreeMap::new(), None).unwrap();
-    assert!(read_sync_file(&shared.join(SYNC_FILE))
+    sync_plain(&a, &BTreeMap::new()).unwrap();
+    assert!(read_sync_file(&shared.join(SYNC_FILE), Some(PASS))
         .unwrap()
         .unwrap()
         .0
@@ -683,8 +706,8 @@ fn change_on_both_sides_is_a_conflict_until_chosen() {
     save_profiles_in(&a, &[sync_profile("1", "dev", ConnectionEnvironment::None)]).unwrap();
     enable_sync(&a, &shared, "A");
     enable_sync(&b, &shared, "B");
-    sync_with(&a, &BTreeMap::new(), None).unwrap();
-    sync_with(&b, &BTreeMap::new(), None).unwrap();
+    sync_plain(&a, &BTreeMap::new()).unwrap();
+    sync_plain(&b, &BTreeMap::new()).unwrap();
 
     save_profiles_in(
         &a,
@@ -696,9 +719,9 @@ fn change_on_both_sides_is_a_conflict_until_chosen() {
         &[sync_profile("1", "from-b", ConnectionEnvironment::None)],
     )
     .unwrap();
-    sync_with(&a, &BTreeMap::new(), None).unwrap();
+    sync_plain(&a, &BTreeMap::new()).unwrap();
 
-    let Ok(SyncOutcome::Conflicts(conflicts)) = sync_with(&b, &BTreeMap::new(), None) else {
+    let Ok(SyncOutcome::Conflicts(conflicts)) = sync_plain(&b, &BTreeMap::new()) else {
         panic!("expected a conflict");
     };
     assert_eq!(conflicts.len(), 1);
@@ -707,7 +730,7 @@ fn change_on_both_sides_is_a_conflict_until_chosen() {
     assert_eq!(load_profiles_in(&b)[0].name, "from-b");
 
     let choices = BTreeMap::from([("conn:1".to_string(), Choice::Remote)]);
-    sync_with(&b, &choices, None).unwrap();
+    sync_plain(&b, &choices).unwrap();
     assert_eq!(load_profiles_in(&b)[0].name, "from-a");
 }
 
@@ -718,9 +741,9 @@ fn first_sync_merges_both_sides_and_keeps_old_versions() {
     save_profiles_in(&b, &[sync_profile("2", "two", ConnectionEnvironment::None)]).unwrap();
     enable_sync(&a, &shared, "A");
     enable_sync(&b, &shared, "B");
-    sync_with(&a, &BTreeMap::new(), None).unwrap();
-    sync_with(&b, &BTreeMap::new(), None).unwrap();
-    sync_with(&a, &BTreeMap::new(), None).unwrap();
+    sync_plain(&a, &BTreeMap::new()).unwrap();
+    sync_plain(&b, &BTreeMap::new()).unwrap();
+    sync_plain(&a, &BTreeMap::new()).unwrap();
     assert_eq!(load_profiles_in(&a).len(), 2);
     assert_eq!(load_profiles_in(&b).len(), 2);
     assert!(shared.join("versions").is_dir());
@@ -744,8 +767,8 @@ fn favorites_and_appearance_sync_but_plain_history_does_not() {
     .unwrap();
     enable_sync(&a, &shared, "A");
     enable_sync(&b, &shared, "B");
-    sync_with(&a, &BTreeMap::new(), None).unwrap();
-    sync_with(&b, &BTreeMap::new(), None).unwrap();
+    sync_plain(&a, &BTreeMap::new()).unwrap();
+    sync_plain(&b, &BTreeMap::new()).unwrap();
     let on_b = load_history_in(&b);
     assert_eq!(on_b.len(), 1);
     assert_eq!(on_b[0].sql, "select 2 from dual");
@@ -762,12 +785,21 @@ fn kilat_file_export_and_import_never_delete() {
     )
     .unwrap();
     let file = a.join("backup.kilat");
-    export_kilat_file(&a, &file, SyncCategories::default(), &Default::default()).unwrap();
-    import_kilat_file(&b, &file, SyncCategories::default(), &BTreeMap::new()).unwrap();
+    export_kilat_file(
+        &a,
+        &file,
+        SyncCategories::default(),
+        &Default::default(),
+        None,
+    )
+    .unwrap();
+    import_kilat_file(&b, &file, SyncCategories::default(), &BTreeMap::new(), None).unwrap();
     assert_eq!(load_profiles_in(&b).len(), 2);
-    assert!(read_sync_file(&a.join("nope.kilat")).unwrap().is_none());
+    assert!(read_sync_file(&a.join("nope.kilat"), None)
+        .unwrap()
+        .is_none());
     fs::write(a.join("bad.kilat"), "{}").unwrap();
-    assert!(read_sync_file(&a.join("bad.kilat")).is_err());
+    assert!(read_sync_file(&a.join("bad.kilat"), None).is_err());
 }
 
 #[test]
@@ -784,13 +816,13 @@ fn tools_and_grid_sync_but_never_the_start_command() {
     save_auto_count_in(&a, true).unwrap();
     enable_sync(&a, &shared, "A");
     enable_sync(&b, &shared, "B");
-    sync_with(&a, &BTreeMap::new(), None).unwrap();
+    sync_plain(&a, &BTreeMap::new()).unwrap();
 
-    let text = fs::read_to_string(shared.join(SYNC_FILE)).unwrap();
+    let text = shared_text(&shared);
     assert!(text.contains("Cache") && !text.contains("Prod cache"));
     assert!(!text.contains("server_command") && !text.contains("redis-server"));
 
-    sync_with(&b, &BTreeMap::new(), None).unwrap();
+    sync_plain(&b, &BTreeMap::new()).unwrap();
     let on_b = load_tools_in(&b);
     assert_eq!(on_b.len(), 1);
     assert_eq!(on_b[0].name, "Cache");
@@ -798,7 +830,10 @@ fn tools_and_grid_sync_but_never_the_start_command() {
     assert!(load_auto_count_in(&b));
 
     // A hand-edited file cannot plant a start command either.
-    let mut v = read_sync_file(&shared.join(SYNC_FILE)).unwrap().unwrap().0;
+    let mut v = read_sync_file(&shared.join(SYNC_FILE), Some(PASS))
+        .unwrap()
+        .unwrap()
+        .0;
     let key = v.keys().find(|k| k.starts_with("tool:")).unwrap().clone();
     if let Some(Json::Obj(pairs)) = v.get_mut(&key) {
         pairs.push(("server_command".into(), Json::Str("rm -rf /".into())));
@@ -806,7 +841,7 @@ fn tools_and_grid_sync_but_never_the_start_command() {
     }
     let file = a.join("planted.kilat");
     fs::write(&file, to_json(&sync_file_json(&v, "x"))).unwrap();
-    import_kilat_file(&b, &file, SyncCategories::default(), &BTreeMap::new()).unwrap();
+    import_kilat_file(&b, &file, SyncCategories::default(), &BTreeMap::new(), None).unwrap();
     let on_b = load_tools_in(&b);
     assert!(on_b
         .iter()
@@ -840,21 +875,21 @@ fn passwords_sync_only_encrypted_and_only_with_the_right_passphrase() {
     }
     let secrets_a = SyncSecrets {
         store: &store_a,
-        passphrase: "correct horse",
+        passphrase: PASS,
     };
     let secrets_b = SyncSecrets {
         store: &store_b,
-        passphrase: "correct horse",
+        passphrase: PASS,
     };
     assert_eq!(check_passphrase(&shared, "anything"), Ok(false));
-    // No passphrase on this computer: refused, nothing written.
-    assert!(sync_with(&a, &BTreeMap::new(), None).is_err());
-    sync_with(&a, &BTreeMap::new(), Some(&secrets_a)).unwrap();
+    sync_with(&a, &BTreeMap::new(), &secrets_a).unwrap();
 
-    let text = fs::read_to_string(shared.join(SYNC_FILE)).unwrap();
-    assert!(text.contains("secret:1") && text.contains("\"crypto\""));
+    let text = shared_text(&shared);
+    let raw = fs::read_to_string(shared.join(SYNC_FILE)).unwrap();
+    assert!(raw.contains("\"crypto\"") && !raw.contains("secret:1"));
+    assert!(text.contains("secret:1"));
     assert!(!text.contains("hunter2") && !text.contains("prod-pw") && !text.contains("secret:2"));
-    assert_eq!(check_passphrase(&shared, "correct horse"), Ok(true));
+    assert_eq!(check_passphrase(&shared, PASS), Ok(true));
     assert!(check_passphrase(&shared, "wrong").is_err());
 
     // Wrong passphrase on B: refused, B's keychain untouched.
@@ -862,10 +897,10 @@ fn passwords_sync_only_encrypted_and_only_with_the_right_passphrase() {
         store: &store_b,
         passphrase: "wrong",
     };
-    assert!(sync_with(&b, &BTreeMap::new(), Some(&wrong)).is_err());
+    assert!(sync_with(&b, &BTreeMap::new(), &wrong).is_err());
     assert!(store_b.is_empty());
 
-    sync_with(&b, &BTreeMap::new(), Some(&secrets_b)).unwrap();
+    sync_with(&b, &BTreeMap::new(), &secrets_b).unwrap();
     assert_eq!(
         store_b
             .get("1")
@@ -876,8 +911,8 @@ fn passwords_sync_only_encrypted_and_only_with_the_right_passphrase() {
 
     // B clears its keychain entry: the password stays in the file for A.
     store_b.delete("1").unwrap();
-    sync_with(&b, &BTreeMap::new(), Some(&secrets_b)).unwrap();
-    assert!(read_sync_file(&shared.join(SYNC_FILE))
+    sync_with(&b, &BTreeMap::new(), &secrets_b).unwrap();
+    assert!(read_sync_file(&shared.join(SYNC_FILE), Some(PASS))
         .unwrap()
         .unwrap()
         .0
@@ -892,9 +927,9 @@ fn other_computers_extensions_are_only_suggested() {
     let mut ext = load_extensions_in(&a);
     ext.install("redis");
     save_extensions_in(&a, &ext).unwrap();
-    sync_with(&a, &BTreeMap::new(), None).unwrap();
-    sync_with(&b, &BTreeMap::new(), None).unwrap();
-    sync_with(&a, &BTreeMap::new(), None).unwrap();
+    sync_plain(&a, &BTreeMap::new()).unwrap();
+    sync_plain(&b, &BTreeMap::new()).unwrap();
+    sync_plain(&a, &BTreeMap::new()).unwrap();
     let suggestions = extension_suggestions(&b);
     assert_eq!(suggestions.len(), 1);
     assert_eq!(suggestions[0].0, "A");
@@ -921,4 +956,77 @@ fn sync_config_keeps_every_toggle() {
     let back = load_sync_config_in(&dir);
     assert_eq!(back.categories, c.categories);
     assert_eq!(back.prod_approved, c.prod_approved);
+}
+
+#[test]
+fn the_sync_file_is_sealed_and_a_plain_one_is_upgraded() {
+    let (a, b, shared) = (sync_dir("ea1"), sync_dir("eb1"), sync_dir("eshared1"));
+    save_profiles_in(
+        &a,
+        &[sync_profile(
+            "1",
+            "secret-host-name",
+            ConnectionEnvironment::None,
+        )],
+    )
+    .unwrap();
+    enable_sync(&a, &shared, "A");
+    enable_sync(&b, &shared, "B");
+    sync_plain(&a, &BTreeMap::new()).unwrap();
+    let raw = fs::read_to_string(shared.join(SYNC_FILE)).unwrap();
+    assert!(raw.contains("\"version\":2") || raw.contains("\"version\": 2"));
+    assert!(!raw.contains("secret-host-name") && !raw.contains("h:1521"));
+    // Without the passphrase the file stays shut.
+    assert_eq!(
+        read_sync_file(&shared.join(SYNC_FILE), None).unwrap_err(),
+        ENCRYPTED_FILE
+    );
+    assert!(read_sync_file(&shared.join(SYNC_FILE), Some("nope")).is_err());
+    sync_plain(&b, &BTreeMap::new()).unwrap();
+    assert_eq!(load_profiles_in(&b).len(), 1);
+
+    // A plain file from an older Kilat is read, then replaced by a sealed
+    // one; its plain backups are removed.
+    let (c, old) = (sync_dir("ec1"), sync_dir("eold1"));
+    let items: Items = [("conn:9".to_string(), Json::Str("legacy-item".into()))]
+        .into_iter()
+        .collect();
+    fs::write(old.join(SYNC_FILE), to_json(&sync_file_json(&items, "old"))).unwrap();
+    fs::create_dir_all(old.join("versions")).unwrap();
+    fs::write(old.join("versions").join("kilat-sync-1.json"), "plain").unwrap();
+    enable_sync(&c, &old, "C");
+    sync_plain(&c, &BTreeMap::new()).unwrap();
+    let raw = fs::read_to_string(old.join(SYNC_FILE)).unwrap();
+    assert!(!raw.contains("legacy-item") && raw.contains("payload"));
+    assert!(!old.join("versions").exists());
+    assert!(read_sync_file(&old.join(SYNC_FILE), Some(PASS))
+        .unwrap()
+        .unwrap()
+        .0
+        .contains_key("conn:9"));
+}
+
+#[test]
+fn a_sealed_export_needs_the_passphrase_to_import() {
+    let (a, b) = (sync_dir("ea2"), sync_dir("eb2"));
+    save_profiles_in(&a, &[sync_profile("1", "one", ConnectionEnvironment::None)]).unwrap();
+    let file = a.join("sealed.kilat");
+    export_kilat_file(
+        &a,
+        &file,
+        SyncCategories::default(),
+        &Default::default(),
+        Some(PASS),
+    )
+    .unwrap();
+    assert!(!fs::read_to_string(&file).unwrap().contains("h:1521"));
+    let none = BTreeMap::new();
+    assert_eq!(
+        import_kilat_file(&b, &file, SyncCategories::default(), &none, None).unwrap_err(),
+        ENCRYPTED_FILE
+    );
+    assert!(import_kilat_file(&b, &file, SyncCategories::default(), &none, Some("x")).is_err());
+    assert!(load_profiles_in(&b).is_empty());
+    import_kilat_file(&b, &file, SyncCategories::default(), &none, Some(PASS)).unwrap();
+    assert_eq!(load_profiles_in(&b).len(), 1);
 }

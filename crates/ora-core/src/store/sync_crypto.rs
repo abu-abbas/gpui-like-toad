@@ -94,6 +94,26 @@ pub fn decrypt(key: &SyncKey, id: &str, text: &str) -> Option<String> {
     String::from_utf8(plain).ok()
 }
 
+/// Seal a whole document (the sync file's payload). Unlike [`encrypt`] the
+/// nonce is random: the merge works on the decrypted items, so nothing needs
+/// the text to be stable, and a random nonce reveals nothing at all.
+pub fn seal_blob(key: &SyncKey, aad: &str, plaintext: &str) -> String {
+    let mut nonce_bytes = [0u8; 24];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let sealed = XChaCha20Poly1305::new((&key.0).into())
+        .encrypt(
+            XNonce::from_slice(&nonce_bytes),
+            Payload {
+                msg: plaintext.as_bytes(),
+                aad: aad.as_bytes(),
+            },
+        )
+        .expect("encrypting in memory cannot fail");
+    let mut out = nonce_bytes.to_vec();
+    out.extend(sealed);
+    encode(&out)
+}
+
 const CHECK_ID: &str = "kilat-sync-check";
 
 /// Stored next to the salt so a wrong passphrase is caught up front.
@@ -125,5 +145,10 @@ mod tests {
         assert!(verify_check(&key, &check_token(&key)));
         assert!(!verify_check(&wrong, &check_token(&key)));
         assert_eq!(decrypt(&key, "p1", "not base64!"), None);
+
+        let a = seal_blob(&key, "doc", "{\"x\":1}");
+        assert_ne!(a, seal_blob(&key, "doc", "{\"x\":1}"));
+        assert_eq!(decrypt(&key, "doc", &a).as_deref(), Some("{\"x\":1}"));
+        assert_eq!(decrypt(&key, "other", &a), None);
     }
 }
