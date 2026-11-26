@@ -577,7 +577,7 @@ impl Workbench {
         let enabled = sync.config.enabled;
         let running = sync.running;
         let mut page = div().flex().flex_col().gap(px(SPACE_4)).child(caption_text(
-            "Keep your connections, favorites and appearance the same on every computer. Passwords stay in this computer's Keychain and are never synced.".into(),
+            "Keep your connections, favorites and appearance the same on every computer. Passwords stay in this computer's Keychain unless you turn on encrypted password sync below.".into(),
             theme,
         ));
 
@@ -661,9 +661,7 @@ impl Workbench {
             } else {
                 format!("Last synced {}", ago(sync.config.last_synced))
             };
-            page = page.child(setting_group(
-                theme,
-                [
+            let mut rows = vec![
                     setting_row_owned(
                         if is_drive { "Google Drive" } else { "Folder" }.into(),
                         format!("{folder}\n{status}"),
@@ -703,7 +701,7 @@ impl Workbench {
                     ),
                     setting_row_owned(
                         "Sync automatically".into(),
-                        "Checks every minute and syncs as soon as something changed here or in the folder.".into(),
+                        "Checks every minute and syncs as soon as something changed here or in the folder or Drive.".into(),
                         Checkbox::new("sync-auto")
                             .small()
                             .checked(sync.config.auto)
@@ -713,8 +711,32 @@ impl Workbench {
                             })),
                         theme,
                     ),
-                ],
-            ));
+            ];
+            if !is_drive && crate::gdrive::available() {
+                let waiting = sync.drive_login.is_some();
+                rows.push(setting_row_owned(
+                    "Use Google Drive instead".into(),
+                    if waiting {
+                        "Finish signing in in your browser. Kilat waits up to 5 minutes."
+                    } else {
+                        "Sign in with Google and keep the sync file in a Kilat Sync folder on Drive."
+                    }
+                    .into(),
+                    Button::new("sync-switch-google")
+                        .small()
+                        .label(if waiting { "Cancel" } else { "Connect Google Drive…" })
+                        .disabled(running)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if waiting {
+                                this.sync_drive_cancel(cx)
+                            } else {
+                                this.sync_drive_connect(cx)
+                            }
+                        })),
+                    theme,
+                ));
+            }
+            page = page.child(setting_group(theme, rows));
 
             let cats = sync.config.categories;
             let toggle = |id: &'static str,
