@@ -7,6 +7,9 @@ mod objects;
 mod query;
 mod transaction;
 
+/// A heartbeat tick this much later than due means the computer slept.
+const WAKE_GAP: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl Workbench {
     /// Index of the tab the finished operation belongs to: the tab it was
     /// started from if it still exists, else the active tab.
@@ -255,10 +258,23 @@ impl Workbench {
     }
 
     pub(super) fn start_heartbeat(cx: &mut Context<Self>) {
-        cx.spawn(async move |view, cx| loop {
+        cx.spawn(async move |view, cx| {
+            let mut last_tick = std::time::Instant::now();
+            loop {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(15))
                 .await;
+            // A tick far later than 15 s means the computer slept (or the
+            // app was suspended): the sockets are most likely dead.
+            let gap = last_tick.elapsed();
+            last_tick = std::time::Instant::now();
+            let woke = gap >= WAKE_GAP;
+            if woke {
+                crate::error_log::append(&format!(
+                    "Heartbeat resumed after {} s (computer asleep or app suspended); checking connections.",
+                    gap.as_secs()
+                ));
+            }
             let Ok(requests) = view.update(cx, |this, _| {
                 std::iter::once(&this.conn)
                     .chain(&this.parked)
@@ -280,12 +296,18 @@ impl Workbench {
                     .spawn(async move { rx.recv() })
                     .await;
                 if let Ok(Response::ConnectionLost(reason)) = result {
+                    let reason = if woke {
+                        format!("{reason} (found after the computer woke from sleep)")
+                    } else {
+                        format!("{reason} (found by the 15 s keep-alive check)")
+                    };
                     let _ = view.update(cx, |this, cx| {
                         if this.op_is_current(id, generation) {
                             this.connection_was_lost(id, reason, cx);
                         }
                     });
                 }
+            }
             }
         })
         .detach();
@@ -311,6 +333,7 @@ impl Workbench {
             );
         let connection = conn.label();
         conn.connection_lost = true;
+        conn.lost_reason = Some(error.clone());
         conn.db = None;
         conn.busy = false;
         conn.abandoned = false;
@@ -335,7 +358,11 @@ impl Workbench {
         self.clear_edit_marks_for(cid, false, cx);
         self.invalidate_connection_results_for(cid, cx);
         self.set_status_for(cid, "Connection lost. Reconnect to continue.".to_string());
-        self.push_message_for(cid, format!("Connection lost ({connection}): {error}"));
+        let text = format!("Connection lost ({connection}): {error}");
+        // Always keep the reason in errors.log: a lost connection is the
+        // first thing to check when everything looks disconnected.
+        crate::error_log::append(&text);
+        self.push_message_with(cid, text, true);
         if had_writes {
             self.push_message_for(
                 cid,
@@ -344,7 +371,62 @@ impl Workbench {
             );
         }
         self.tx_step_done(cid, false, cx);
+        if !had_writes {
+            self.schedule_auto_reconnect(cid, cx);
+        }
         cx.notify();
+    }
+
+    /// Try to log in again by itself after an idle drop (never after a
+    /// write that may have reached the server): at 2 s, 8 s and 30 s, so a
+    /// Mac that just woke has time to bring its network back. Only the
+    /// connection in front is retried; the others wait for their banner's
+    /// Reconnect button, so no background login steals the view.
+    fn schedule_auto_reconnect(&mut self, cid: u64, cx: &mut Context<Self>) {
+        const DELAYS: [u64; 3] = [2, 8, 30];
+        let Some(conn) = self.conn_mut(cid) else {
+            return;
+        };
+        let Some(delay) = DELAYS.get(usize::from(conn.auto_reconnects)).copied() else {
+            return;
+        };
+        conn.auto_reconnects += 1;
+        let handle = self.window_handle;
+        cx.spawn(async move |view, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(delay))
+                .await;
+            let _ = cx.update_window(handle, |_, window, cx| {
+                let _ = view.update(cx, |this, cx| this.try_auto_reconnect(cid, window, cx));
+            });
+        })
+        .detach();
+    }
+
+    fn try_auto_reconnect(&mut self, cid: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let ready = self.conn.id == cid
+            && self.conn.connection_lost
+            && !self.conn.busy
+            && !self.connection_form.show_connection_form;
+        if !ready {
+            return;
+        }
+        let Some(last) = self.conn.last_connection.as_ref() else {
+            return;
+        };
+        // Without a saved password, reconnecting would open the password
+        // form; leave that to the user's click.
+        let Some(profile) = last.profile_ix.and_then(|ix| self.profiles.get(ix)) else {
+            return;
+        };
+        if profile.kind.capabilities().password && !profile.save_password {
+            return;
+        }
+        self.push_message_for(cid, "Reconnecting automatically…".to_string());
+        self.reconnect_last(window, cx);
+        // If this attempt fails too, the connection stays lost: try again
+        // later (the next attempt stops by itself once it is connected).
+        self.schedule_auto_reconnect(cid, cx);
     }
 
     /// The worker finally answered an operation the user stopped waiting
