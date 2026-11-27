@@ -13,6 +13,8 @@ impl Workbench {
         self.set_conn_state(cid, |c| {
             c.session = Some(info.clone());
             c.connection_lost = false;
+            c.lost_reason = None;
+            c.auto_reconnects = 0;
             c.current_schema = None;
             c.connect_error = None;
             c.status = format!("Connected as {}.", info.user);

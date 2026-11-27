@@ -159,6 +159,66 @@ impl Workbench {
         )
     }
 
+    /// Banner above a tab whose connection dropped: the tab and its SQL
+    /// stay as they are, and one click logs in again with the saved login.
+    fn render_lost_banner(
+        &self,
+        theme: &gpui_kit::component::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        let cid = self.tabs.get(self.active_tab)?.conn?;
+        let conn = self.conn_by_id(cid)?;
+        if !conn.connection_lost {
+            return None;
+        }
+        let name = conn.label();
+        let detail = if conn.busy {
+            "Reconnecting…".to_string()
+        } else {
+            conn.lost_reason
+                .clone()
+                .unwrap_or_else(|| "Connection lost.".to_string())
+        };
+        let busy = conn.busy;
+        Some(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(SPACE_2))
+                .px(px(SPACE_3))
+                .py(px(SPACE_1))
+                .bg(theme.warning.opacity(0.15))
+                .border_b_1()
+                .border_color(theme.border)
+                .child(icon(IconName::Plug, 14., theme.warning))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(format!(
+                            "Disconnected from {name}. Your tabs and SQL are kept. {detail}"
+                        )),
+                )
+                .child(
+                    Button::new("lost-banner-reconnect")
+                        .small()
+                        .outline()
+                        .icon(IconName::RefreshCw)
+                        .label("Reconnect")
+                        .disabled(busy)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.activate_conn(cid, cx);
+                            this.reconnect_last(window, cx);
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn render_main(
         &self,
         theme: &gpui_kit::component::Theme,
@@ -180,6 +240,11 @@ impl Workbench {
         }
         if !self.show_empty_workspace || self.conn.uncommitted {
             main = main.child(self.render_toolbar(theme, cx));
+        }
+        if !self.show_empty_workspace && !self.whats_new_active() {
+            if let Some(banner) = self.render_lost_banner(theme, cx) {
+                main = main.child(banner);
+            }
         }
         // The split wrappers below take `min_h(0)`: as flex items they
         // otherwise grow to their content (e.g. a long Messages list),

@@ -257,6 +257,10 @@ struct ConnState {
     /// extension; shown in the status bar.
     extension_label: Option<String>,
     connection_lost: bool,
+    /// Why the connection was dropped, shown in the lost-connection banner.
+    lost_reason: Option<String>,
+    /// Automatic reconnect attempts since the connection was lost.
+    auto_reconnects: u8,
     last_connection: Option<LastConnection>,
     /// Tab (by id) that the in-flight operation writes its result into, so
     /// switching tabs mid-query never lands the result in the wrong tab.
@@ -304,6 +308,8 @@ impl ConnState {
             connect_error: None,
             extension_label: None,
             connection_lost: false,
+            lost_reason: None,
+            auto_reconnects: 0,
             last_connection: None,
             pending_tab: None,
             cancel_script: None,
