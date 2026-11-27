@@ -203,6 +203,16 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.needs_binds(&sql) {
+            return self.ask_binds(sql, BindThen::DryRun, cx);
+        }
+        self.open_dryrun_resolved(sql, cx);
+    }
+
+    pub(super) fn open_dryrun_resolved(&mut self, sql: String, cx: &mut Context<Self>) {
+        if self.conn.busy || !self.dryrun_available() {
+            return;
+        }
         let Some(program) = store::remote_install(ID).map(|install| install.path) else {
             self.push_message("Install Dry-run in Settings > Extensions first.".to_string());
             cx.notify();
