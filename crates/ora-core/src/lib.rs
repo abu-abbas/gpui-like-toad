@@ -8,6 +8,7 @@
 //! install). The GUI crate only talks to [`client::DbClient`], so the driver
 //! can be swapped without touching any UI code.
 
+pub mod binds;
 pub mod client;
 pub mod completion;
 pub mod copy;

@@ -46,6 +46,7 @@ use ora_core::{
     QueryResult, SchemaObject, DEFAULT_MAX_ROWS, MAX_PAGE_LIMIT,
 };
 
+use self::binds::BindThen;
 use crate::completion::SqlCompletionProvider;
 use crate::plan;
 use crate::results::ResultsDelegate;
@@ -61,6 +62,7 @@ use crate::worker::{DbHandle, ExportFormat, Job, Password, Response};
 
 pub use transaction::request_quit;
 
+mod binds;
 mod cell_edit;
 mod chrome;
 mod clob_preview;
@@ -425,6 +427,9 @@ struct QueryTab {
     /// Editor text as last saved to a file (or as first generated); a SQL
     /// tab whose text differs holds unsaved work.
     saved_text: String,
+    /// The last values typed for each bind variable (keyed by upper-cased
+    /// name), offered again the next time a statement with that bind runs.
+    bind_values: std::collections::HashMap<String, ora_core::binds::BindValue>,
 }
 
 impl QueryTab {
@@ -471,6 +476,7 @@ impl QueryTab {
             data: None,
             conn: None,
             saved_text: default_sql.to_string(),
+            bind_values: std::collections::HashMap::new(),
         }
     }
 
@@ -547,6 +553,8 @@ pub struct Workbench {
     /// Auto-save: reload the grid once the automatic commit is done.
     reload_after_commit: bool,
     object_dialog: Option<ObjectDialog>,
+    /// "Bind variables" dialog shown before a statement with `:name` runs.
+    bind_dialog: Option<binds::BindDialog>,
     /// The Data Transfer wizard, while it is showing.
     transfer: Option<transfer::TransferWizard>,
     /// The Dry-run dialog, while it is showing.
@@ -674,6 +682,7 @@ impl Workbench {
             inline_edit: None,
             reload_after_commit: false,
             object_dialog: None,
+            bind_dialog: None,
             transfer: None,
             dryrun: None,
             disconnect_prompt: None,
@@ -950,6 +959,9 @@ impl Render for Workbench {
             })
             .when(self.object_dialog.is_some(), |this| {
                 this.child(self.render_object_dialog(&theme, cx))
+            })
+            .when(self.bind_dialog.is_some(), |this| {
+                this.child(self.render_bind_dialog(&theme, cx))
             })
             .when(self.transfer.is_some(), |this| {
                 this.child(self.render_transfer(&theme, cx))
