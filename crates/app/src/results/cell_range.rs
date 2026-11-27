@@ -280,6 +280,14 @@ mod tests {
     }
 
     #[test]
+    fn picked_column_copies_every_row_in_order() {
+        let mut g = grid(3);
+        g.pick_cell((0, 0), false);
+        g.pick_cell((2, 0), true);
+        assert_eq!(g.picked_cells_text().as_deref(), Some("a0\na1\na2"));
+    }
+
+    #[test]
     fn picked_cells_copy_as_value_or_tsv_block() {
         let mut g = grid(2);
         g.pick_cell((1, 0), false);
