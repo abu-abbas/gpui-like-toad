@@ -737,6 +737,11 @@ impl ResultsDelegate {
                 cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
             }
         };
+        // Several cells picked (a column, a row span or a rectangle): Copy
+        // and Copy Cell take every picked cell, not just the clicked one.
+        let multi = self.picked_cell_count() > 1;
+        let picked_text = multi.then(|| self.picked_cells_text()).flatten();
+        let cell = picked_text.clone().unwrap_or(cell);
         let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
         let values: Vec<Value> = fields.iter().map(|(_, v)| v.clone()).collect();
         let name_list = names.join(", ");
@@ -750,7 +755,7 @@ impl ResultsDelegate {
                     self.selected_tsv(Some(row_ix)).unwrap_or_default(),
                 )))
             })
-            .item(PopupMenuItem::new("Copy").on_click(clipboard(value_list)))
+            .item(PopupMenuItem::new("Copy").on_click(clipboard(picked_text.unwrap_or(value_list))))
             .item(PopupMenuItem::new("Copy Cell").on_click(clipboard(cell)))
             .item(PopupMenuItem::new("Copy Field Name").on_click(clipboard(name_list)));
         let submenu = PopupMenu::build(window, cx, move |sub, _, _| {
