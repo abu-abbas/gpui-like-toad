@@ -1096,6 +1096,16 @@ fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> Ordering {
 }
 
 impl TableDelegate for ResultsDelegate {
+    /// Trailing space after the last column, wide enough that the overlay
+    /// scrollbars never cover it when scrolled to the end.
+    fn render_last_empty_col(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div().w(px(48.)).h_full().flex_shrink_0()
+    }
+
     fn visible_rows_changed(
         &mut self,
         visible_range: std::ops::Range<usize>,
