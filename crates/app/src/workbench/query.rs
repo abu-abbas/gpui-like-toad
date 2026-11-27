@@ -162,9 +162,17 @@ impl Workbench {
                 text
             }
         };
+        if self.needs_binds(&sql) {
+            return self.ask_binds(sql, BindThen::Run, cx);
+        }
+        self.run_resolved(sql, cx);
+    }
+
+    /// F5 with the bind variables (if any) already written into `sql`.
+    pub(super) fn run_resolved(&mut self, sql: String, cx: &mut Context<Self>) {
         let statements = ora_core::sql::script_statements(&sql);
         if statements.len() < 2 {
-            return self.run_sql(sql, cx);
+            return self.run_sql_resolved(sql, cx);
         }
         self.conn.status = "Running script…".to_string();
         self.conn.pending_sql = Some(sql);
@@ -205,6 +213,13 @@ impl Workbench {
     }
 
     pub(super) fn run_sql(&mut self, sql: String, cx: &mut Context<Self>) {
+        if self.needs_binds(&sql) {
+            return self.ask_binds(sql, BindThen::RunStatement, cx);
+        }
+        self.run_sql_resolved(sql, cx);
+    }
+
+    pub(super) fn run_sql_resolved(&mut self, sql: String, cx: &mut Context<Self>) {
         if clean_statement(&sql).is_empty() {
             self.push_message("The editor is empty.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;
@@ -244,6 +259,16 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.needs_binds(&sql) {
+            return self.ask_binds(sql, BindThen::Explain, cx);
+        }
+        self.explain_resolved(sql, cx);
+    }
+
+    pub(super) fn explain_resolved(&mut self, sql: String, cx: &mut Context<Self>) {
+        if self.conn.busy || self.conn.session.is_none() {
+            return;
+        }
         self.conn.status = "Generating explain plan…".to_string();
         self.spawn_db(Job::Explain { sql }, PendingOp::Explain, cx);
     }
@@ -272,6 +297,16 @@ impl Workbench {
             self.push_message("The editor is empty.".to_string());
             self.active_tab_mut().results_tab = ResultsTab::Messages;
             cx.notify();
+            return;
+        }
+        if self.needs_binds(&sql) {
+            return self.ask_binds(sql, BindThen::ExplainAnalyze, cx);
+        }
+        self.explain_analyze_resolved(sql, cx);
+    }
+
+    pub(super) fn explain_analyze_resolved(&mut self, sql: String, cx: &mut Context<Self>) {
+        if self.conn.busy || self.conn.session.is_none() {
             return;
         }
         let read = ora_core::sql::is_read_query(&sql);
