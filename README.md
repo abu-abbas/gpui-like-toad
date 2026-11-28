@@ -1,10 +1,30 @@
 # Kilat
 
-A fast, lightweight desktop database client for **Oracle**, written in Rust with [gpui-kit](https://gpui-kit.com). One binary, no Oracle Client or Instant Client needed: Oracle connections use the thin driver, which speaks Oracle Net directly. **SQLite, PostgreSQL, MySQL/MariaDB and SQL Server**, the **Redis** and **MailHog** developer tools, and **Dry-run** for Oracle are signed extensions you install from Settings > Extensions.
+A fast, lightweight desktop database client for **Oracle**, written in Rust with [gpui-kit](https://gpui-kit.com). One binary, no Oracle Client or Instant Client needed: Oracle connections use the thin driver, which speaks Oracle Net directly.
+
+Everything that is not Oracle is an **optional extension** you install from Settings > Extensions: **SQLite, PostgreSQL, MySQL/MariaDB and SQL Server**, the **Redis** and **MailHog** developer tools, and **Dry-run** for Oracle. If you only need Oracle, you install nothing else and nothing else is in the app (see [Lightweight by design](#lightweight-by-design-extensions)).
 
 The explorer works like Toad (pick a schema, then browse objects by type), the connection sidebar and dialog follow Navicat, and the data grid borrows from TablePlus.
 
 ![Kilat with a table open](docs/screenshots/data-tab.png)
+
+## Lightweight by design: extensions
+
+A fresh Kilat is an Oracle client and nothing more. The other database drivers and the developer tools are separate small programs that Kilat downloads only when you ask for them, so the app you download stays small and starts fast, and you never ship code for engines you do not use.
+
+| What | Where it lives | Needs |
+|---|---|---|
+| Oracle (Basic and TNS), explorer, data grid, SQL editor, Data Transfer, Settings Sync, updates | Built into the app | Nothing |
+| SQLite, PostgreSQL, MySQL/MariaDB, SQL Server | Extensions | Settings > Extensions > Install |
+| Redis, MailHog (Developer Tools) | Extensions | Settings > Extensions > Install |
+| Dry-run for Oracle | Extension | Settings > Extensions > Install |
+
+How it works:
+
+- **Install, Update and Uninstall** are one click each in **Settings > Extensions**. Kilat downloads the program for your system from this repository's Releases and checks its SHA-256 checksum and minisign signature against the same [release-key.pub](release-key.pub) as the app before it runs anything.
+- An extension is its own program, started when you use it and talking to Kilat over a small protocol ([docs/extension-protocol.md](docs/extension-protocol.md), [docs/extension-ui.md](docs/extension-ui.md)). A crash in an extension shows up as a lost connection; it does not take the app down.
+- Extensions have **their own versions and releases**, separate from the app. Some need a minimum Kilat version: update Kilat first if an extension does not install. Maintainers: see [docs/extension-release.md](docs/extension-release.md).
+- A saved connection whose extension is not installed shows as a grey row; clicking it opens Settings > Extensions.
 
 ## Features
 
@@ -12,19 +32,19 @@ The explorer works like Toad (pick a schema, then browse objects by type), the c
 
 - **Oracle**, as **Oracle · Basic** (host, port and service name as separate fields) or **Oracle · TNS** (a `tnsnames.ora` alias or a full connect descriptor), optionally as SYSDBA.
 - Works with old accounts that only have a **10G password verifier**, which the upstream thin driver refuses (see [vendor/oracledb/PATCHES.md](vendor/oracledb/PATCHES.md)).
-- **Extensions** (Settings > Extensions, one click Install, Update and Uninstall; each download is checked against its SHA-256 checksum and minisign signature):
+- **Other engines, as extensions** (see above):
   - **SQLite**: pick a database file with Browse. Changes are kept in a transaction until you Commit or Rollback.
   - **PostgreSQL** and **MySQL/MariaDB**: browse, edit rows, Data Transfer, and **Explain analyze** (the statement runs in a transaction that is always rolled back).
-  - **SQL Server**: browse every database of a server, each data tab bound to its own database; read-only grid for now.
+  - **SQL Server**: browse every database of a server, each data tab bound to its own database; read-only grid for now. Old servers may need the **Allow legacy TLS** option.
   - **Redis** and **MailHog** under Developer Tools, with an optional local server started by the extension.
-  - **Dry-run** for Oracle: runs one `UPDATE` or `DELETE` without committing and shows the rows it would change, with an undo script.
-- A connection whose extension is not installed shows as a grey row; clicking it opens Settings > Extensions.
+  - **Dry-run** for Oracle: runs one `UPDATE` or `DELETE` without committing and shows the rows it would change, with an undo script and an Export .sql. See [docs/dry-run.md](docs/dry-run.md).
 - **Several connections open at once**, each with its own worker thread. Tabs belong to their connection; the connection pill in a SQL tab switches it to another open connection.
+- **Connection lost** is handled in the open: a banner, automatic reconnect attempts and an entry in the error log, instead of a silent failure.
 - **Folders** in the Connections sidebar: create, rename in place, colour, nest, drag connections between them.
 - **Environment flag** per connection: DEV (green), STAGING (yellow) or PROD (red), shown next to the name.
-- **Read Only** connections refuse edits, deletes, imports and other writes. **Confirm production operations** asks before every write on that connection.
+- **Read Only** connections refuse edits, deletes, imports and other writes. **Confirm production operations** asks before every write on that connection. Open transactions are marked in the sidebar, and disconnecting with uncommitted changes asks first.
 - **Save password** stores the password in the OS keychain (macOS Keychain, Windows Credential Manager, Secret Service on Linux). It is never written to `connections.json`.
-- **Import connections** from a Kilat JSON export or from a Toad for Oracle login file (`toadForOracleLogin*.txt`); imported Toad logins land in a "Toad" folder without passwords. **Export Kilat connections** writes a JSON file you can import on another machine.
+- **Import connections** from a Kilat JSON export or from a Toad for Oracle login file (`toadForOracleLogin*.txt`); imported Toad logins land in a "Toad" folder without passwords. **Export Kilat connections** writes a JSON file you can import on another machine. To keep several machines in step automatically, use [Settings Sync](#settings-sync).
 
 | Connections sidebar | New connection | Advanced |
 |---|---|---|
@@ -34,9 +54,9 @@ The explorer works like Toad (pick a schema, then browse objects by type), the c
 
 ### Explorer
 
-- Schema dropdown, then an object type dropdown with counts: Tables, Views, Materialized Views, Indexes, Sequences, Procs (procedures, functions, packages), Triggers, Synonyms, Types and DB Links, plus a search box over a virtualized list. SQLite shows its tables, views, indexes and triggers.
+- Schema dropdown, then an object type dropdown with counts: Tables, Views, Materialized Views, Indexes, Sequences, Procs (procedures, functions, packages), Triggers, Synonyms, Types, DB Links and the **Recycle Bin** (Oracle), plus a search box over a virtualized list. SQLite shows its tables, views, indexes and triggers.
 - **Double click** a table or view to open its data in a new tab.
-- **Right click** for Open Data, Describe, View Script (DDL read from the data dictionary in a few quick queries; tick **Show storage** in the DDL tab for the full `DBMS_METADATA` script), Export Data (CSV or XLSX), Import Data (CSV) and, on materialized views, Refresh Materialized View.
+- **Right click** for Open Data, Describe, View Script (DDL read from the data dictionary in a few quick queries; tick **Show storage** in the DDL tab for the full `DBMS_METADATA` script), Export Data (CSV or XLSX), Import Data (CSV), **Data Transfer** and table operations. On materialized views there is also Refresh Materialized View.
 - **Quick Open** (Ctrl/Cmd+P) jumps to any table or view by name.
 
 | Object types | Right click |
@@ -45,10 +65,10 @@ The explorer works like Toad (pick a schema, then browse objects by type), the c
 
 ### Data grid
 
-- Dense, virtualized grid with **Limit/Offset** paging (1,000 rows by default) and a **Columns** picker. On Oracle the first 100 rows show as soon as they arrive while the rest of the page loads.
+- Dense, virtualized grid with **Limit/Offset** paging (1,000 rows by default), a row **Count** and a **Columns** picker. On Oracle the first 100 rows show as soon as they arrive while the rest of the page loads, and very wide tables show their first columns early.
 - **Filter bar** with AND/OR, values sent as bind variables, a SQL preview with Copy SQL and Open in SQL editor, and **Quick Filter** from a right click on a cell.
 - **Edit in place**: double click a cell or press Enter, move between cells with Tab, Shift+Tab and Enter, paste a block of cells (TSV), add, **duplicate** or delete rows. Pending changes are coloured until you Apply, and nothing is committed until you press Commit.
-- Copy rows as values, field names, INSERT/UPDATE statements or TSV.
+- Copy rows as values, field names, INSERT/UPDATE statements or TSV; the context menu copies every picked cell.
 - Bottom tabs **Data / Structure / Index / DDL**, a **Details** panel for the selected row, and an **Info** panel for the query log and errors.
 
 | Filter bar with SQL preview | Pending edits and a duplicated row |
@@ -59,15 +79,30 @@ The explorer works like Toad (pick a schema, then browse objects by type), the c
 
 ### SQL editor
 
-- Syntax highlighting, line numbers, folding and multiple tabs. **Beautify SQL**, Save SQL.
+- Syntax highlighting, line numbers, folding and multiple tabs. **Beautify SQL**, comment toggle, Save SQL.
 - **Autocomplete** as you type (or Ctrl+Space): tables after `FROM`/`JOIN`, columns after `alias.`, objects after `schema.`, keywords and functions.
 - Toad-style run keys: **Ctrl/Cmd+Enter** or **F9** runs the selection or the statement under the cursor (statements end at `;`, a blank line or a `/` line; PL/SQL blocks stay whole), **F5** runs the whole editor (or the selection) as a script, statement by statement. Results come back in a grid of up to 1,000 rows; export them as CSV or XLSX.
+- **Bind variables**: on Oracle, a statement with `:name` placeholders asks for the values before it runs.
 - **Explain Plan** as a tree plus the `DBMS_XPLAN` text (SQLite: `EXPLAIN QUERY PLAN`).
 - Explicit **Commit** and **Rollback**; there is no auto-commit. Query **History** with favourites.
 
 | Autocomplete | Explain Plan |
 |---|---|
 | ![SQL editor with autocomplete](docs/screenshots/sql-editor.png) | ![Explain plan tree and text](docs/screenshots/explain-plan.png) |
+
+### Data Transfer
+
+A Navicat-style wizard that copies tables between two open connections, or into an SQL script or CSV files. It works **across engines** (for example Oracle to PostgreSQL, with the matching extension installed): pick source and target, tick the tables, optionally map fields or filter rows, then run and watch the log. Profiles can be saved and loaded, Read Only and PROD targets are protected, and the log never contains row values or passwords. Open it from a connection or table right-click menu, or the arrows icon in a table tab. Details and limits: [docs/data-transfer.md](docs/data-transfer.md).
+
+### Settings Sync
+
+**Settings > Sync** keeps your setup in step across machines, in the spirit of VS Code's Settings Sync:
+
+- **Where**: a folder you choose (it can be inside Google Drive, OneDrive, iCloud or Dropbox) or a **Google Drive** account. You can also export and import a `.kilat` file by hand.
+- **What**: connections with their folders and environment flags, favourite queries, appearance, Developer Tools and data grid preferences. Query history is not synced. PROD connections and tools are uploaded only when you tick them one by one. The command used to start a local server is never synced, so a shared file cannot choose what runs on your machine.
+- **Encrypted**: the whole sync file is encrypted with a **sync passphrase** that is kept in your OS keychain, and saved passwords are synced only if you switch that on.
+- **Extensions** you use on one machine show up as suggestions on the others; Kilat never installs them by itself.
+- Changes merge automatically; a real conflict is shown on the Sync page for you to resolve. The status bar shows the sync state.
 
 ### App
 
@@ -129,7 +164,7 @@ To uninstall, run `sh kilat/install.sh --uninstall` from the extracted folder. C
 
 ### Updates
 
-Kilat checks GitHub Releases at most once a day (turn it off in **Settings > About Kilat**). When a newer version exists, a banner appears and a **What's new** tab lists its notes; **Update Now** there downloads it, checks its signature, replaces the app and offers **Restart**. **Check for updates** in Settings > About Kilat checks right away. Installs of version 0.1.47 or older cannot update themselves to newer versions: install the latest release by hand once, after that updates work again.
+Kilat checks GitHub Releases at most once a day (turn it off in **Settings > About Kilat**). When a newer version exists, a banner appears and a **What's new** tab lists its notes; **Update Now** there downloads it, checks its signature, replaces the app and offers **Restart**. **Check for updates** in Settings > About Kilat checks right away. Installs of version 0.1.47 or older cannot update themselves to newer versions: install the latest release by hand once, after that updates work again. Extensions are updated separately: **Settings > Extensions** shows when one has an update, and **Update all** installs every pending one.
 
 ### Check a download by hand (optional)
 
@@ -144,7 +179,7 @@ On Windows (PowerShell): `Get-FileHash .\Kilat-X.Y.Z-windows-x86_64.exe` and com
 
 ### Extensions
 
-A fresh Kilat connects to Oracle only. To use SQLite, PostgreSQL, MySQL/MariaDB, SQL Server, Redis, MailHog or Dry-run, open **Settings > Extensions** and click **Install** next to it. Kilat downloads the program for your system from this repository's Releases, checks its checksum and signature, and installs it; **Update** and **Uninstall** are on the same page. Some extensions need a minimum Kilat version, so update Kilat first if an extension does not install.
+A fresh Kilat connects to Oracle only. To use SQLite, PostgreSQL, MySQL/MariaDB, SQL Server, Redis, MailHog or Dry-run, open **Settings > Extensions** and click **Install** next to it. Kilat downloads the program for your system from this repository's Releases, checks its checksum and signature, and installs it; **Update** and **Uninstall** are on the same page. Some extensions need a minimum Kilat version, so update Kilat first if an extension does not install. More in [Lightweight by design](#lightweight-by-design-extensions).
 
 ### Where Kilat keeps its files
 
@@ -189,8 +224,8 @@ cargo test --workspace
 ```
 crates/
   ora-core/       No GUI: DbClient trait, result model, SQL dialects, filters,
-                  edits, CSV/XLSX export, CSV import, profiles, update logic,
-                  demo backend.
+                  edits, CSV/XLSX export, CSV import, profiles, Data Transfer,
+                  Settings Sync, update logic, demo backend.
   ora-driver/     DbClient for Oracle on rust-oracledb (thin mode).
   sqlite-driver/, postgres-driver/, mysql-driver/, mssql-driver/
                   DbClients for the other engines; shipped only inside their
@@ -200,6 +235,7 @@ crates/
                   mailhog, dryrun), see docs/extension-protocol.md.
   app/            gpui-kit GUI: workbench, explorer, grid, editor, settings,
                   updater, one worker thread per connection.
+extensions/       Per-extension manifest and RELEASE_NOTES.md.
 vendor/oracledb/  rust-oracledb pinned at b1adfff with the 10G verifier patch.
 ```
 
@@ -210,6 +246,10 @@ The Oracle driver is vendored because every `oracledb` release on crates.io is y
 ## Releases
 
 Releases are made by hand: run **Actions > Release > Run workflow** and type the version (for example `0.1.65`), or push a tag such as `v0.2.0`. The workflow builds Linux, Windows and macOS binaries, smoke tests `--version`, writes `SHA256SUMS`, signs every file with minisign and publishes a GitHub Release. The last five releases are kept. See [docs/release-signing.md](docs/release-signing.md). Extensions have their own workflow, **Release extension**, and their own versions; see [docs/extension-release.md](docs/extension-release.md).
+
+## Privacy
+
+See [PRIVACY.md](PRIVACY.md).
 
 ## License
 
