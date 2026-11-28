@@ -7,7 +7,7 @@
 # (sisakan 5 terakhir). Biner belum ditandatangani (code signing menyusul);
 # Windows SmartScreen akan menampilkan peringatan saat pertama kali
 # menjalankan .exe-nya, dan macOS Gatekeeper akan memblokir .app/.dmg
-# sampai dibuka sekali lewat klik-kanan -> Open. macOS juga menerbitkan
+# sampai dibuka sekali lewat klik-kanan -> Open. macOS hanya menerbitkan
 # .dmg berisi .app + symlink Applications (tinggal drag-and-drop). Bundel
 # .app diberi tanda tangan ad-hoc. Setiap rilis juga membawa SHA256SUMS dan
 # file .minisig per aset (wajib: tanpa secret MINISIGN_SECRET_KEY yang
@@ -158,7 +158,11 @@ jobs:
           "$bin" --version
           test "$("$bin" --version)" = "Kilat $VERSION"
           mkdir -p out
-          cp "$bin" "out/$out"
+          # macOS ships only the .dmg (built in the next step); the bare
+          # binary is not published. The in-app updater installs from the .dmg.
+          if [ "${{ runner.os }}" != "macOS" ]; then
+            cp "$bin" "out/$out"
+          fi
           # Linux: the in-app updater installs from a .tar.gz holding the
           # executable (the bare binary above stays for manual download).
           # The tarball also carries the launcher entry, icons and
@@ -278,7 +282,8 @@ jobs:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           ls -la out/
-          test "$(ls out/* | wc -l)" -eq 5
+          # linux binary + tar.gz, windows exe, macOS dmg
+          test "$(ls out/* | wc -l)" -eq 4
           sudo apt-get install -y minisign
           key="$RUNNER_TEMP/release.key"
           .github/scripts/check-release-key.sh release-key.pub "$key"
