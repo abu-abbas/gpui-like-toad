@@ -86,7 +86,7 @@ Download the file for your system from the [latest release](https://github.com/a
 | System | Download this | Other files in the release |
 |---|---|---|
 | Windows, x86_64 | `Kilat-X.Y.Z-windows-x86_64.exe` | |
-| macOS, Apple Silicon (M1 and later) | `Kilat-X.Y.Z-macos-arm64.dmg` | `Kilat-X.Y.Z-macos-arm64`: the bare program, used by the in-app updater |
+| macOS, Apple Silicon (M1 and later) | `Kilat-X.Y.Z-macos-arm64.dmg` | The in-app updater installs from this same `.dmg`; no bare program is published for macOS |
 | Linux, x86_64 | `Kilat-X.Y.Z-linux-x86_64.tar.gz` | `Kilat-X.Y.Z-linux-x86_64`: the bare program, for running it without installing |
 
 Every file has a `.minisig` signature next to it, plus `SHA256SUMS` and `SHA256SUMS.minisig` for the whole release. Releases named `ext-...` and `extensions-index` are extensions, not the app: Kilat downloads those itself (see [Extensions](#extensions) below).
